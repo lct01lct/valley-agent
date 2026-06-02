@@ -1,0 +1,68 @@
+2026-06-02 23:37:20.965 | INFO     | Main            | main.py:7 - Starting main agent...
+2026-06-03 00:15:47.499 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:15:54.586 | ERROR    | MaiAgent        | valley_agent.py:69 -  agent run 失败: 'ValleyAgent' object has no attribute 'agent'
+2026-06-03 00:15:54.586 | ERROR    | MaiAgent        | valley_agent.py:70 -  query: 请介绍一下你自己。
+2026-06-03 00:16:51.275 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:16:51.500 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:16:51.500 | ERROR    | MaiAgent        | valley_agent.py:50 -  初始化失败: Initializing ChatGoogleGenerativeAI requires the langchain-google-genai package. Please install it with `pip install langchain-google-genai`
+2026-06-03 00:16:58.234 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:16:58.445 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:16:58.445 | ERROR    | MaiAgent        | valley_agent.py:50 -  初始化失败: Initializing ChatGoogleGenerativeAI requires the langchain-google-genai package. Please install it with `pip install langchain-google-genai`
+2026-06-03 00:18:05.447 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:18:05.659 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:18:09.276 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:18:09.276 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:18:09.277 | INFO     | MaiAgent        | valley_agent.py:47 -  初始化完成。。。
+2026-06-03 00:18:09.278 | ERROR    | MaiAgent        | valley_agent.py:69 -  agent run 失败: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id
+2026-06-03 00:18:09.278 | ERROR    | MaiAgent        | valley_agent.py:70 -  query: 请介绍一下你自己。
+2026-06-03 00:18:57.641 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:18:57.855 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:18:58.224 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:18:58.225 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:18:58.226 | INFO     | MaiAgent        | valley_agent.py:47 -  初始化完成。。。
+2026-06-03 00:18:58.226 | ERROR    | MaiAgent        | valley_agent.py:71 -  agent run 失败: Checkpointer requires one or more of the following 'configurable' keys: thread_id, checkpoint_ns, checkpoint_id
+2026-06-03 00:18:58.226 | ERROR    | MaiAgent        | valley_agent.py:72 -  query: 请介绍一下你自己。
+2026-06-03 00:23:29.807 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:23:30.021 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:23:30.397 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:23:30.397 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:23:30.398 | INFO     | MaiAgent        | valley_agent.py:47 -  初始化完成。。。
+2026-06-03 00:24:58.843 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:24:59.176 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:24:59.628 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:24:59.628 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:24:59.630 | INFO     | MaiAgent        | valley_agent.py:48 -  初始化完成。。。
+2026-06-03 00:25:36.551 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:25:36.764 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:25:37.156 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:25:37.156 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:25:37.157 | INFO     | MaiAgent        | valley_agent.py:48 -  初始化完成。。。
+2026-06-03 00:26:38.518 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:26:38.736 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:26:39.103 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:26:39.103 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:26:39.104 | INFO     | MaiAgent        | valley_agent.py:48 -  初始化完成。。。
+2026-06-03 00:26:42.902 | ERROR    | MaiAgent        | valley_agent.py:74 -  agent run 失败: 'text'
+2026-06-03 00:26:42.903 | ERROR    | MaiAgent        | valley_agent.py:75 -  query: 请介绍一下你自己。
+2026-06-03 00:28:28.067 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:28:28.395 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:28:28.874 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:28:28.874 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:28:28.876 | INFO     | MaiAgent        | valley_agent.py:48 -  初始化完成。。。
+2026-06-03 00:28:31.929 | ERROR    | MaiAgent        | valley_agent.py:74 -  agent run 失败: 'AIMessage' object is not subscriptable
+2026-06-03 00:28:31.929 | ERROR    | MaiAgent        | valley_agent.py:75 -  query: 请介绍一下你自己。
+2026-06-03 00:28:50.828 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:28:51.044 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:28:51.411 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:28:51.411 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:28:51.412 | INFO     | MaiAgent        | valley_agent.py:48 -  初始化完成。。。
+2026-06-03 00:31:36.379 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:31:36.606 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:31:36.979 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:31:36.979 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:31:36.980 | INFO     | MaiAgent        | valley_agent.py:48 -  初始化完成。。。
+2026-06-03 00:33:33.095 | INFO     | Main            | main.py:11 - 正在初始化 ValleyAgent...
+2026-06-03 00:33:33.299 | INFO     | MaiAgent        | valley_agent.py:29 -  开始初始化。。。
+2026-06-03 00:33:33.696 | INFO     | MaiAgent        | valley_agent.py:32 -  模型初始化成功。。。
+2026-06-03 00:33:33.696 | INFO     | MaiAgent        | valley_agent.py:35 -  工具初始化成功。。。
+2026-06-03 00:33:33.697 | INFO     | MaiAgent        | valley_agent.py:48 -  初始化完成。。。
