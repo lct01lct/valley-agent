@@ -4,6 +4,8 @@ env_template = (
     "LANGSMITH_ENDPOINT=https://api.smith.langchain.com\n"
     "LANGSMITH_API_KEY=<Your_LangSmith_API_Key>\n"
     "LANGSMITH_PROJECT=<Your_LangSmith_Project>\n"
+    "\n"
+    "GAME_WINDOW_TITLE=Stardew Valley\n"
 )
 
 with open(".env", "w") as f:
