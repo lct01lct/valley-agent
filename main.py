@@ -14,7 +14,7 @@ async def run_main_agent() -> None:
 
     await agent.initialize()
 
-    await agent.run_execute_loop("去皮埃尔的商店与皮埃尔交互")
+    await agent.invoke("前往皮埃尔商店触发种子菜单")
 
     # print(agent.run("请介绍一下你自己。"))
     # print("\n")

@@ -1,5 +1,4 @@
 from loguru import logger
-import sys
 
 
 class ValleyLogger:
@@ -7,13 +6,22 @@ class ValleyLogger:
         # 先清理 loguru 默认自带的控制台输出（防止后面重复打印）
         logger.remove()
 
-    def create_logger(self, file_path: str):
+    def create_logger(self, file_path: str, mini: bool = False):
+        if mini:
+            log_format = "{level} | {message}"
+            diagnose = False
+        else:
+            log_format = "{time} | {level} | {name}:{function}:{line} - {message}"
+            diagnose = True
+
         logger.add(
             file_path,
             filter=lambda record: record["extra"].get("file_target") == file_path,
             encoding="utf-8",
-            enqueue=True,  # 异步安全写入
+            enqueue=True,
             rotation="50 MB",
+            format=log_format,
+            diagnose=diagnose,
         )
 
         return logger.bind(file_target=file_path)
