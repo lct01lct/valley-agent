@@ -1,5 +1,7 @@
 from PIL import Image
 import io
+import base64
+from io import BytesIO
 
 from Quartz import (
     CGWindowListCopyWindowInfo,  # type: ignore
@@ -68,6 +70,16 @@ def capture_specific_window(window_title):
         raise ValueError("截图失败！")
 
 
+def image_to_base64(img_obj: Image.Image, format_name: str = "PNG") -> str:
+    buffered = BytesIO()
+
+    img_obj.save(buffered, format=format_name)
+    img_bytes = buffered.getvalue()
+    base64_encoded = base64.b64encode(img_bytes)
+
+    return base64_encoded.decode("utf-8")
+
+
 # ===================== 使用示例 =====================
 if __name__ == "__main__":
     from dotenv import load_dotenv
@@ -79,7 +91,7 @@ if __name__ == "__main__":
 
     TARGET_WINDOW = os.getenv("GAME_WINDOW_TITLE")
     image = capture_specific_window(TARGET_WINDOW)
-    image.save("assets/images/game_full_screenshot_example.png")
+    image.save("assets/images/farm_home_indoor.png")
 
     cost_time = round(time.perf_counter() - start_time, 4)
     print(f"🔍 截图耗时：{cost_time} 秒")

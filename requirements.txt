@@ -8,3 +8,4 @@ opencv-python==4.13.0.92
 mss==10.2.0
 pyobjc-framework-Quartz==12.2
 pillow==12.2.0
+pyautogui==0.9.54
