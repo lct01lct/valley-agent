@@ -16,6 +16,10 @@
 - 验证结果：去皮埃尔杂货铺进行买种子交互。
 - 核心指标：消耗token，轮询性能，完成任务时间。
 
+<div align="center">
+  <image src="docs/stage1.drawio.svg" />
+</div>
+
 ### 📌 Stage 2: 经济具体化（“自动种地”Agent）
 
 - 核心目标: 引入宏观目标拆解与游戏内资产增值逻辑。
