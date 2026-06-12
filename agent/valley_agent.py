@@ -26,7 +26,7 @@ class UniversalSceneMap(BaseModel):
     player_pixel_ratio: Tuple[float, float] = Field(description="玩家双脚在当前屏幕的归一化比例坐标 (X, Y)")
     destination_pixel_ratio: Tuple[float, float] = Field(description="当前阶段目的地/大门/NPC 的归一化比例坐标 (X, Y)")
     obstacle_relative_tiles: List[Tuple[int, int]] = Field(
-        description="以玩家为(0,0)，视野内所有阻挡物体的相对网格偏移量列表 (ΔX, ΔY)"
+        description="以玩家为(0,0), 视野内所有阻挡物体的相对网格偏移量列表 (ΔX, ΔY)"
     )
 
 
@@ -45,7 +45,7 @@ class Scene(BaseModel):
 
 class AgentState(BaseModel):
     # 宏观任务
-    mission_text: str  # 用户输入的终极目标，如 "去皮埃尔杂货铺买种子"
+    mission_text: str  # 用户输入的终极目标, 如 "去皮埃尔杂货铺买种子"
     scene_chain: List[Scene]  # LLM 规划的跨地图拓扑链条
     current_step_index: int  # 当前正处于拓扑链条的第几步
 
@@ -128,8 +128,8 @@ class ValleyAgent:
             """
             current_time_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-            log_file_path = f"logs/agent_{self.session_thread_id}_{current_time_str}.log"
-            mini_log_file_path = f"logs/agent_{self.session_thread_id}_{current_time_str}_mini.log"
+            log_file_path = f"logs/agent_{current_time_str}.log"
+            mini_log_file_path = f"logs/agent_{current_time_str}_mini.log"
 
             self.loop_logger = valley_logger.create_logger(log_file_path)
             self.loop_mini_logger = valley_logger.create_logger(mini_log_file_path, mini=True)
@@ -152,7 +152,7 @@ class ValleyAgent:
         if session_thread_id:
             self.session_thread_id = session_thread_id
 
-    def logger_write(self, message: str, level: Literal["info", "error", "warning"] = "info"):
+    def logger_write(self, message: str, level: Literal["info", "error", "warning"] = "info", decorate=None):
         if self.loop_logger:
             if level == "info":
                 self.loop_logger.info(message)
@@ -187,7 +187,7 @@ class ValleyAgent:
             input_data = {}
 
         except asyncio.TimeoutError:
-            self.logger_write("VLM概览分析超时（15秒），跳过本次视觉分析", level="error")
+            self.logger_write("VLM概览分析超时（15秒）, 跳过本次视觉分析", level="error")
         except Exception as e:
             self.logger_write(str(e), level="error")
 
@@ -202,7 +202,7 @@ class ValleyAgent:
             raise Exception(f"update_overview 异常: {e}")
 
     def plan_node(self, state: AgentState) -> PlanNodeState:
-        self.logger_write(f"🧠 任务: {state.mission_text}")
+        self.logger_write(f"🧠 任务: {state.mission_text}\n")
 
         # TODO: load llm
         mock_scene_chain: List[Scene] = [
@@ -243,6 +243,12 @@ class ValleyAgent:
             ),
         ]
 
+        self.logger_write("\n📋 llm 规划:")
+        for scene_item in mock_scene_chain:
+            self.logger_write(
+                f"     {scene_item.scene_name}: {scene_item.general_direction} | {scene_item.current_position}  -> {scene_item.next_gate}"
+            )
+
         plan_node_state = PlanNodeState(
             scene_chain=mock_scene_chain,
             current_step_index=0,
@@ -255,19 +261,19 @@ class ValleyAgent:
     async def perceive_node(self, state: AgentState):
         current_step = state.scene_chain[state.current_step_index]
         self.logger_write(
-            f"👀 [观察周围环境]: 咔嚓！截取屏幕。当前所处场景: `{state.current_scene}`, 正在前往: `{current_step.next_gate}`"
+            f"\n👀 [观察周围环境]: 咔嚓！截取屏幕。当前所处场景: `{state.current_scene}`, 正在前往: `{current_step.next_gate}`"
         )
 
         # 模拟 VLM 调用（实际项目中替换为 model.with_structured_output(UniversalSceneMap).ainvoke(...)）
-        # 这里模拟 VLM 认出了玩家、目标在屏幕上的比例，以及沿途挡路的家具/障碍
+        # 这里模拟 VLM 认出了玩家、目标在屏幕上的比例, 以及沿途挡路的家具/障碍
         if state.stuck_counter > 0:
-            print("   ⚠️ 检测到上一步卡墙了，VLM 触发【反思修正】：更新避障路障矩阵...")
+            self.logger_write("   ⚠️ 检测到上一步卡墙了, VLM 触发【反思修正】：更新避障路障矩阵...", level="error")
             mock_obstacles = [(21, 20), (21, 19), (20, 21)]  # 新增了动态阻挡
         else:
             mock_obstacles = [(21, 20), (21, 19)]  # 默认阻挡（如桌椅）
 
         mock_vlm_output = UniversalSceneMap(
-            reasoning=f"玩家在屏幕中央偏左，{current_step.next_gate}在右前方。中间有家具卡口，需要走之字形路线。",
+            reasoning=f"玩家在屏幕中央偏左, {current_step.next_gate}在右前方。中间有家具卡口, 需要走之字形路线。",
             player_pixel_ratio=(0.4, 0.5),
             destination_pixel_ratio=(0.64, 0.33),
             obstacle_relative_tiles=mock_obstacles,
@@ -278,10 +284,10 @@ class ValleyAgent:
 
     def calculate_node(self, state: AgentState):
         vlm_res = state.vlm_data
-        self.logger_write(f"\n📏 [Python 尺子与 A*]: 提取视觉比例进行降维换算...")
+        self.logger_write(f"\n📏 [数值转化与 A*]: 提取视觉比例进行降维换算...")
 
         if not vlm_res:
-            raise Exception("vlm 未回传数据")
+            raise Exception("💥💥💥vlm 未回传数据")
 
         # 1. 尺子换算：比例差 -> 网格差
         grid_dx, grid_dy = pathfinder_tool.calculate_grid_delta(
@@ -306,38 +312,38 @@ class ValleyAgent:
             commands.append({"action": "press_key", "key": direction, "duration": 0.22})
             cx, cy = nx, ny
 
-        self.logger_write(f"   ➔ A* 解算成功，生成 {len(commands)} 步低延迟物理动作脉冲序列。")
+        self.logger_write(f"   ➔ A* 解算成功, 生成 {len(commands)} 步低延迟物理动作脉冲序列。")
         return {"action_commands": commands}
 
     def execute_node(self, state: AgentState):
         commands = state.action_commands
         current_step = state.scene_chain[state.current_step_index]
 
-        self.logger_write(f"\n⌨️ [Pyautogui 执行手]: 正在顺序执行 {len(commands)} 步物理按键脉冲...")
+        self.logger_write(f"\n⌨️ [模拟键鼠行为]: 正在顺序执行 {len(commands)} 步物理按键...")
 
         # 真实项目中这里会执行 pyautogui.keyDown(cmd['key']) -> sleep -> keyUp
         for cmd in commands:
-            # print(f"  -> 按住 [{cmd['key']}] 持续 {cmd['duration']} 秒")
+            self.logger_write(f"  -> 按住 [{cmd['key']}] 持续 {cmd['duration']} 秒")
             pass
 
         self.logger_write("   ➔ 按键流执行完毕。进入【断言判定层】观察环境反馈...")
 
         # ---------------- ReAct 动态断言逻辑模拟 ----------------
-        # 模拟场景1：遇到恶劣情况，突发卡墙（比如被乱动的宠物狗卡死在农场）
+        # 模拟场景1：遇到恶劣情况, 突发卡墙（比如被乱动的宠物狗卡死在农场）
         if state.stuck_counter == 0:
             self.logger_write(
-                "   🚨 [监督者警告]: 物理移动序列已完结，但 CV 判定画面像素未发生改变！角色卡墙了！", level="warning"
+                "   🚨 [监督者警告]: 物理移动序列已完结, 但 CV 判定画面像素未发生改变！角色卡墙了！", level="warning"
             )
             return {"stuck_counter": 1, "replan_required": True}
 
-        # 模拟场景2：卡墙后，第二轮走出了困境，成功切图
+        # 模拟场景2：卡墙后, 第二轮走出了困境, 成功切图
         if state.stuck_counter == 1:
             self.logger_write("   ✨ [监督者恢复]: 成功绕开意外障碍物！")
             # 顺延进入下一步转场
 
         # 判定是否彻底完成了最终地图的任务
         if current_step.is_final:
-            self.logger_write("   🎉 [任务完结断言]: 已贴紧皮埃尔柜台，按 X 成功触发了商店交易菜单！")
+            self.logger_write("   🎉 [任务完结断言]: 已贴紧皮埃尔柜台, 按 X 成功触发了商店交易菜单！")
             return {"mission_completed": True}
 
         # 途中阶段转场成功逻辑：更替地图状态
@@ -366,13 +372,11 @@ class ValleyAgent:
             return "reperceive"
 
         if state.replan_required:
-            self.logger_write(
-                "   🔄 [ReAct 路由决策]: 检测到异常状态（异常/A*寻路失败),流转回【节点 plan】重新审视并反思修正!"
-            )
-            return "reperceive"
+            self.logger_write("   🔄 [ReAct 路由决策]: 异常, 流转回【节点 plan】重新审视并反思修正!")
+            return "replan"
 
-        self.logger_write("   ➡️ [ReAct 路由决策]: 阶段正常推进, 流转至【节点 calculate】。")
-        return "continue"
+        self.logger_write(f"   💥💥💥 [ReAct 路由决策]: 严重告警, 流向状态不明, 强行结束, {state}")
+        return "finish"
 
     def build_workflow(self):
         workflow = StateGraph(AgentState)
@@ -384,14 +388,15 @@ class ValleyAgent:
 
         workflow.set_entry_point("planner")
         workflow.add_edge("planner", "perceiver")
+        workflow.add_edge("perceiver", "calculator")
         workflow.add_edge("calculator", "executor")
 
         workflow.add_conditional_edges(
             "executor",
             self.should_continue,
             {
-                "continue": "planner",  # 跨地图成功，观察周围环境
-                "replan": "perceiver",  # 异常或者寻路失败，观察周围环境，反思！
+                "replan": "planner",  # 跨地图成功, 观察周围环境
+                "reperceive": "perceiver",  # 异常或者寻路失败, 观察周围环境, 反思！
                 "finish": END,  # 抵达终点
             },
         )
@@ -415,4 +420,4 @@ class ValleyAgent:
 
         async for event in self.agent_app.astream(initial_state):
             for node_name, state_update in event.items():
-                self.logger_write(f"--- 📍 [节点 {node_name} 执行完毕] ---")
+                self.logger_write(f"--- 📍 [节点 {node_name} 执行完毕] ---\n")

@@ -8,7 +8,7 @@ class ValleyLogger:
 
     def create_logger(self, file_path: str, mini: bool = False):
         if mini:
-            log_format = "{level} | {message}"
+            log_format = "{message}"
             diagnose = False
         else:
             log_format = "{time} | {level} | {name}:{function}:{line} - {message}"
