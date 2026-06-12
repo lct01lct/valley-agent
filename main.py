@@ -1,6 +1,7 @@
 from utils.logger import main_logger
 
 from dotenv import load_dotenv
+from scripts.clear_logs import clear_dir
 
 load_dotenv(".env")
 
@@ -24,4 +25,5 @@ async def run_main_agent() -> None:
 if __name__ == "__main__":
     import asyncio
 
+    clear_dir("logs")
     asyncio.run(run_main_agent())
