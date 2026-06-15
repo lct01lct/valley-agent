@@ -44,6 +44,7 @@ try:
 
     print("\n--- 🧠 Google VLM 云端分析与决策 ---")
     if response:
+        print(response)
         print(response.season)
 
     print("-----------------------------------")

@@ -9,7 +9,6 @@ from langchain.messages import HumanMessage
 
 
 from agent.action.enviroment.enviroment import EnvironmentInfo
-from agent.action.valley_action.path_finder import Pathfinder
 from agent.action.scene.scene import Scene, SCENES
 from agent.prompt import (
     current_scene_prompt,
@@ -19,6 +18,7 @@ from agent.prompt import (
     plan_path_finding_prompt,
     path_finding_prompt,
     PathFindingOutput,
+    Obstacle,
 )
 
 from agent.prompt.path import draw_path_finding_mock_plot
@@ -29,12 +29,11 @@ from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.utils.uuid import uuid7
 from langgraph.graph import StateGraph, END
-from langchain_core.output_parsers import PydanticOutputParser
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from typing import List, Tuple, Optional, Literal
-from pydantic import BaseModel, Field, TypeAdapter
+from typing import List, Tuple, Literal
+from pydantic import BaseModel, Field
 
 
 class UniversalSceneMap(BaseModel):
@@ -44,9 +43,6 @@ class UniversalSceneMap(BaseModel):
     obstacle_relative_tiles: List[Tuple[int, int]] = Field(
         description="以玩家为(0,0), 视野内所有阻挡物体的相对网格偏移量列表 (ΔX, ΔY)"
     )
-
-
-pathfinder_tool = Pathfinder()
 
 
 class AgentState(BaseModel):
@@ -63,13 +59,15 @@ class AgentState(BaseModel):
     current_scene: Scene  # 当前所在的场景
     current_position: str  # 当前所在位置的详细描述
     stuck_counter: int  # 卡墙计数器
-    replan_required: bool  # 是否需要重新规划路线/反思
-    reperceive_required: bool  # 是否需要重新观察
     mission_completed: bool  # 任务是否完全闭环
 
     # 感知与计算中间量
-    vlm_data: Optional[UniversalSceneMap]  # VLM 最新一次看屏幕的数据
+    vlm_data: PathFindingOutput | None  # VLM 最新一次看屏幕的数据
     action_commands: List[dict]  # 尺子换算出来的、等待执行的物理按键队列
+
+    # 异常判断
+    replan_required: bool  # 是否需要重新规划路线/反思
+    reperceive_required: bool  # 是否需要重新观察
 
 
 class StaticEnviromentInfo(BaseModel):
@@ -84,6 +82,11 @@ class PlanNodeState(BaseModel):
     scene_chain: List[SceneChainItem]
     current_step_index: int
     current_scene: Scene
+    replan_required: bool
+
+
+class PerceiveNodeState(BaseModel):
+    vlm_data: PathFindingOutput | None
     replan_required: bool
 
 
@@ -114,8 +117,9 @@ class ValleyAgent:
 
     def _create_vlm_model(self):
         self.vlm_model_name = "gemini-3.1-flash-lite"
+        # self.vlm_model_name = "gemini-3.5-flash"
         return ChatGoogleGenerativeAI(
-            model="gemini-3.1-flash-lite",
+            model=self.vlm_model_name,
             temperature=0.0,
             google_api_key=self.api_key,
         )
@@ -271,14 +275,12 @@ class ValleyAgent:
                 f"     {scene_item.scene_name}: {scene_item.general_direction} | {scene_item.current_position}  -> {scene_item.next_position}"
             )
 
-        plan_node_state = PlanNodeState(
+        return PlanNodeState(
             scene_chain=scene_chain,
             current_step_index=0,
             current_scene=scene_chain[0].scene_name,
             replan_required=False,
         )
-
-        return plan_node_state
 
     async def perceive_node(self, state: AgentState):
         current_step = state.scene_chain[state.current_step_index]
@@ -288,135 +290,85 @@ class ValleyAgent:
 
         screen_shot = await self.get_screenshot(type="png")
 
-        data: PathFindingOutput = await self.vlm_model.with_structured_output(PathFindingOutput).ainvoke(
-            [
-                HumanMessage(
-                    content=[
-                        {
-                            "type": "text",
-                            "text": path_finding_prompt.format(
-                                current_scene=current_step.scene_name,
-                                current_position=current_step.current_position,
-                                next_position=current_step.next_position,
-                                general_direction=current_step.general_direction,
-                                tile_size=f"{state.scale_rate * state.tile_size}px",
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{image_to_base64(screen_shot)}"},
-                        },
-                    ]
-                )
-            ]
-        )  # type: ignore
+        # data: PathFindingOutput = await self.vlm_model.with_structured_output(PathFindingOutput).ainvoke(
+        #     [
+        #         HumanMessage(
+        #             content=[
+        #                 {
+        #                     "type": "text",
+        #                     "text": path_finding_prompt.format(
+        #                         current_scene=current_step.scene_name,
+        #                         current_position=current_step.current_position,
+        #                         next_position=current_step.next_position,
+        #                         general_direction=current_step.general_direction,
+        #                         tile_size=f"{state.scale_rate * state.tile_size}px",
+        #                     ),
+        #                 },
+        #                 {
+        #                     "type": "image_url",
+        #                     "image_url": {"url": f"data:image/png;base64,{image_to_base64(screen_shot)}"},
+        #                 },
+        #             ]
+        #         )
+        #     ]
+        # )  # type: ignore
 
-        self.logger_write(f"{data}")
-
-        if self.mode == "dev":
-            (await self.get_screenshot(type="png")).save(os.path.join(self.loop_img_dir, f"step-{state.current_step_index}-screenshot.png"))  # type: ignore
-            draw_path_finding_mock_plot(
-                player_pos=data.player_pixel_coordinate,
-                target_pos=data.target_pixel_coordinate,
-                obstacles=data.obstacles,
-                output_filename=os.path.join(self.loop_img_dir, f"step-{state.current_step_index}-mock.png"),
-            )
-        raise ValueError("-------------")
-
-        # 模拟 VLM 调用（实际项目中替换为 model.with_structured_output(UniversalSceneMap).ainvoke(...)）
-        # 这里模拟 VLM 认出了玩家、目标在屏幕上的比例, 以及沿途挡路的家具/障碍
-        if state.stuck_counter > 0:
-            self.logger_write("   ⚠️ 检测到上一步卡墙了, VLM 触发【反思修正】：更新避障路障矩阵...", level="error")
-            mock_obstacles = [(21, 20), (21, 19), (20, 21)]  # 新增了动态阻挡
-        else:
-            mock_obstacles = [(21, 20), (21, 19)]  # 默认阻挡（如桌椅）
-
-        mock_vlm_output = UniversalSceneMap(
-            reasoning=f"玩家在屏幕中央偏左, {current_step.next_position}在右前方。中间有家具卡口, 需要走之字形路线。",
-            player_pixel_ratio=(0.4, 0.5),
-            destination_pixel_ratio=(0.64, 0.33),
-            obstacle_relative_tiles=mock_obstacles,
+        # MOCK:
+        data = PathFindingOutput(
+            player_normalized_coordinate=(416, 635),
+            target_normalized_coordinate=(416, 780),
+            is_target_in_sight=False,
+            obstacles=[
+                Obstacle(name="电视机", normalized_bounding_box=(340, 610, 400, 670)),
+                Obstacle(name="床铺", normalized_bounding_box=(435, 575, 500, 650)),
+                Obstacle(name="桌子", normalized_bounding_box=(465, 465, 500, 535)),
+                Obstacle(name="椅子", normalized_bounding_box=(435, 435, 495, 465)),
+                Obstacle(name="壁炉", normalized_bounding_box=(560, 560, 640, 630)),
+                Obstacle(name="北墙", normalized_bounding_box=(325, 325, 380, 675)),
+                Obstacle(name="西墙", normalized_bounding_box=(325, 380, 635, 435)),
+                Obstacle(name="东墙", normalized_bounding_box=(630, 380, 635, 675)),
+            ],
         )
 
-        self.logger_write(f"   ➔ VLM 推理思考: {mock_vlm_output.reasoning}")
-        return {"vlm_data": mock_vlm_output, "replan_required": False}
+        self.logger_write(f"{data}")
+        to_pixel = lambda x: (x[0] / 1000 * screen_shot.size[0], x[1] / 1000 * screen_shot.size[1])
+        self.logger_write(f"    玩家当前的位置是: {to_pixel(data.player_normalized_coordinate)}")
+        self.logger_write(f"    目标当前的位置是: {to_pixel(data.target_normalized_coordinate)}")
+        self.logger_write(f"    目标是否在视野内: {data.is_target_in_sight}")
+
+        self.logger_write(f"    视野内的障碍物:")
+        for obstacle in data.obstacles:
+            self.logger_write(f"        {obstacle.name} ({obstacle.normalized_bounding_box})")
+
+        if self.mode == "dev":
+            screen_shot.save(os.path.join(self.loop_img_dir, f"step-{state.current_step_index}-screenshot.png"))
+            draw_path_finding_mock_plot(
+                vlm_output=data,
+                image_width=screen_shot.size[0],
+                image_height=screen_shot.size[1],
+                tile_size=128,
+                output_filename=os.path.join(self.loop_img_dir, f"step-{state.current_step_index}-mock.png"),
+            )
+
+        return PerceiveNodeState(vlm_data=data, replan_required=False)
 
     def calculate_node(self, state: AgentState):
         vlm_res = state.vlm_data
         self.logger_write(f"\n📏 [数值转化与 A*]: 提取视觉比例进行降维换算...")
 
         if not vlm_res:
-            raise Exception("💥💥💥vlm 未回传数据")
+            self.logger_write("💥💥💥 perceive_node 未回传数据")
+            raise Exception("💥💥💥perceive_node 未回传数据")
 
-        # 1. 尺子换算：比例差 -> 网格差
-        grid_dx, grid_dy = pathfinder_tool.calculate_grid_delta(
-            vlm_res.player_pixel_ratio, vlm_res.destination_pixel_ratio
-        )
-
-        # 2. 建立本地棋盘起终点
-        start_tile = (20, 20)
-        goal_tile = (start_tile[0] + grid_dx, start_tile[1] + grid_dy)
-        self.logger_write(f"   ➔ 转换为网格坐标：起点(20,20) -> 终点{goal_tile}")
-
-        # 3. 运行本地 A* 算法
-        path = pathfinder_tool.find_path(start_tile, goal_tile, vlm_res.obstacle_relative_tiles)
-        if not path:
-            self.logger_write("   ❌ A* 求解失败：前方无路可行！触发重写规划标记。")
-            return {"replan_required": True, "action_commands": []}
-        # 4. 将路径解算为动作执行指令
-        commands = []
-        cx, cy = start_tile
-        for nx, ny in path:
-            direction = "right" if nx > cx else "left" if nx < cx else "down" if ny > cy else "up"
-            commands.append({"action": "press_key", "key": direction, "duration": 0.22})
-            cx, cy = nx, ny
-
-        self.logger_write(f"   ➔ A* 解算成功, 生成 {len(commands)} 步低延迟物理动作脉冲序列。")
-        return {"action_commands": commands}
+        return {"action_commands": []}
 
     def execute_node(self, state: AgentState):
-        commands = state.action_commands
-        current_step = state.scene_chain[state.current_step_index]
 
-        self.logger_write(f"\n⌨️ [模拟键鼠行为]: 正在顺序执行 {len(commands)} 步物理按键...")
-
-        # 真实项目中这里会执行 pyautogui.keyDown(cmd['key']) -> sleep -> keyUp
-        for cmd in commands:
-            self.logger_write(f"  -> 按住 [{cmd['key']}] 持续 {cmd['duration']} 秒")
-            pass
-
-        self.logger_write("   ➔ 按键流执行完毕。进入【断言判定层】观察环境反馈...")
-
-        # ---------------- ReAct 动态断言逻辑模拟 ----------------
-        # 模拟场景1：遇到恶劣情况, 突发卡墙（比如被乱动的宠物狗卡死在农场）
-        if state.stuck_counter == 0:
-            self.logger_write(
-                "   🚨 [监督者警告]: 物理移动序列已完结, 但 CV 判定画面像素未发生改变！角色卡墙了！", level="warning"
-            )
-            return {"stuck_counter": 1, "replan_required": True}
-
-        # 模拟场景2：卡墙后, 第二轮走出了困境, 成功切图
-        if state.stuck_counter == 1:
-            self.logger_write("   ✨ [监督者恢复]: 成功绕开意外障碍物！")
-            # 顺延进入下一步转场
-
-        # 判定是否彻底完成了最终地图的任务
-        if current_step.is_final:
-            self.logger_write("   🎉 [任务完结断言]: 已贴紧皮埃尔柜台, 按 X 成功触发了商店交易菜单！")
-            return {"mission_completed": True}
-
-        # 途中阶段转场成功逻辑：更替地图状态
-        next_index = state.current_step_index + 1
-        next_map = state.scene_chain[next_index].scene_name
-        self.logger_write(
-            f"   🚪 [转场加载成功]: 触碰传送点。地图更替：{state.current_scene} ➔ {next_map}。等待过图黑屏..."
-        )
+        self.logger_write(f"   🚪 [转场加载成功]: 触碰传送点。地图更替：{state.current_scene} ➔ 。等待过图黑屏...")
         time.sleep(1.0)
 
         return {
-            "current_step_index": next_index,
-            "current_map": next_map,
-            "stuck_counter": 0,  # 重置卡墙计数
+            "current_step_index": state.current_step_index + 1,
             "replan_required": False,
         }
 
