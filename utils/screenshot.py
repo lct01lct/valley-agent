@@ -1,5 +1,6 @@
 from PIL import Image
 import io
+import os
 import base64
 from io import BytesIO
 
@@ -64,7 +65,10 @@ def capture_specific_window(window_title):
         CGImageDestinationFinalize(dest)
 
         image = Image.open(io.BytesIO(data))
-        return image
+        ori_img_size = image.size
+        title_bar_height = int(os.getenv("TITLE_BAR_HEIGHT", 0))
+
+        return image.crop((0, title_bar_height, *ori_img_size))
 
     else:
         raise ValueError("截图失败！")
@@ -91,7 +95,7 @@ if __name__ == "__main__":
 
     TARGET_WINDOW = os.getenv("GAME_WINDOW_TITLE")
     image = capture_specific_window(TARGET_WINDOW)
-    image.save("assets/images/farm_home_indoor.png")
+    image.save("assets/images/farm.png")
 
     cost_time = round(time.perf_counter() - start_time, 4)
     print(f"🔍 截图耗时：{cost_time} 秒")

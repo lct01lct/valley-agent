@@ -4,8 +4,10 @@ loguru==0.7.3
 dotenv==0.9.9
 langchain-google-genai==4.2.4
 numpy==2.4.6
+matplotlib==3.11.0
 opencv-python==4.13.0.92
 mss==10.2.0
 pyobjc-framework-Quartz==12.2
 pillow==12.2.0
 pyautogui==0.9.54
+pydantic==2.13.4
