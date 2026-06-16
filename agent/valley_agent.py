@@ -10,6 +10,8 @@ from langchain.messages import HumanMessage
 
 from agent.action.enviroment.enviroment import EnvironmentInfo
 from agent.action.scene.scene import Scene, SCENES
+from agent.action.valley_action.AStar import AStarParser, convert_path_to_keyboard_commands
+from agent.action.valley_action.move import ValleyKeyCommand, player_move
 from agent.prompt import (
     current_scene_prompt,
     GetSceneOutput,
@@ -36,19 +38,14 @@ from typing import List, Tuple, Literal
 from pydantic import BaseModel, Field
 
 
-class UniversalSceneMap(BaseModel):
-    reasoning: str = Field(description="当前场景的空间拓扑分析与下一步规划思考")
-    player_pixel_ratio: Tuple[float, float] = Field(description="玩家双脚在当前屏幕的归一化比例坐标 (X, Y)")
-    destination_pixel_ratio: Tuple[float, float] = Field(description="当前阶段目的地/大门/NPC 的归一化比例坐标 (X, Y)")
-    obstacle_relative_tiles: List[Tuple[int, int]] = Field(
-        description="以玩家为(0,0), 视野内所有阻挡物体的相对网格偏移量列表 (ΔX, ΔY)"
-    )
-
-
 class AgentState(BaseModel):
-    # 游戏固定信息
+    # 游戏固定参数
     tile_size: float
     scale_rate: float
+    player_move_speed: float
+
+    # 系统固定参数:
+    screen_size: tuple[float, float]
 
     # 宏观任务
     mission_text: str  # 用户输入的终极目标, 如 "去皮埃尔杂货铺买种子"
@@ -59,11 +56,12 @@ class AgentState(BaseModel):
     current_scene: Scene  # 当前所在的场景
     current_position: str  # 当前所在位置的详细描述
     stuck_counter: int  # 卡墙计数器
+    command_completed: bool  # 当前步是否正确闭环
     mission_completed: bool  # 任务是否完全闭环
 
     # 感知与计算中间量
     vlm_data: PathFindingOutput | None  # VLM 最新一次看屏幕的数据
-    action_commands: List[dict]  # 尺子换算出来的、等待执行的物理按键队列
+    action_commands: List[ValleyKeyCommand]  # 尺子换算出来的、等待执行的物理按键队列
 
     # 异常判断
     replan_required: bool  # 是否需要重新规划路线/反思
@@ -88,6 +86,18 @@ class PlanNodeState(BaseModel):
 class PerceiveNodeState(BaseModel):
     vlm_data: PathFindingOutput | None
     replan_required: bool
+
+
+class CalculateNodeState(BaseModel):
+    action_commands: List[ValleyKeyCommand]
+    replan_required: bool
+    reperceive_required: bool
+
+
+class ExecuteNode(BaseModel):
+    reperceive_required: bool
+    current_step_index: int
+    command_completed: bool
 
 
 class ValleyAgent:
@@ -330,7 +340,6 @@ class ValleyAgent:
             ],
         )
 
-        self.logger_write(f"{data}")
         to_pixel = lambda x: (x[0] / 1000 * screen_shot.size[0], x[1] / 1000 * screen_shot.size[1])
         self.logger_write(f"    玩家当前的位置是: {to_pixel(data.player_normalized_coordinate)}")
         self.logger_write(f"    目标当前的位置是: {to_pixel(data.target_normalized_coordinate)}")
@@ -357,36 +366,71 @@ class ValleyAgent:
         self.logger_write(f"\n📏 [数值转化与 A*]: 提取视觉比例进行降维换算...")
 
         if not vlm_res:
-            self.logger_write("💥💥💥 perceive_node 未回传数据")
-            raise Exception("💥💥💥perceive_node 未回传数据")
+            self.logger_write("❌ perceive_node 未回传数据")
+            raise Exception("❌perceive_node 未回传数据")
 
-        return {"action_commands": []}
+        player_px = self.coord_to_px(vlm_res.player_normalized_coordinate, state.screen_size)
+        target_px = self.coord_to_px(vlm_res.target_normalized_coordinate, state.screen_size)
+        real_obstacles = []
+
+        for obs in vlm_res.obstacles:
+            box = obs.normalized_bounding_box
+            xmin, ymin = self.coord_to_px((box[0], box[1]), state.screen_size)
+            xmax, ymax = self.coord_to_px((box[2], box[3]), state.screen_size)
+            real_obstacles.append({"name": obs.name, "box": (xmin, ymin, xmax, ymax)})
+
+        pixel_path = self.A_star_parser.plan_pixel_path(
+            player_px=player_px,
+            target_px=target_px,
+            real_obstacles=real_obstacles,
+        )
+        keyboard_action_list = convert_path_to_keyboard_commands(
+            pixel_path=pixel_path, walk_speed_px_per_sec=state.player_move_speed  # 游戏默认标准跑步速度
+        )
+
+        for action in keyboard_action_list:
+            self.logger_write(f"     ({action.key}, {action.duration})")
+
+        return CalculateNodeState(
+            action_commands=keyboard_action_list,
+            replan_required=False,
+            reperceive_required=True,
+        )
 
     def execute_node(self, state: AgentState):
+
+        action_commands = state.action_commands
+
+        for command in action_commands:
+            player_move(command)
 
         self.logger_write(f"   🚪 [转场加载成功]: 触碰传送点。地图更替：{state.current_scene} ➔ 。等待过图黑屏...")
         time.sleep(1.0)
 
-        return {
-            "current_step_index": state.current_step_index + 1,
-            "replan_required": False,
-        }
+        return ExecuteNode(
+            reperceive_required=True,
+            current_step_index=state.current_step_index + 1,
+            command_completed=True,
+        )
 
     async def should_continue(self, state: AgentState) -> str:
         if state.mission_completed:
             return "finish"
 
         if state.reperceive_required:
-            self.logger_write(
-                "   🔄 [ReAct 路由决策]: 检测到异常状态（异常/A*寻路失败),流转回【节点 perceiver】重新观察!"
-            )
+            if state.command_completed:
+                self.logger_write("   ✅ [ReAct 路由决策]: 命令正常执行, 流转回【节点 perceiver】执行下一个命令!")
+            else:
+                self.logger_write(
+                    "   🔄 [ReAct 路由决策]: 检测到异常状态（异常/A*寻路失败),流转回【节点 perceiver】重新观察!"
+                )
             return "reperceive"
 
         if state.replan_required:
             self.logger_write("   🔄 [ReAct 路由决策]: 异常, 流转回【节点 plan】重新审视并反思修正!")
             return "replan"
 
-        self.logger_write(f"   💥💥💥 [ReAct 路由决策]: 严重告警, 流向状态不明, 强行结束, {state}")
+        self.logger_write(f"   ❌ [ReAct 路由决策]: 严重告警, 流向状态不明, 强行结束, {state}", level="error")
         return "finish"
 
     def build_workflow(self):
@@ -417,24 +461,30 @@ class ValleyAgent:
 
         self.logger_write(f"🧠 任务: {query}\n")
 
-        data = await self.init_first_state()
-        initial_state = AgentState(
+        envir_data, screen_size = await self.init_first_state()
+        state = AgentState(
             mission_text=query,
             scale_rate=1.0,
             tile_size=128,
+            player_move_speed=470,
+            screen_size=screen_size,
+            #
             scene_chain=[],
             current_step_index=0,
-            current_scene=data.scene_name,
-            current_position=data.detail_desc,
+            current_scene=envir_data.scene_name,
+            current_position=envir_data.detail_desc,
             stuck_counter=0,
             replan_required=False,
             reperceive_required=True,
             mission_completed=False,
+            command_completed=False,
             vlm_data=None,
             action_commands=[],
         )
 
-        async for event in self.agent_app.astream(initial_state):
+        self.A_star_parser = AStarParser(tile_size=state.tile_size * state.scale_rate)
+
+        async for event in self.agent_app.astream(state):
             for node_name, state_update in event.items():
                 self.logger_write(f"--- 📍 [节点 {node_name} 执行完毕] ---\n")
 
@@ -448,7 +498,7 @@ class ValleyAgent:
                 detail_desc="玩家正站在房间中央，位于电视机右侧，紧邻着床铺的左侧边缘，正前方是木桌和椅子。",
             )
 
-            # first_screenshot = await self.get_screenshot()
+            first_screenshot = await self.get_screenshot("png")
 
             # data: GetSceneOutput = await self.vlm_model.with_structured_output(GetSceneOutput).ainvoke(
             #     [
@@ -457,7 +507,7 @@ class ValleyAgent:
             #                 {"type": "text", "text": current_scene_prompt},
             #                 {
             #                     "type": "image_url",
-            #                     "image_url": {"url": f"data:image/png;base64,{first_screenshot}"},
+            #                     "image_url": {"url": f"data:image/png;base64,{image_to_base64(first_screenshot)}"},
             #                 },
             #             ]
             #         )
@@ -465,10 +515,10 @@ class ValleyAgent:
             # )  # type: ignore
             self.logger_write(f"{data}")
 
-            return data
+            return data, first_screenshot.size
 
         except Exception as e:
-            self.logger_write(f"\n\n💥💥💥 {e}", level="error")
+            self.logger_write(f"\n\n❌ {e}", level="error")
 
             raise Exception(e)
 
@@ -485,3 +535,6 @@ class ValleyAgent:
         if type == "base64":
             return image_to_base64(image)
         return image
+
+    def coord_to_px(self, coordinate: tuple[int, int], screen_size):
+        return (int((coordinate[0] / 1000.0) * screen_size[0]), int((coordinate[1] / 1000.0) * screen_size[1]))
