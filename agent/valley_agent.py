@@ -81,11 +81,13 @@ class PlanNodeState(BaseModel):
     current_step_index: int
     current_scene: Scene
     replan_required: bool
+    command_completed: Literal[False]
 
 
 class PerceiveNodeState(BaseModel):
     vlm_data: PathFindingOutput | None
     replan_required: bool
+    command_completed: Literal[False]
 
 
 class CalculateNodeState(BaseModel):
@@ -98,6 +100,7 @@ class ExecuteNode(BaseModel):
     reperceive_required: bool
     current_step_index: int
     command_completed: bool
+    mission_completed: bool
 
 
 class ValleyAgent:
@@ -150,13 +153,6 @@ class ValleyAgent:
             self.middleware = self._get_middleware()
 
             self.memory = InMemorySaver()
-
-            # self.agent = create_agent(
-            #     model=self.chat_model,
-            #     tools=self.tools,
-            #     middleware=self.middleware,
-            #     checkpointer=self.memory,
-            # )
 
             current_time_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -290,6 +286,7 @@ class ValleyAgent:
             current_step_index=0,
             current_scene=scene_chain[0].scene_name,
             replan_required=False,
+            command_completed=False,
         )
 
     async def perceive_node(self, state: AgentState):
@@ -359,7 +356,11 @@ class ValleyAgent:
                 output_filename=os.path.join(self.loop_img_dir, f"step-{state.current_step_index}-mock.png"),
             )
 
-        return PerceiveNodeState(vlm_data=data, replan_required=False)
+        return PerceiveNodeState(
+            vlm_data=data,
+            replan_required=False,
+            command_completed=False,
+        )
 
     def calculate_node(self, state: AgentState):
         vlm_res = state.vlm_data
@@ -411,26 +412,45 @@ class ValleyAgent:
             reperceive_required=True,
             current_step_index=state.current_step_index + 1,
             command_completed=True,
+            mission_completed=True if state.current_step_index + 1 == len(state.scene_chain) else False,
         )
 
     async def should_continue(self, state: AgentState) -> str:
-        if state.mission_completed:
+        mission_completed = state.mission_completed
+        replan_required = state.replan_required
+        reperceive_required = state.reperceive_required
+        command_completed = state.command_completed
+        current_step_index = state.current_step_index
+        scene_chain_len = len(state.scene_chain)
+
+        if mission_completed and current_step_index == scene_chain_len:
+            self.logger_write("   🟢 [ReAct 路由决策]: 完全闭环整个任务")
             return "finish"
 
-        if state.reperceive_required:
-            if state.command_completed:
-                self.logger_write("   ✅ [ReAct 路由决策]: 命令正常执行, 流转回【节点 perceiver】执行下一个命令!")
+        if reperceive_required:
+            if command_completed:
+                if current_step_index < scene_chain_len:
+                    self.logger_write(
+                        "   ✅ [ReAct 路由决策]: 模拟键鼠命令正常执行, 流转回【节点 perceiver】生成下一个命令!"
+                    )
+                    return "reperceive"
+                elif current_step_index > scene_chain_len:
+                    self.logger_write(
+                        f"   ❌ [ReAct 路由决策]: 严重告警, current_step_index({current_step_index}) > scene_chain_len({scene_chain_len}), 强行结束!",
+                        level="error",
+                    )
+                    return "finish"
             else:
                 self.logger_write(
-                    "   🔄 [ReAct 路由决策]: 检测到异常状态（异常/A*寻路失败),流转回【节点 perceiver】重新观察!"
+                    "   ⚠️ [ReAct 路由决策]: 检测到异常状态（异常/A*寻路失败), 流转回【节点 perceiver】重新观察!"
                 )
-            return "reperceive"
+                return "reperceive"
 
-        if state.replan_required:
-            self.logger_write("   🔄 [ReAct 路由决策]: 异常, 流转回【节点 plan】重新审视并反思修正!")
+        if replan_required:
+            self.logger_write("   🟠 [ReAct 路由决策]: 异常, 流转回【节点 plan】重新审视并反思修正!")
             return "replan"
 
-        self.logger_write(f"   ❌ [ReAct 路由决策]: 严重告警, 流向状态不明, 强行结束, {state}", level="error")
+        self.logger_write(f"   ❌ [ReAct 路由决策]: 严重告警, 流向状态不明, 强行结束! {state}", level="error")
         return "finish"
 
     def build_workflow(self):
