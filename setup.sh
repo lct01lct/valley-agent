@@ -30,3 +30,5 @@ pip install -r requirements.txt
 if [ ! -f .env ]; then
   python init_env.py
 fi
+
+python main.py

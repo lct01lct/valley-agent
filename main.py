@@ -1,3 +1,5 @@
+import time
+
 from utils.logger import main_logger
 
 from dotenv import load_dotenv
@@ -14,6 +16,9 @@ async def run_main_agent() -> None:
     agent = ValleyAgent()
 
     await agent.initialize()
+
+    print("---------------3s 之后 agent 接管星露谷物语，请切回游戏界面！！！-----------------------")
+    time.sleep(3)
 
     await agent.invoke("前往皮埃尔商店触发种子菜单")
 
