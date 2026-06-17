@@ -28,7 +28,7 @@ conda activate "$ENV_NAME"
 pip install -r requirements.txt
 
 if [ ! -f .env ]; then
-  python init_env.py
+  python scripts/init_env.py
 fi
 
 python main.py

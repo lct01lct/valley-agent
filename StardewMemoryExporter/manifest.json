@@ -1,0 +1,9 @@
+{
+  "Name": "Stardew Memory Exporter",
+  "Author": "AI Agent",
+  "Version": "1.0.0",
+  "Description": "实时导出内存坐标与网格数据供 A* 使用",
+  "UniqueID": "AI.StardewMemoryExporter",
+  "EntryDll": "StardewMemoryExporter.dll",
+  "MinimumApiVersion": "4.0.0"
+}
