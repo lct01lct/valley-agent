@@ -54,12 +54,29 @@ plan_path_finding_prompt = """
 
 class SceneChainItem(BaseModel):
     scene_name: Scene = Field(description="当前所在的场景名称")
-    current_position: str = Field(description="对初始物理落脚点的清晰描述（例如: '巴士站地图最左侧的柏油路口'")
-    next_position: str = Field(
+    start_position: str = Field(description="对初始物理落脚点的清晰描述（例如: '巴士站地图最左侧的柏油路口'")
+    end_position: str = Field(
         description="本阶段需要去锁定的转场大门或交互目标（例如: '通往小镇区域的右手边东侧分界线'）"
     )
     general_direction: str = Field(description="大致行进方向")
     is_final: bool = Field(description="next_position 是否就是最终目的地")
+
+
+class SceneChainSubStep(BaseModel):
+    step_current_position: str
+    step_next_position: str
+    fail_reason: None | str
+
+
+class SceneChainItemWithSubStep(BaseModel):
+    scene_name: Scene = Field(description="当前所在的场景名称")
+    start_position: str = Field(description="对初始物理落脚点的清晰描述（例如: '巴士站地图最左侧的柏油路口'")
+    end_position: str = Field(
+        description="本阶段需要去锁定的转场大门或交互目标（例如: '通往小镇区域的右手边东侧分界线'）"
+    )
+    general_direction: str = Field(description="大致行进方向")
+    is_final: bool = Field(description="next_position 是否就是最终目的地")
+    sub_steps: list[SceneChainSubStep] = Field(description="到达 current_position 中间具体执行")
 
 
 SceneChain = RootModel[list[SceneChainItem]]

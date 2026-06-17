@@ -153,7 +153,6 @@ def convert_path_to_keyboard_commands(
         if abs(dx) > pixel_tolerance:
             key = "d" if dx > 0 else "a"
             duration = round(abs(dx) / walk_speed_px_per_sec, 3)
-            commands.append({"key": key, "duration": duration})
             commands.append(ValleyKeyCommand(key=key, duration=duration))
 
         # 2. 处理垂直 Y 轴方向位移 (w=上, s=下)

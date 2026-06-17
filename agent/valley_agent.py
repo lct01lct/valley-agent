@@ -24,6 +24,7 @@ from agent.prompt import (
 )
 
 from agent.prompt.path import draw_path_finding_mock_plot
+from agent.prompt.plan import SceneChainItemWithSubStep, SceneChainSubStep
 from utils.logger import valley_logger, main_logger
 from utils.screenshot import capture_specific_window, image_to_base64
 
@@ -49,8 +50,8 @@ class AgentState(BaseModel):
 
     # 宏观任务
     mission_text: str  # 用户输入的终极目标, 如 "去皮埃尔杂货铺买种子"
-    scene_chain: List[SceneChainItem]  # LLM 规划的跨地图拓扑链条
-    current_step_index: int  # 当前正处于拓扑链条的第几步
+    scene_chain: List[SceneChainItemWithSubStep]  # LLM 规划的跨地图拓扑链条
+    current_chain_index: int  # 当前正处于拓扑链条的第几步
 
     # 实时环境状态
     current_scene: Scene  # 当前所在的场景
@@ -77,8 +78,8 @@ class PlayerEnviromentInfo(BaseModel):
 
 
 class PlanNodeState(BaseModel):
-    scene_chain: List[SceneChainItem]
-    current_step_index: int
+    scene_chain: List[SceneChainItemWithSubStep]
+    current_chain_index: int
     current_scene: Scene
     replan_required: bool
     command_completed: Literal[False]
@@ -98,9 +99,10 @@ class CalculateNodeState(BaseModel):
 
 class ExecuteNode(BaseModel):
     reperceive_required: bool
-    current_step_index: int
+    current_chain_index: int
     command_completed: bool
     mission_completed: bool
+    current_position: str
 
 
 class ValleyAgent:
@@ -116,6 +118,7 @@ class ValleyAgent:
         self.workflow = self.build_workflow()
         self.agent_app = self.workflow.compile()
         self.mode = os.getenv("MODE", "dev")
+        self.is_mock_data = False
 
         # 绘制 langgraph 架构图
         png_data = self.agent_app.get_graph(xray=True).draw_mermaid_png()
@@ -203,24 +206,6 @@ class ValleyAgent:
             else:
                 self.loop_mini_logger.info(message)
 
-    async def resume_execute_loop(self):
-        pass
-
-    async def next_tick(self):
-        try:
-            screenshot = await self.update_overview()
-
-            enviroment_info = await asyncio.wait_for(
-                self.global_enviroment.get_enviroment_info(self.vlm_model, screenshot), timeout=15.0
-            )
-
-            input_data = {}
-
-        except asyncio.TimeoutError:
-            self.logger_write("VLM概览分析超时（15秒）, 跳过本次视觉分析", level="error")
-        except Exception as e:
-            self.logger_write(str(e), level="error")
-
     async def update_overview(self):
         try:
             TARGET_WINDOW = os.getenv("GAME_WINDOW_TITLE")
@@ -239,121 +224,148 @@ class ValleyAgent:
             scenes=SCENES,
         )
 
-        # data: SceneChain = await self.chat_model.with_structured_output(SceneChain).ainvoke(prompt)  # type: ignore
+        if self.is_mock_data:
+            scene_chain: List[SceneChainItemWithSubStep] = [
+                SceneChainItemWithSubStep(
+                    scene_name="农场房子",
+                    start_position="房间中央床铺左侧",
+                    end_position="农舍南侧出口大门",
+                    general_direction="向下（南）",
+                    is_final=False,
+                    sub_steps=[],
+                ),
+                SceneChainItemWithSubStep(
+                    scene_name="农场",
+                    start_position="农舍正前方出口",
+                    end_position="农场地图右侧通往小镇的栅栏门",
+                    general_direction="向右（东）",
+                    is_final=False,
+                    sub_steps=[],
+                ),
+                SceneChainItemWithSubStep(
+                    scene_name="小镇",
+                    start_position="小镇左侧入口",
+                    end_position="皮埃尔杂货铺正门",
+                    general_direction="向右（东）",
+                    is_final=False,
+                    sub_steps=[],
+                ),
+                SceneChainItemWithSubStep(
+                    scene_name="皮埃尔杂货铺",
+                    start_position="杂货铺入口处",
+                    end_position="杂货铺内部柜台前的种子菜单",
+                    general_direction="向上（北）",
+                    is_final=True,
+                    sub_steps=[],
+                ),
+            ]
+        else:
+            data: SceneChain = await self.chat_model.with_structured_output(SceneChain).ainvoke(prompt)  # type: ignore
 
-        # scene_chain = data.root
-
-        # MOCK:
-        scene_chain: List[SceneChainItem] = [
-            SceneChainItem(
-                scene_name="农场房子",
-                current_position="房间中央床铺左侧",
-                next_position="农舍南侧出口大门",
-                general_direction="向下（南）",
-                is_final=False,
-            ),
-            SceneChainItem(
-                scene_name="农场",
-                current_position="农舍正前方出口",
-                next_position="农场地图右侧通往小镇的栅栏门",
-                general_direction="向右（东）",
-                is_final=False,
-            ),
-            SceneChainItem(
-                scene_name="小镇",
-                current_position="小镇左侧入口",
-                next_position="皮埃尔杂货铺正门",
-                general_direction="向右（东）",
-                is_final=False,
-            ),
-            SceneChainItem(
-                scene_name="皮埃尔杂货铺",
-                current_position="杂货铺入口处",
-                next_position="杂货铺内部柜台前的种子菜单",
-                general_direction="向上（北）",
-                is_final=True,
-            ),
-        ]
+            scene_chain = [
+                SceneChainItemWithSubStep(
+                    **scene_chain_item.model_dump(),
+                    sub_steps=[],
+                )
+                for scene_chain_item in data.root
+            ]
 
         self.logger_write("\n📋 llm 规划:")
         for scene_item in scene_chain:
             self.logger_write(
-                f"     {scene_item.scene_name}: {scene_item.general_direction} | {scene_item.current_position}  -> {scene_item.next_position}"
+                f"     {scene_item.scene_name}: {scene_item.general_direction} | {scene_item.start_position}  -> {scene_item.end_position}"
             )
 
         return PlanNodeState(
             scene_chain=scene_chain,
-            current_step_index=0,
+            current_chain_index=0,
             current_scene=scene_chain[0].scene_name,
             replan_required=False,
             command_completed=False,
         )
 
     async def perceive_node(self, state: AgentState):
-        current_step = state.scene_chain[state.current_step_index]
+        current_step = state.scene_chain[state.current_chain_index]
+
         self.logger_write(
-            f"\n👀 [观察周围环境]: 咔嚓！截取屏幕。当前所处场景: `{state.current_scene}`, 当前所在位置: `{state.current_position}`, 正在前往: `{current_step.next_position}`"
+            f"\n👀 [观察周围环境]: 咔嚓！截取屏幕。当前所处场景: `{state.current_scene}`, 当前所在位置: `{state.current_position}`, 正在前往: `{current_step.end_position}`"
         )
 
         screen_shot = await self.get_screenshot(type="png")
 
-        # data: PathFindingOutput = await self.vlm_model.with_structured_output(PathFindingOutput).ainvoke(
-        #     [
-        #         HumanMessage(
-        #             content=[
-        #                 {
-        #                     "type": "text",
-        #                     "text": path_finding_prompt.format(
-        #                         current_scene=current_step.scene_name,
-        #                         current_position=current_step.current_position,
-        #                         next_position=current_step.next_position,
-        #                         general_direction=current_step.general_direction,
-        #                         tile_size=f"{state.scale_rate * state.tile_size}px",
-        #                     ),
-        #                 },
-        #                 {
-        #                     "type": "image_url",
-        #                     "image_url": {"url": f"data:image/png;base64,{image_to_base64(screen_shot)}"},
-        #                 },
-        #             ]
-        #         )
-        #     ]
-        # )  # type: ignore
+        if self.is_mock_data:
+            data = PathFindingOutput(
+                player_normalized_coordinate=(416, 635),
+                target_normalized_coordinate=(416, 780),
+                is_target_in_sight=True,
+                transition_point_position=None,
+                obstacles=[
+                    Obstacle(name="电视机", normalized_bounding_box=(340, 610, 400, 670)),
+                    Obstacle(name="床铺", normalized_bounding_box=(435, 575, 500, 650)),
+                    Obstacle(name="桌子", normalized_bounding_box=(465, 465, 500, 535)),
+                    Obstacle(name="椅子", normalized_bounding_box=(435, 435, 495, 465)),
+                    Obstacle(name="壁炉", normalized_bounding_box=(560, 560, 640, 630)),
+                    Obstacle(name="北墙", normalized_bounding_box=(325, 325, 380, 675)),
+                    Obstacle(name="西墙", normalized_bounding_box=(325, 380, 635, 435)),
+                    Obstacle(name="东墙", normalized_bounding_box=(630, 380, 635, 675)),
+                ],
+            )
+        else:
+            data: PathFindingOutput = await self.vlm_model.with_structured_output(PathFindingOutput).ainvoke(
+                [
+                    HumanMessage(
+                        content=[
+                            {
+                                "type": "text",
+                                "text": path_finding_prompt.format(
+                                    current_scene=current_step.scene_name,
+                                    start_position=current_step.start_position,
+                                    end_position=current_step.end_position,
+                                    general_direction=current_step.general_direction,
+                                    tile_size=f"{state.scale_rate * state.tile_size}px",
+                                ),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{image_to_base64(screen_shot)}"},
+                            },
+                        ]
+                    )
+                ]
+            )  # type: ignore
 
-        # MOCK:
-        data = PathFindingOutput(
-            player_normalized_coordinate=(416, 635),
-            target_normalized_coordinate=(416, 780),
-            is_target_in_sight=False,
-            obstacles=[
-                Obstacle(name="电视机", normalized_bounding_box=(340, 610, 400, 670)),
-                Obstacle(name="床铺", normalized_bounding_box=(435, 575, 500, 650)),
-                Obstacle(name="桌子", normalized_bounding_box=(465, 465, 500, 535)),
-                Obstacle(name="椅子", normalized_bounding_box=(435, 435, 495, 465)),
-                Obstacle(name="壁炉", normalized_bounding_box=(560, 560, 640, 630)),
-                Obstacle(name="北墙", normalized_bounding_box=(325, 325, 380, 675)),
-                Obstacle(name="西墙", normalized_bounding_box=(325, 380, 635, 435)),
-                Obstacle(name="东墙", normalized_bounding_box=(630, 380, 635, 675)),
-            ],
+        current_step.sub_steps.append(
+            SceneChainSubStep(
+                step_current_position=state.current_position,
+                step_next_position=current_step.end_position if data.is_target_in_sight else current_step.end_position,
+                fail_reason=None,
+            )
         )
 
         to_pixel = lambda x: (x[0] / 1000 * screen_shot.size[0], x[1] / 1000 * screen_shot.size[1])
         self.logger_write(f"    玩家当前的位置是: {to_pixel(data.player_normalized_coordinate)}")
         self.logger_write(f"    目标当前的位置是: {to_pixel(data.target_normalized_coordinate)}")
         self.logger_write(f"    目标是否在视野内: {data.is_target_in_sight}")
-
+        self.logger_write(f"    过渡点: {data.transition_point_position}")
         self.logger_write(f"    视野内的障碍物:")
         for obstacle in data.obstacles:
             self.logger_write(f"        {obstacle.name} ({obstacle.normalized_bounding_box})")
 
         if self.mode == "dev":
-            screen_shot.save(os.path.join(self.loop_img_dir, f"step-{state.current_step_index}-screenshot.png"))
+            file_name_prefix = f"chain-{state.current_chain_index}-step-{len(current_step.sub_steps) - 1}"
+
+            screen_shot.save(
+                os.path.join(
+                    self.loop_img_dir,
+                    f"{file_name_prefix}-screenshot.png",
+                )
+            )
             draw_path_finding_mock_plot(
                 vlm_output=data,
                 image_width=screen_shot.size[0],
                 image_height=screen_shot.size[1],
                 tile_size=128,
-                output_filename=os.path.join(self.loop_img_dir, f"step-{state.current_step_index}-mock.png"),
+                output_filename=os.path.join(self.loop_img_dir, f"{file_name_prefix}-mock.png"),
             )
 
         return PerceiveNodeState(
@@ -405,38 +417,69 @@ class ValleyAgent:
         for command in action_commands:
             player_move(command)
 
-        self.logger_write(f"   🚪 [转场加载成功]: 触碰传送点。地图更替：{state.current_scene} ➔ 。等待过图黑屏...")
-        time.sleep(1.0)
+        current_step = state.scene_chain[state.current_chain_index]
 
-        return ExecuteNode(
-            reperceive_required=True,
-            current_step_index=state.current_step_index + 1,
-            command_completed=True,
-            mission_completed=True if state.current_step_index + 1 == len(state.scene_chain) else False,
-        )
+        # TODO: 如果人物通过 command 未能到达到 current_step.sub_steps[-1].step_next_position
+        # current_step.sub_steps[-1].step_next_position = vlm 判断的位置
+
+        # return ExecuteNode(
+        #     reperceive_required=True,
+        #     current_chain_index=state.current_chain_index,
+        #     command_completed=False,
+        #     mission_completed=False,
+        #     current_position=vlm 判断的位置,
+        # )
+
+        if state.vlm_data:
+            if state.vlm_data.is_target_in_sight:
+                self.logger_write(
+                    f"   🚪 [转场加载成功]: 触碰传送点。地图更替：{state.current_scene} ➔ 。等待过图黑屏..."
+                )
+                time.sleep(1.0)
+
+                return ExecuteNode(
+                    reperceive_required=True,
+                    current_chain_index=state.current_chain_index + 1,
+                    command_completed=True,
+                    mission_completed=True if state.current_chain_index + 1 == len(state.scene_chain) else False,
+                    current_position=state.scene_chain[state.current_chain_index + 1].start_position,
+                )
+            else:
+
+                self.logger_write(
+                    f"   🌀 [成功到达过渡点]: 将继续在 `{state.current_scene}` 内的 `{state.vlm_data.transition_point_position}` 前往到 `{current_step.end_position}`"
+                )
+
+                return ExecuteNode(
+                    reperceive_required=True,
+                    current_chain_index=state.current_chain_index,
+                    command_completed=True,
+                    mission_completed=False,
+                    current_position=str(state.vlm_data.transition_point_position),
+                )
 
     async def should_continue(self, state: AgentState) -> str:
         mission_completed = state.mission_completed
         replan_required = state.replan_required
         reperceive_required = state.reperceive_required
         command_completed = state.command_completed
-        current_step_index = state.current_step_index
+        current_chain_index = state.current_chain_index
         scene_chain_len = len(state.scene_chain)
 
-        if mission_completed and current_step_index == scene_chain_len:
+        if mission_completed and current_chain_index == scene_chain_len:
             self.logger_write("   🟢 [ReAct 路由决策]: 完全闭环整个任务")
             return "finish"
 
         if reperceive_required:
             if command_completed:
-                if current_step_index < scene_chain_len:
+                if current_chain_index < scene_chain_len:
                     self.logger_write(
                         "   ✅ [ReAct 路由决策]: 模拟键鼠命令正常执行, 流转回【节点 perceiver】生成下一个命令!"
                     )
                     return "reperceive"
-                elif current_step_index > scene_chain_len:
+                elif current_chain_index > scene_chain_len:
                     self.logger_write(
-                        f"   ❌ [ReAct 路由决策]: 严重告警, current_step_index({current_step_index}) > scene_chain_len({scene_chain_len}), 强行结束!",
+                        f"   ❌ [ReAct 路由决策]: 严重告警, current_chain_index({current_chain_index}) > scene_chain_len({scene_chain_len}), 强行结束!",
                         level="error",
                     )
                     return "finish"
@@ -490,7 +533,7 @@ class ValleyAgent:
             screen_size=screen_size,
             #
             scene_chain=[],
-            current_step_index=0,
+            current_chain_index=0,
             current_scene=envir_data.scene_name,
             current_position=envir_data.detail_desc,
             stuck_counter=0,
@@ -510,30 +553,35 @@ class ValleyAgent:
 
     async def init_first_state(self):
         try:
-            # MOCK:
-            data = GetSceneOutput(
-                scene_name="农场房子",
-                is_indoor=True,
-                visual_clues="画面展示了典型的玩家初始农舍内部，包含标志性的电视机、单人床、壁炉以及木质地板和墙纸。",
-                detail_desc="玩家正站在房间中央，位于电视机右侧，紧邻着床铺的左侧边缘，正前方是木桌和椅子。",
-            )
 
             first_screenshot = await self.get_screenshot("png")
 
-            # data: GetSceneOutput = await self.vlm_model.with_structured_output(GetSceneOutput).ainvoke(
-            #     [
-            #         HumanMessage(
-            #             content=[
-            #                 {"type": "text", "text": current_scene_prompt},
-            #                 {
-            #                     "type": "image_url",
-            #                     "image_url": {"url": f"data:image/png;base64,{image_to_base64(first_screenshot)}"},
-            #                 },
-            #             ]
-            #         )
-            #     ]
-            # )  # type: ignore
-            self.logger_write(f"{data}")
+            if self.is_mock_data:
+                data = GetSceneOutput(
+                    scene_name="农场房子",
+                    is_indoor=True,
+                    visual_clues="画面展示了典型的玩家初始农舍内部，包含标志性的电视机、单人床、壁炉以及木质地板和墙纸。",
+                    detail_desc="玩家正站在房间中央，位于电视机右侧，紧邻着床铺的左侧边缘，正前方是木桌和椅子。",
+                )
+
+            else:
+                data: GetSceneOutput = await self.vlm_model.with_structured_output(GetSceneOutput).ainvoke(
+                    [
+                        HumanMessage(
+                            content=[
+                                {"type": "text", "text": current_scene_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/png;base64,{image_to_base64(first_screenshot)}"},
+                                },
+                            ]
+                        )
+                    ]
+                )  # type: ignore
+
+            self.logger_write(f"玩家初始状态: {data.scene_name}({data.detail_desc})")
+            self.logger_write(f"    是否在室内: {data.is_indoor}")
+            self.logger_write(f"    判断规则: {data.visual_clues}")
 
             return data, first_screenshot.size
 

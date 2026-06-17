@@ -3,67 +3,6 @@ from pydantic import BaseModel, Field
 
 path_finding_prompt = """
 # Role
-你是一个精通《星露谷物语》（Stardew Valley）游戏画面几何空间分析与坐标标定的多模态具身智能（Embodied AI）视觉感知专家。你能把复杂的 2D 像素截图，精准转化为下游 A* 算法和键盘驱动所需的绝对像素数据。
-
-# Task
-请仔细观察输入的【游戏实时画面截图】，结合当前已知的游戏状态（地块尺寸 $Scale$），在图像中定位主角、寻找本阶段的目标、并扫描当前视野内阻挡通行的所有障碍物。你的输出将直接作为 A* 算法构建虚拟棋盘（起点、终点、障碍物）的核心基准数据。
-
-注意：必须严格区分“真正的阻挡碰撞体”与“纯视觉背景地皮”，绝不能把可通行、可踩踏的装饰物作为障碍物输出。
-
-# Input Context
-- 【当前实时画面】：[用户输入的图像/截图]
-- 当前所处场景: `{current_scene}`
-- 当前所在位置: `{current_position}`
-- 正在前往的下一阶段位置: `{next_position}`
-- 上游规划可能行进的方向: `{general_direction}`
-- 当前系统精确的地块尺寸 (Scale): `{tile_size}` 像素/格
-
-# CoT (思维链 - 请严格按照以下空间几何逻辑进行推导)
-1. 【精确定位玩家角色物理脚底（A* 起点）】：
-   - 忽略角色的上半身和头部（因为走路动画会上下晃动）。
-   - 在截图中死死锁定角色正下方的【脚底阴影 / 与地面接触的水平面边缘】。
-   - 推导：测出该脚底中心点在整张截图中的绝对像素坐标 (X1, Y1)。
-
-2. 【多策略检索寻路终点（A* 终点）】：
-   全面扫描截图，寻找 `{next_position}`（如：铁匠铺正门、克林特NPC本体）。
-   - 【情况 A：目标在视野内】如果在截图中直接看到了目标，请精准标定该目标“底部与地面交界处”或“交互判定点”的中心，推导其绝对像素坐标为 (X2, Y2)。此时设置 `is_target_in_sight` 为 true。
-   - 【情况 B：目标在视野外（盲区探路）】如果截图中没有目标的踪影，立刻根据【可能行进的方向：`{general_direction}`】，在当前截图的最边缘延伸线上标定一个“盲区过渡点”。
-     - 示例：若方向为“向右（东）”，请直接在屏幕正右侧边缘、角色正前方的道路延伸处标定一个像素点 (X2, Y2) 作为临时终点。此时设置 `is_target_in_sight` 为 false。
-
-3. 【全面标定不可通行区域（A* 障碍物集合）】：
-   仔细观察当前截图中，处于起点 (X1, Y1) 与终点 (X2, Y2) 之间以及周围区域内，所有**绝对无法踩踏通过的实体**。
-   - 静态物体：如墙壁、无法穿过的家具、花坛、栅栏、乱石、大树、水体边界。
-   - 动态物体：如正在走动的村民 NPC、小镇动物/宠物。
-   - 推导：为每一个障碍物拉出一个紧密贴合其物理底座/占地面积的【像素包围框（Bounding Box）】，记录其左上角和右下角像素：[xmin, ymin, xmax, ymax]。
-   【物理通过性判定法则】：
-   - **绝对黑名单（必须作为障碍物输出）**：墙壁、无法穿过的重型家具（如沙发、桌子、大柜子、壁炉、电视机、前台柜台）、室外障碍（如花坛、栅栏、乱石、大树、房屋边缘、水体边界）、实体村民 NPC。
-   - **绝对白名单（纯背景/地皮装饰，绝不能作为障碍物输出）**：**【地毯（Rug）】**、木地板纹理、地砖、各种花纹的地面、农舍内地板上铺设的软垫、散落的小片杂草。玩家和 NPC 可以毫无阻挡地在这些物品上面任意行走！
-
-4. 【生成相对网格步长与障碍验证】：
-   利用已知的地块长度 `{tile_size}`，验证起点与终点的相对网格距离：
-   - $Delta Tile_x = (X2 - X1) / Scale$
-   - $Delta Tile_y = (Y2 - Y1) / Scale$
-
-# Output Format
-请严格按照以下 JSON 格式进行结构化输出，不要包含任何 Markdown 代码块标签（如 ```json）、任何多余的解释或 Prose 描述。必须保证输出是一个可以直接被 Python `json.loads()` 解析的纯字符串：
-
-{{
-    "player_pixel_coordinate": [`X1`, `Y1`],
-    "target_pixel_coordinate": [`X2`, `Y2`],
-    "is_target_in_sight": true_or_false,
-    "grid_distance_delta": [delta_x, delta_y],
-    "obstacles": [
-        {{
-            "name": "障碍物名称（例如：沙发 / 杂草 / 阿比盖尔）",
-            "bounding_box_pixels": [xmin, ymin, xmax, ymax]
-        }}
-    ]
-}}
-"""
-
-
-path_finding_prompt = """
-# Role
 你是一个精通《星露谷物语》（Stardew Valley）游戏画面几何空间分析与碰撞体标定的多模态具身智能（Embodied AI）视觉感知专家。你能把复杂的 2D 游戏实时画面，精准转化为下游 A* 算法和键盘驱动所需的标准化归一化空间坐标。
 
 # Task
@@ -75,8 +14,8 @@ path_finding_prompt = """
 
 # Input Context
 - 当前所处场景: `{current_scene}`
-- 当前所在位置: `{current_position}`
-- 正在前往的下一阶段位置: `{next_position}`
+- 当前所在位置: `{start_position}`
+- 正在前往的下一阶段位置: `{end_position}`
 - 上游规划可能行进的方向: `{general_direction}`
 - 当前系统精确的地块尺寸 (Scale): `{tile_size}` 像素/格
 
@@ -91,10 +30,12 @@ path_finding_prompt = """
    - 推导：测出该脚底中心点在 1000x1000 画布中的比例位置，记为归一化坐标 [nX1, nY1]。
 
 3. 【多策略检索寻路终点（A* 终点）】：
-   全面扫描截图，寻找 `{next_position}`（如：铁匠铺正门、克林特NPC本体、特定出口）。
+   全面扫描截图，寻找 `{end_position}`（如：铁匠铺正门、克林特NPC本体、特定出口）。
    - 【情况 A：目标在视野内】如果在截图中直接看到了目标，请精准标定该目标“底部与地面交界处”或“交互判定点”的中心，推导其在 1000x1000 画布中的归一化坐标为 [nX2, nY2]。此时设置 `is_target_in_sight` 为 true。
    - 【情况 B：目标在视野外（盲区探路）】如果截图中没有目标的踪影，立刻根据【可能行进的方向：`{general_direction}`】，在当前截图的最边缘延伸线上标定一个“盲区过渡点”。
      - 示例：若方向为“向右（东）”，请直接在屏幕正右侧边缘（nX2=1000）、角色正前方的道路延伸处标定一个坐标点 [nX2, nY2] 作为临时终点。此时设置 `is_target_in_sight` 为 false。
+    
+    特别注意（边缘临界判定）：若 end_position 是出口、门廊、转场大门，且该大门的任何一部分（如上半部分门框、地毯边缘）已经暴露在屏幕最下方或边缘切线上，哪怕没有看到门外的世界，也必须将其视为【在视野内】（is_target_in_sight 设为 true），并直接将终点坐标标定在该暴露出的门洞中心。
 
 4. 【全面标定硬性障碍物区域（A* 障碍物集合）】：
    仔细观察当前截图中，处于起点 [nX1, nY1] 与终点 [nX2, nY2] 之间以及周围区域内，所有**绝对无法踩踏通过的垂直碰撞实体**。
@@ -116,6 +57,7 @@ path_finding_prompt = """
     "player_normalized_coordinate": [nX1, nY1],
     "target_normalized_coordinate": [nX2, nY2],
     "is_target_in_sight": true_or_false,
+    transition_point_position: None_or_str,
     "obstacles": [
         {{
             "name": "硬性障碍物名称（例如：沙发 / 乱石 / 阿比盖尔）",
@@ -138,8 +80,6 @@ class Obstacle(BaseModel):
 
 
 class PathFindingOutput(BaseModel):
-    """Path Finding 视觉感知节点针对 Gemini-Flash 优化后的归一化结构化输出模型"""
-
     player_normalized_coordinate: Tuple[int, int] = Field(
         description="玩家角色物理脚底（黑色椭圆阴影中心）在 1000x1000 虚拟画布中的归一化比例坐标 [nX1, nY1]，数值在 0-1000 之间",
     )
@@ -147,8 +87,9 @@ class PathFindingOutput(BaseModel):
         description="目标位置或盲区赶路延伸过渡点在 1000x1000 虚拟画布中的归一化比例坐标 [nX2, nY2]，数值在 0-1000 之间",
     )
     is_target_in_sight: bool = Field(
-        description="目标是否真正出现在当前视野截图中。若为 false，代表当前坐标仅为朝向 general_direction 赶路的屏幕边缘过渡点",
+        description="end_position 是否真正出现在当前视野截图中。若为 false，代表当前坐标仅为朝向 general_direction 赶路的屏幕边缘过渡点",
     )
+    transition_point_position: str | None = Field("如果 end_position 不在视野中，则清晰描述过渡点，否则返回 None")
     obstacles: List[Obstacle] = Field(
         default_factory=list,
         description="当前视野内所有不可通行的硬性静态或动态障碍物列表（自动排除白名单地毯等），供 A* 算法构建棋盘使用",
