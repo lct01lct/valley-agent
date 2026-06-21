@@ -25,6 +25,7 @@ from agent.prompt import (
 
 from agent.prompt.path import draw_path_finding_mock_plot
 from agent.prompt.plan import SceneChainItemWithSubStep, SceneChainSubStep
+from server.valley_server import ValleyServer
 from utils.logger import valley_logger, main_logger
 from utils.screenshot import capture_specific_window, image_to_base64
 
@@ -120,6 +121,11 @@ class ValleyAgent:
         self.mode = os.getenv("MODE", "dev")
         self.is_mock_data = False
 
+        self.valley_server = ValleyServer(
+            cast(str, os.getenv("SMAPI_SEVER_HOST")),
+            int(cast(str, os.getenv("SMAPI_SEVER_PORT"))),
+        )
+
         # 绘制 langgraph 架构图
         png_data = self.agent_app.get_graph(xray=True).draw_mermaid_png()
         with open("docs/stage1-graph.png", "wb") as f:
@@ -168,6 +174,32 @@ class ValleyAgent:
             self.loop_mini_logger = valley_logger.create_logger(mini_log_file_path, mini=True)
 
             main_logger.info(" 日志初始化。。。")
+
+            self.valley_server.start()
+            main_logger.info(" valley server 初始化。。。")
+
+            if self.mode == "dev":
+                try:
+                    while True:
+                        state = self.valley_server.get_game_state()
+
+                        if state is None:
+                            print("⏳ 正在等待游戏内核发送第一帧完整数据包...", end="\r")
+                            time.sleep(0.2)
+                            continue
+
+                        scene = state["scene_name"]
+                        tile_x, tile_y = state["tile_x"], state["tile_y"]
+                        obs_count = len(state["clean_obstacles"])
+
+                        print(
+                            f"🎬 实时场景: {scene:15} | 📍 玩家坐标: ({tile_x:2d}, {tile_y:2d}) | 🧱 障碍物数: {obs_count:4d}",
+                            end="\r",
+                        )
+                        time.sleep(0.1)
+
+                except KeyboardInterrupt:
+                    self.valley_server.stop()
 
             main_logger.info(" 初始化完成。。。")
 
@@ -227,7 +259,7 @@ class ValleyAgent:
         if self.is_mock_data:
             scene_chain: List[SceneChainItemWithSubStep] = [
                 SceneChainItemWithSubStep(
-                    scene_name="农场房子",
+                    scene_name="FarmHouse_Level0",
                     start_position="房间中央床铺左侧",
                     end_position="农舍南侧出口大门",
                     general_direction="向下（南）",
@@ -235,7 +267,7 @@ class ValleyAgent:
                     sub_steps=[],
                 ),
                 SceneChainItemWithSubStep(
-                    scene_name="农场",
+                    scene_name="Farm",
                     start_position="农舍正前方出口",
                     end_position="农场地图右侧通往小镇的栅栏门",
                     general_direction="向右（东）",
@@ -243,7 +275,7 @@ class ValleyAgent:
                     sub_steps=[],
                 ),
                 SceneChainItemWithSubStep(
-                    scene_name="小镇",
+                    scene_name="Town",
                     start_position="小镇左侧入口",
                     end_position="皮埃尔杂货铺正门",
                     general_direction="向右（东）",
@@ -251,7 +283,7 @@ class ValleyAgent:
                     sub_steps=[],
                 ),
                 SceneChainItemWithSubStep(
-                    scene_name="皮埃尔杂货铺",
+                    scene_name="SeedShop",
                     start_position="杂货铺入口处",
                     end_position="杂货铺内部柜台前的种子菜单",
                     general_direction="向上（北）",
@@ -556,28 +588,7 @@ class ValleyAgent:
 
             first_screenshot = await self.get_screenshot("png")
 
-            if self.is_mock_data:
-                data = GetSceneOutput(
-                    scene_name="农场房子",
-                    is_indoor=True,
-                    visual_clues="画面展示了典型的玩家初始农舍内部，包含标志性的电视机、单人床、壁炉以及木质地板和墙纸。",
-                    detail_desc="玩家正站在房间中央，位于电视机右侧，紧邻着床铺的左侧边缘，正前方是木桌和椅子。",
-                )
-
-            else:
-                data: GetSceneOutput = await self.vlm_model.with_structured_output(GetSceneOutput).ainvoke(
-                    [
-                        HumanMessage(
-                            content=[
-                                {"type": "text", "text": current_scene_prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:image/png;base64,{image_to_base64(first_screenshot)}"},
-                                },
-                            ]
-                        )
-                    ]
-                )  # type: ignore
+            state = self.valley_server.get_game_state()
 
             self.logger_write(f"玩家初始状态: {data.scene_name}({data.detail_desc})")
             self.logger_write(f"    是否在室内: {data.is_indoor}")

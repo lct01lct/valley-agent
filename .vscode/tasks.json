@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build_and_deploy",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "publish",
+        "-c",
+        "Debug",
+        "-o",
+        "/Users/evils_you/Library/Application Support/Steam/steamapps/common/Stardew Valley/Contents/MacOS/Mods/StardewMemoryExporter"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/StardewMemoryExporter"
+      },
+      "problemMatcher": "$msCompile"
+    }
+  ]
+}

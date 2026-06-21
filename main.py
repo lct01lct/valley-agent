@@ -17,10 +17,10 @@ async def run_main_agent() -> None:
 
     await agent.initialize()
 
-    print("---------------3s 之后 agent 接管星露谷物语，请切回游戏界面！！！-----------------------")
-    time.sleep(3)
+    # print("---------------3s 之后 agent 接管星露谷物语，请切回游戏界面！！！-----------------------")
+    # time.sleep(3)
 
-    await agent.invoke("前往皮埃尔商店触发种子菜单")
+    # await agent.invoke("前往皮埃尔商店触发种子菜单")
 
     # print(agent.run("请介绍一下你自己。"))
     # print("\n")
