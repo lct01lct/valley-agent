@@ -3,6 +3,8 @@ test.py
 utils/__pycache__
 logs/*
 
+server/img/*
+
 */__pycache__
 */**/__pycache__
 */**/**/__pycache__
