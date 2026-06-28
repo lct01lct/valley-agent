@@ -6,6 +6,15 @@
       "type": "coreclr",
       "request": "attach",
       "processId": "${command:pickProcess}"
+    },
+    {
+      "name": "Python: 调试雷达服务端 (-m)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "server.valley_server", // 🌟 核心：这里代替了原来的 "program"
+      "python": "${command:python.interpreterPath}", // 使用你当前项目选中的虚拟环境 Python
+      "console": "integratedTerminal", // 在 VS Code 内置终端输出日志
+      "justMyCode": true // 只断点你写的代码，不跳进 Python 官方标准库里
     }
   ]
 }

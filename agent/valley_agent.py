@@ -1,31 +1,24 @@
 import os
-import asyncio
 from datetime import datetime
 from typing import cast, overload
 import time
 
 from PIL import Image
-from langchain.messages import HumanMessage
 
 
 from agent.action.enviroment.enviroment import EnvironmentInfo
-from agent.action.scene.scene import Scene, SCENES
-from agent.action.valley_action.AStar import AStarParser, convert_path_to_keyboard_commands
-from agent.action.valley_action.move import ValleyKeyCommand, player_move
+from agent.action.location.location import Location, LOCATIONS
+from agent.action.valley_action.AStar import astar_solver
+from agent.action.valley_action.action_type import StardewCommand
+from agent.action.valley_action.move import get_next_direction_command
 from agent.prompt import (
-    current_scene_prompt,
-    GetSceneOutput,
-    SceneChainItem,
-    SceneChain,
+    LocationMoveChainItem,
+    LocationMoveChain,
     plan_path_finding_prompt,
-    path_finding_prompt,
-    PathFindingOutput,
-    Obstacle,
 )
 
-from agent.prompt.path import draw_path_finding_mock_plot
-from agent.prompt.plan import SceneChainItemWithSubStep, SceneChainSubStep
-from server.valley_server import ValleyServer
+from agent.prompt.plan import LocationMoveChainItemWithMovementHistory
+from server.valley_server import StardewObserverClient, render_live_map
 from utils.logger import valley_logger, main_logger
 from utils.screenshot import capture_specific_window, image_to_base64
 
@@ -41,33 +34,32 @@ from pydantic import BaseModel, Field
 
 
 class AgentState(BaseModel):
+    # 宏观任务
+    mission_text: str  # 用户输入的终极目标, 如 "去皮埃尔杂货铺买种子"
+
     # 游戏固定参数
     tile_size: float
     scale_rate: float
-    player_move_speed: float
 
     # 系统固定参数:
     screen_size: tuple[float, float]
 
-    # 宏观任务
-    mission_text: str  # 用户输入的终极目标, 如 "去皮埃尔杂货铺买种子"
-    scene_chain: List[SceneChainItemWithSubStep]  # LLM 规划的跨地图拓扑链条
-    current_chain_index: int  # 当前正处于拓扑链条的第几步
+    # 寻路
+    location_move_chain_with_movement_history: List[
+        LocationMoveChainItemWithMovementHistory
+    ]  # LLM 规划的跨地图拓扑链条
+    current_location_move_index: int  # 当前正处于拓扑链条的第几步
 
     # 实时环境状态
-    current_scene: Scene  # 当前所在的场景
-    current_position: str  # 当前所在位置的详细描述
-    stuck_counter: int  # 卡墙计数器
+    current_location: Location  # 当前所在的场景
+    current_coord: Tuple[int, int]  # 当前坐标
     command_completed: bool  # 当前步是否正确闭环
     mission_completed: bool  # 任务是否完全闭环
 
-    # 感知与计算中间量
-    vlm_data: PathFindingOutput | None  # VLM 最新一次看屏幕的数据
-    action_commands: List[ValleyKeyCommand]  # 尺子换算出来的、等待执行的物理按键队列
+    command: StardewCommand | None  # 等待执行的物理行为
 
     # 异常判断
     replan_required: bool  # 是否需要重新规划路线/反思
-    reperceive_required: bool  # 是否需要重新观察
 
 
 class StaticEnviromentInfo(BaseModel):
@@ -79,23 +71,16 @@ class PlayerEnviromentInfo(BaseModel):
 
 
 class PlanNodeState(BaseModel):
-    scene_chain: List[SceneChainItemWithSubStep]
-    current_chain_index: int
-    current_scene: Scene
-    replan_required: bool
-    command_completed: Literal[False]
-
-
-class PerceiveNodeState(BaseModel):
-    vlm_data: PathFindingOutput | None
+    location_move_chain_with_movement_history: List[LocationMoveChainItemWithMovementHistory]
+    current_location_move_index: int
+    current_location: Location
     replan_required: bool
     command_completed: Literal[False]
 
 
 class CalculateNodeState(BaseModel):
-    action_commands: List[ValleyKeyCommand]
+    command: StardewCommand | None
     replan_required: bool
-    reperceive_required: bool
 
 
 class ExecuteNode(BaseModel):
@@ -121,10 +106,12 @@ class ValleyAgent:
         self.mode = os.getenv("MODE", "dev")
         self.is_mock_data = False
 
-        self.valley_server = ValleyServer(
+        self.stardew_valley_state = None
+        self.stardew_observer_client = StardewObserverClient(
             cast(str, os.getenv("SMAPI_SEVER_HOST")),
             int(cast(str, os.getenv("SMAPI_SEVER_PORT"))),
         )
+        self.update_stardew_valley_state_frequency = 0.1
 
         # 绘制 langgraph 架构图
         png_data = self.agent_app.get_graph(xray=True).draw_mermaid_png()
@@ -175,31 +162,29 @@ class ValleyAgent:
 
             main_logger.info(" 日志初始化。。。")
 
-            self.valley_server.start()
-            main_logger.info(" valley server 初始化。。。")
+            self.stardew_observer_client.start()
+            main_logger.info(" stardew perception server 初始化。。。")
 
-            if self.mode == "dev":
-                try:
-                    while True:
-                        state = self.valley_server.get_game_state()
+            try:
+                while True:
+                    stardew_valley_state = self.stardew_observer_client.pop_game_state()
+                    self.stardew_valley_state = stardew_valley_state
 
-                        if state is None:
-                            print("⏳ 正在等待游戏内核发送第一帧完整数据包...", end="\r")
-                            time.sleep(0.2)
-                            continue
+                    if stardew_valley_state is None:
+                        time.sleep(self.update_stardew_valley_state_frequency)
+                        continue
+                    else:
+                        if self.mode == "dev":
+                            render_live_map(
+                                stardew_valley_state,
+                                "server/img/stardew_live_map.png",
+                                grid_pixel=40,
+                            )
 
-                        scene = state["scene_name"]
-                        tile_x, tile_y = state["tile_x"], state["tile_y"]
-                        obs_count = len(state["clean_obstacles"])
+                    time.sleep(self.update_stardew_valley_state_frequency)
 
-                        print(
-                            f"🎬 实时场景: {scene:15} | 📍 玩家坐标: ({tile_x:2d}, {tile_y:2d}) | 🧱 障碍物数: {obs_count:4d}",
-                            end="\r",
-                        )
-                        time.sleep(0.1)
-
-                except KeyboardInterrupt:
-                    self.valley_server.stop()
+            except KeyboardInterrupt:
+                self.logger_write("\n🏁 服务端已安全退出。")
 
             main_logger.info(" 初始化完成。。。")
 
@@ -238,257 +223,124 @@ class ValleyAgent:
             else:
                 self.loop_mini_logger.info(message)
 
-    async def update_overview(self):
-        try:
-            TARGET_WINDOW = os.getenv("GAME_WINDOW_TITLE")
-            screenshot = capture_specific_window(TARGET_WINDOW)
-
-            return screenshot
-
-        except Exception as e:
-            raise Exception(f"update_overview 异常: {e}")
-
     async def plan_node(self, state: AgentState) -> PlanNodeState:
         prompt = plan_path_finding_prompt.format(
-            scene_name=state.current_scene,
-            current_position=state.current_position,
+            current_location=state.current_location,
             mission_text=state.mission_text,
-            scenes=SCENES,
+            location=LOCATIONS,
         )
 
         if self.is_mock_data:
-            scene_chain: List[SceneChainItemWithSubStep] = [
-                SceneChainItemWithSubStep(
-                    scene_name="FarmHouse_Level0",
-                    start_position="房间中央床铺左侧",
-                    end_position="农舍南侧出口大门",
-                    general_direction="向下（南）",
+            location_move_chain: List[LocationMoveChainItem] = [
+                LocationMoveChainItem(
+                    current_location="FarmHouse_Level0",
+                    next_location="Farm",
                     is_final=False,
-                    sub_steps=[],
                 ),
-                SceneChainItemWithSubStep(
-                    scene_name="Farm",
-                    start_position="农舍正前方出口",
-                    end_position="农场地图右侧通往小镇的栅栏门",
-                    general_direction="向右（东）",
+                LocationMoveChainItem(
+                    current_location="Farm",
+                    next_location="BusStop",
                     is_final=False,
-                    sub_steps=[],
                 ),
-                SceneChainItemWithSubStep(
-                    scene_name="Town",
-                    start_position="小镇左侧入口",
-                    end_position="皮埃尔杂货铺正门",
-                    general_direction="向右（东）",
+                LocationMoveChainItem(
+                    current_location="BusStop",
+                    next_location="Town",
                     is_final=False,
-                    sub_steps=[],
                 ),
-                SceneChainItemWithSubStep(
-                    scene_name="SeedShop",
-                    start_position="杂货铺入口处",
-                    end_position="杂货铺内部柜台前的种子菜单",
-                    general_direction="向上（北）",
-                    is_final=True,
-                    sub_steps=[],
+                LocationMoveChainItem(
+                    current_location="Town",
+                    next_location="SeedShop",
+                    is_final=False,
                 ),
             ]
         else:
-            data: SceneChain = await self.chat_model.with_structured_output(SceneChain).ainvoke(prompt)  # type: ignore
+            data: LocationMoveChain = await self.chat_model.with_structured_output(LocationMoveChain).ainvoke(prompt)  # type: ignore
 
-            scene_chain = [
-                SceneChainItemWithSubStep(
-                    **scene_chain_item.model_dump(),
-                    sub_steps=[],
-                )
-                for scene_chain_item in data.root
-            ]
+        location_move_chain_with_movement_history = [
+            LocationMoveChainItemWithMovementHistory(
+                **scene_chain_item.model_dump(),
+                movement_history=[],
+            )
+            for scene_chain_item in data.root
+        ]
 
         self.logger_write("\n📋 llm 规划:")
-        for scene_item in scene_chain:
+        for location_move_chain_item in location_move_chain_with_movement_history:
             self.logger_write(
-                f"     {scene_item.scene_name}: {scene_item.general_direction} | {scene_item.start_position}  -> {scene_item.end_position}"
+                f"     {location_move_chain_item.current_location}  -> {location_move_chain_item.next_location}"
             )
 
         return PlanNodeState(
-            scene_chain=scene_chain,
-            current_chain_index=0,
-            current_scene=scene_chain[0].scene_name,
-            replan_required=False,
-            command_completed=False,
-        )
-
-    async def perceive_node(self, state: AgentState):
-        current_step = state.scene_chain[state.current_chain_index]
-
-        self.logger_write(
-            f"\n👀 [观察周围环境]: 咔嚓！截取屏幕。当前所处场景: `{state.current_scene}`, 当前所在位置: `{state.current_position}`, 正在前往: `{current_step.end_position}`"
-        )
-
-        screen_shot = await self.get_screenshot(type="png")
-
-        if self.is_mock_data:
-            data = PathFindingOutput(
-                player_normalized_coordinate=(416, 635),
-                target_normalized_coordinate=(416, 780),
-                is_target_in_sight=True,
-                transition_point_position=None,
-                obstacles=[
-                    Obstacle(name="电视机", normalized_bounding_box=(340, 610, 400, 670)),
-                    Obstacle(name="床铺", normalized_bounding_box=(435, 575, 500, 650)),
-                    Obstacle(name="桌子", normalized_bounding_box=(465, 465, 500, 535)),
-                    Obstacle(name="椅子", normalized_bounding_box=(435, 435, 495, 465)),
-                    Obstacle(name="壁炉", normalized_bounding_box=(560, 560, 640, 630)),
-                    Obstacle(name="北墙", normalized_bounding_box=(325, 325, 380, 675)),
-                    Obstacle(name="西墙", normalized_bounding_box=(325, 380, 635, 435)),
-                    Obstacle(name="东墙", normalized_bounding_box=(630, 380, 635, 675)),
-                ],
-            )
-        else:
-            data: PathFindingOutput = await self.vlm_model.with_structured_output(PathFindingOutput).ainvoke(
-                [
-                    HumanMessage(
-                        content=[
-                            {
-                                "type": "text",
-                                "text": path_finding_prompt.format(
-                                    current_scene=current_step.scene_name,
-                                    start_position=current_step.start_position,
-                                    end_position=current_step.end_position,
-                                    general_direction=current_step.general_direction,
-                                    tile_size=f"{state.scale_rate * state.tile_size}px",
-                                ),
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{image_to_base64(screen_shot)}"},
-                            },
-                        ]
-                    )
-                ]
-            )  # type: ignore
-
-        current_step.sub_steps.append(
-            SceneChainSubStep(
-                step_current_position=state.current_position,
-                step_next_position=current_step.end_position if data.is_target_in_sight else current_step.end_position,
-                fail_reason=None,
-            )
-        )
-
-        to_pixel = lambda x: (x[0] / 1000 * screen_shot.size[0], x[1] / 1000 * screen_shot.size[1])
-        self.logger_write(f"    玩家当前的位置是: {to_pixel(data.player_normalized_coordinate)}")
-        self.logger_write(f"    目标当前的位置是: {to_pixel(data.target_normalized_coordinate)}")
-        self.logger_write(f"    目标是否在视野内: {data.is_target_in_sight}")
-        self.logger_write(f"    过渡点: {data.transition_point_position}")
-        self.logger_write(f"    视野内的障碍物:")
-        for obstacle in data.obstacles:
-            self.logger_write(f"        {obstacle.name} ({obstacle.normalized_bounding_box})")
-
-        if self.mode == "dev":
-            file_name_prefix = f"chain-{state.current_chain_index}-step-{len(current_step.sub_steps) - 1}"
-
-            screen_shot.save(
-                os.path.join(
-                    self.loop_img_dir,
-                    f"{file_name_prefix}-screenshot.png",
-                )
-            )
-            draw_path_finding_mock_plot(
-                vlm_output=data,
-                image_width=screen_shot.size[0],
-                image_height=screen_shot.size[1],
-                tile_size=128,
-                output_filename=os.path.join(self.loop_img_dir, f"{file_name_prefix}-mock.png"),
-            )
-
-        return PerceiveNodeState(
-            vlm_data=data,
+            location_move_chain_with_movement_history=location_move_chain_with_movement_history,
+            current_location_move_index=0,
+            current_location=location_move_chain[0].current_location,
             replan_required=False,
             command_completed=False,
         )
 
     def calculate_node(self, state: AgentState):
-        vlm_res = state.vlm_data
-        self.logger_write(f"\n📏 [数值转化与 A*]: 提取视觉比例进行降维换算...")
+        self.logger_write(f"\n📏 [数值转化与 A*]: 网格建模进行求解路径...")
 
-        if not vlm_res:
-            self.logger_write("❌ perceive_node 未回传数据")
-            raise Exception("❌perceive_node 未回传数据")
+        if self.stardew_valley_state:
+            if (
+                state.current_location
+                != state.location_move_chain_with_movement_history[state.current_location_move_index].current_location
+            ):
+                self.logger_write(
+                    f"     ❌[calculate_node]: 当前的 location 为 {state.current_location} 与 规划路径的 {state.location_move_chain_with_movement_history[state.current_location_move_index].current_location} 不一致",
+                    level="error",
+                )
 
-        player_px = self.coord_to_px(vlm_res.player_normalized_coordinate, state.screen_size)
-        target_px = self.coord_to_px(vlm_res.target_normalized_coordinate, state.screen_size)
-        real_obstacles = []
+                return CalculateNodeState(
+                    command=None,
+                    replan_required=True,
+                )
+            else:
+                route_list = astar_solver.find_path_to_warp_zone(
+                    self.stardew_valley_state,
+                    (self.stardew_valley_state.player_tile_x, self.stardew_valley_state.player_tile_y),
+                    state.location_move_chain_with_movement_history[state.current_location_move_index].next_location,
+                )
 
-        for obs in vlm_res.obstacles:
-            box = obs.normalized_bounding_box
-            xmin, ymin = self.coord_to_px((box[0], box[1]), state.screen_size)
-            xmax, ymax = self.coord_to_px((box[2], box[3]), state.screen_size)
-            real_obstacles.append({"name": obs.name, "box": (xmin, ymin, xmax, ymax)})
+                movement_history = state.location_move_chain_with_movement_history[
+                    state.current_location_move_index
+                ].movement_history
 
-        pixel_path = self.A_star_parser.plan_pixel_path(
-            player_px=player_px,
-            target_px=target_px,
-            real_obstacles=real_obstacles,
-        )
-        keyboard_action_list = convert_path_to_keyboard_commands(
-            pixel_path=pixel_path, walk_speed_px_per_sec=state.player_move_speed  # 游戏默认标准跑步速度
-        )
+                if len(movement_history) == 0:
+                    movement_history.append(route_list[0])
 
-        for action in keyboard_action_list:
-            self.logger_write(f"     ({action.key}, {action.duration})")
+                movement_history.append(route_list[1])
+
+                if self.mode == "dev":
+                    render_live_map(
+                        self.stardew_valley_state,
+                        "server/img/stardew_live_map.png",
+                        grid_pixel=40,
+                        route_list=route_list,
+                    )
+        current_position = route_list[0]
+        next_position = route_list[1]
+        move_command = get_next_direction_command(current=current_position, next_step=next_position)
 
         return CalculateNodeState(
-            action_commands=keyboard_action_list,
+            command=move_command,
             replan_required=False,
-            reperceive_required=True,
         )
 
     def execute_node(self, state: AgentState):
+        command = state.command
 
-        action_commands = state.action_commands
+        # self.logger_write(f"   🚪 [转场加载成功]: 触碰传送点。地图更替：{state.current_scene} ➔ 。等待过图黑屏...")
 
-        for command in action_commands:
-            player_move(command)
-
-        current_step = state.scene_chain[state.current_chain_index]
-
-        # TODO: 如果人物通过 command 未能到达到 current_step.sub_steps[-1].step_next_position
-        # current_step.sub_steps[-1].step_next_position = vlm 判断的位置
-
-        # return ExecuteNode(
-        #     reperceive_required=True,
-        #     current_chain_index=state.current_chain_index,
-        #     command_completed=False,
-        #     mission_completed=False,
-        #     current_position=vlm 判断的位置,
+        # self.logger_write(
+        #     f"   🌀 [成功到达过渡点]: 将继续在 `{state.current_scene}` 内的 `{state.vlm_data.transition_point_position}` 前往到 `{current_step.end_position}`"
         # )
 
-        if state.vlm_data:
-            if state.vlm_data.is_target_in_sight:
-                self.logger_write(
-                    f"   🚪 [转场加载成功]: 触碰传送点。地图更替：{state.current_scene} ➔ 。等待过图黑屏..."
-                )
-                time.sleep(1.0)
+        # self.logger_write(f"   🚪 [转场加载成功]: 触碰传送点。地图更替：{state.current_scene} ➔ 。等待过图黑屏...")
 
-                return ExecuteNode(
-                    reperceive_required=True,
-                    current_chain_index=state.current_chain_index + 1,
-                    command_completed=True,
-                    mission_completed=True if state.current_chain_index + 1 == len(state.scene_chain) else False,
-                    current_position=state.scene_chain[state.current_chain_index + 1].start_position,
-                )
-            else:
-
-                self.logger_write(
-                    f"   🌀 [成功到达过渡点]: 将继续在 `{state.current_scene}` 内的 `{state.vlm_data.transition_point_position}` 前往到 `{current_step.end_position}`"
-                )
-
-                return ExecuteNode(
-                    reperceive_required=True,
-                    current_chain_index=state.current_chain_index,
-                    command_completed=True,
-                    mission_completed=False,
-                    current_position=str(state.vlm_data.transition_point_position),
-                )
+        # self.logger_write(
+        #     f"   🌀 [成功到达过渡点]: 将继续在 `{state.current_scene}` 内的 `{state.vlm_data.transition_point_position}` 前往到 `{current_step.end_position}`"
+        # )
 
     async def should_continue(self, state: AgentState) -> str:
         mission_completed = state.mission_completed
@@ -532,13 +384,11 @@ class ValleyAgent:
         workflow = StateGraph(AgentState)
 
         workflow.add_node("planner", self.plan_node)
-        workflow.add_node("perceiver", self.perceive_node)
         workflow.add_node("calculator", self.calculate_node)
         workflow.add_node("executor", self.execute_node)
 
         workflow.set_entry_point("planner")
-        workflow.add_edge("planner", "perceiver")
-        workflow.add_edge("perceiver", "calculator")
+        workflow.add_edge("planner", "calculator")
         workflow.add_edge("calculator", "executor")
 
         workflow.add_conditional_edges(
@@ -546,7 +396,6 @@ class ValleyAgent:
             self.should_continue,
             {
                 "replan": "planner",  # 跨地图成功, 观察周围环境
-                "reperceive": "perceiver",  # 异常或者寻路失败, 观察周围环境, 反思！
                 "finish": END,  # 抵达终点
             },
         )
@@ -556,45 +405,51 @@ class ValleyAgent:
 
         self.logger_write(f"🧠 任务: {query}\n")
 
-        envir_data, screen_size = await self.init_first_state()
-        state = AgentState(
-            mission_text=query,
-            scale_rate=1.0,
-            tile_size=128,
-            player_move_speed=470,
-            screen_size=screen_size,
-            #
-            scene_chain=[],
-            current_chain_index=0,
-            current_scene=envir_data.scene_name,
-            current_position=envir_data.detail_desc,
-            stuck_counter=0,
-            replan_required=False,
-            reperceive_required=True,
-            mission_completed=False,
-            command_completed=False,
-            vlm_data=None,
-            action_commands=[],
-        )
+        screen_size = await self.init_first_state()
+        stardew_valley_state = self.stardew_valley_state
 
-        self.A_star_parser = AStarParser(tile_size=state.tile_size * state.scale_rate)
+        if stardew_valley_state:
 
-        async for event in self.agent_app.astream(state):
-            for node_name, state_update in event.items():
-                self.logger_write(f"--- 📍 [节点 {node_name} 执行完毕] ---\n")
+            agent_state = AgentState(
+                #
+                mission_text=query,
+                #
+                tile_size=stardew_valley_state.tile_size,
+                scale_rate=1.0,
+                #
+                screen_size=screen_size,
+                # 寻路
+                location_move_chain_with_movement_history=[],
+                current_location_move_index=-1,
+                #
+                current_location=stardew_valley_state.location_name,
+                current_coord=(stardew_valley_state.player_tile_x, stardew_valley_state.player_tile_y),
+                command_completed=False,
+                mission_completed=False,
+                #
+                command=None,
+                #
+                replan_required=False,
+            )
+
+            async for event in self.agent_app.astream(agent_state):
+                for node_name, state_update in event.items():
+                    self.logger_write(f"--- 📍 [节点 {node_name} 执行完毕] ---\n")
+        else:
+            self.logger_write(f"\n\n❌ agent 无法连接 stardew valley!", level="error")
+            raise ValueError("agent 无法连接 stardew valley!")
 
     async def init_first_state(self):
+        state = self.stardew_valley_state
         try:
+            if state:
+                self.logger_write(
+                    f"玩家初始状态: 🎬 场景 : {state.location_name} | 📍 坐标: ({state.player_tile_x}, {state.player_tile_y})"
+                )
 
             first_screenshot = await self.get_screenshot("png")
 
-            state = self.valley_server.get_game_state()
-
-            self.logger_write(f"玩家初始状态: {data.scene_name}({data.detail_desc})")
-            self.logger_write(f"    是否在室内: {data.is_indoor}")
-            self.logger_write(f"    判断规则: {data.visual_clues}")
-
-            return data, first_screenshot.size
+            return first_screenshot.size
 
         except Exception as e:
             self.logger_write(f"\n\n❌ {e}", level="error")
