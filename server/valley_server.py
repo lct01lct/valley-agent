@@ -376,10 +376,10 @@ if __name__ == "__main__":
     executor_client = StardewExecutorClient(host="127.0.0.1", port=8888)
     executor_client.connect()
 
-    TEXT_FILE = "server/img/stardew_radar.txt"
+    # TEXT_FILE = "server/img/stardew_radar.txt"
     IMAGE_FILE = "server/img/stardew_live_map.png"
 
-    # 🌟 持久化记忆路径，彻底阻止 A* 每帧重置污染
+    # 持久化记忆路径，彻底阻止 A* 每帧重置污染
     global_current_path = []
     last_location = None
 
@@ -419,8 +419,8 @@ if __name__ == "__main__":
                 elif current_loc == "BusStop":
                     target_location_name = "Town"
                 elif current_loc == "Town":
-                    target_location_name = "Blacksmith"
-                    # target_location_name = "Forest"
+                    # target_location_name = "Blacksmith"
+                    target_location_name = "Forest"
                 elif current_loc == "Forest":
                     target_location_name = "Woods"
 
@@ -433,7 +433,7 @@ if __name__ == "__main__":
                 # 注意：此处调用 astar_solver 内部的私有阻挡提取方法
                 current_blocked_tiles = astar_solver._get_blocked_tiles(state)
 
-                # 🌟【动态提取目标 warp 的状态】
+                # 【动态提取目标 warp 的状态】
                 target_warp_passable = True
                 target_warp_tile = None
                 for warp in state.warps:
@@ -453,7 +453,7 @@ if __name__ == "__main__":
                     ):
                         is_deviated = True
 
-                    # 🌟 2. 动态过期判定（核心修复）：检查缓存路径的未来 3 步之内，是否有格子在最新视野中变成了障碍物
+                    # 2. 动态过期判定（核心修复）：检查缓存路径的未来 3 步之内，是否有格子在最新视野中变成了障碍物
                     # 如果未来要踩雷，说明路径已过期，必须立刻唤醒 A* 动态绕路！
                     look_ahead_steps = min(3, len(global_current_path))
                     for i in range(look_ahead_steps):
@@ -467,7 +467,7 @@ if __name__ == "__main__":
                             is_path_blocked = True
                             break
 
-                # 🌟【核心修复】防止到目的地后的空路径无限重算
+                # 防止到目的地后的空路径无限重算
                 # 判定条件：如果路径空了，但我们人其实已经站在不可通行大门前（倒数第二格）了，那就坚决不重复调用 A*
                 should_trigger_astar = False
                 if not global_current_path:
@@ -482,17 +482,17 @@ if __name__ == "__main__":
                 elif is_deviated or is_path_blocked:
                     should_trigger_astar = True
 
-                # 🌟 用于标记这一帧寻路是否陷入了绝路
+                # 用于标记这一帧寻路是否陷入了绝路
                 is_dead_end = False
 
-                # 🌟 如果路径空了、偏航了、或者被新视野下的障碍物堵死了，才允许运行 A*
+                # 如果路径空了、偏航了、或者被新视野下的障碍物堵死了，才允许运行 A*
                 if should_trigger_astar:
                     toal_tiles = astar_solver.get_goal_tiles(state, target_location_name)
                     new_path = astar_solver.find_path_to_warp_zone(
                         state, (state.player_tile_x, state.player_tile_y), toal_tiles
                     )
 
-                    # 🌟【核心修复】当发现目标被包裹、被障碍物堵死或无路可走时
+                    # 当发现目标被包裹、被障碍物堵死或无路可走时
                     if new_path is None:
                         if not toal_tiles:
                             print(
@@ -510,7 +510,7 @@ if __name__ == "__main__":
                         is_dead_end = True
 
                     else:
-                        # 🌟【核心修复】过滤试图开倒车的 A* 路径
+                        # 过滤试图开倒车的 A* 路径
                         # 如果旧路径已经被控制器推进切短了（比如此时第一格是 3），而新算出来的路径第一格却退回到 4
                         if global_current_path and new_path:
                             if global_current_path[0] != new_path[0] and len(new_path) > len(global_current_path):
@@ -525,29 +525,23 @@ if __name__ == "__main__":
                         if new_path is not None:
                             global_current_path = new_path
 
-                # 🌟【修改点说明】如果上面 new_path 成功算出来，它会正常走下面的 get_next_move_command
+                # 如果上面 new_path 成功算出来，它会正常走下面的 get_next_move_command
                 # 如果上面 new_path 是 None 触发了“绝路停机”，因为 global_current_path 被清空，
                 # 下面控制器也会安全返回 IDLE，双重保险保障角色绝对钉在原地不动。
-                # 🌟【新增修正】只有在非绝路停机状态下，才允许让控制器去接管驱动逻辑，防止 command 覆盖冲突
+                # 只有在非绝路停机状态下，才允许让控制器去接管驱动逻辑，防止 command 覆盖冲突
                 if not is_dead_end:
                     command, global_current_path = astar_solver.get_next_move_command(
                         state=state, current_path=global_current_path, target_warp_passable=target_warp_passable
                     )
 
                 if "render_thread" not in locals() or not render_thread.is_alive():
-                    # 注意：传入的 state 如果包含复杂对象，最好浅拷贝一下防止多线程冲突
                     render_thread = threading.Thread(
                         target=async_render, args=(state, IMAGE_FILE, 40, global_current_path.copy()), daemon=True
                     )
                     render_thread.start()
 
-                # print(f"{global_current_path}")
-
                 if state.location_name != "Blacksmith":
-                    # 取消 len(global_current_path) > 2 的限制
-                    # 因为到了临界格时长度会变短，如果不无条件发送命令，最后的精准微调和转身按键将无法由 executor 漏掉
                     executor_client.send_command(command)
-                    ...
                 else:
                     executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             except Exception:

@@ -270,13 +270,12 @@ namespace StardewMemoryExporter
         private HashSet<string> ScanLocalObstacles(GameLocation location, Farmer player)
         {
             HashSet<string> obstacles = new HashSet<string>();
-            int scanRange = 30;
+            int scanRange = 25;
             int tx = (int)player.TilePoint.X;
             int ty = (int)player.TilePoint.Y;
             int mapWidth = location.map.Layers[0].LayerWidth;
             int mapHeight = location.map.Layers[0].LayerHeight;
 
-            // 🛠️ 核心剔除点：已完全删去原先一刀切的 doorExemptTiles 收集与跳过逻辑
 
             // 预扫灌木
             HashSet<string> bushWallTiles = new HashSet<string>();
