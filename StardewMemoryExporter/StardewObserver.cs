@@ -151,6 +151,16 @@ namespace StardewMemoryExporter
 
                 HashSet<string> obstacles = ScanLocalObstacles(location, player);
 
+                // if (locationName == "Farm")
+                // {
+                //     var debugTiles = new[] { (63, 29), (61, 30) };
+                //     foreach (var (tileX, tileY) in debugTiles)
+                //     {
+                //         string obstacleSummary = GetObstacleTypeAtTile(location, player, tileX, tileY);
+                //         _monitor.Log($"🧭 [FarmDebug] tile({tileX},{tileY}) => {obstacleSummary}", LogLevel.Info);
+                //     }
+                // }
+
                 StringBuilder sb = new StringBuilder();
                 sb.Append("{\n");
                 sb.Append($"  \"location_name\": \"{locationName}\",\n");
@@ -267,6 +277,62 @@ namespace StardewMemoryExporter
             }
         }
 
+        // private string GetObstacleTypeAtTile(GameLocation location, Farmer player, int x, int y)
+        // {
+        //     if (x < 0 || y < 0 || x >= location.map.Layers[0].LayerWidth || y >= location.map.Layers[0].LayerHeight)
+        //     {
+        //         return "W: out_of_bounds";
+        //     }
+
+        //     Vector2 v = new Vector2(x, y);
+
+        //     if (location is Farm farm)
+        //     {
+        //         foreach (var building in farm.buildings)
+        //         {
+        //             if (building != null && IsTileBlockedByBuilding(building, v))
+        //             {
+        //                 return "W: building";
+        //             }
+        //         }
+        //     }
+
+        //     if (!location.isTilePassable(new xTile.Dimensions.Location(x, y), Game1.viewport))
+        //     {
+        //         return "W: map_collision";
+        //     }
+
+        //     if (location.Objects.TryGetValue(v, out StardewValley.Object obj) && obj != null)
+        //     {
+        //         if (obj.ParentSheetIndex == 590 || (obj.Name != null && obj.Name.Contains("Artifact Spot")))
+        //             return "H: artifact_spot";
+        //         else if (obj.Name != null && obj.Name.Contains("Stone"))
+        //             return "S: stone";
+        //         else
+        //             return "O: object";
+        //     }
+
+        //     if (location.terrainFeatures.TryGetValue(v, out TerrainFeature feature))
+        //     {
+        //         if (feature is Tree ordinaryTree) return $"T{ordinaryTree.growthStage.Value}: tree";
+        //         if (feature is FruitTree fruitTree) return $"F{fruitTree.growthStage.Value}: fruit_tree";
+        //         if (feature is Grass) return "G: grass";
+        //     }
+
+        //     var furnitureObj = location.GetFurnitureAt(v);
+        //     if (furnitureObj != null)
+        //     {
+        //         return furnitureObj.Name != null && furnitureObj.Name.Contains("rug") ? "R: rug" : "O: furniture";
+        //     }
+
+        //     if (location.doesTileHaveProperty(x, y, "Diggable", "Back") == null || location.doesTileHaveProperty(x, y, "NoSpawn", "Back") != null)
+        //     {
+        //         return "X: non_diggable_or_no_spawn";
+        //     }
+
+        //     return "None";
+        // }
+
         private HashSet<string> ScanLocalObstacles(GameLocation location, Farmer player)
         {
             HashSet<string> obstacles = new HashSet<string>();
@@ -362,8 +428,8 @@ namespace StardewMemoryExporter
                     // 4. 地表特征（树、草等）
                     if (location.terrainFeatures.TryGetValue(v, out TerrainFeature feature))
                     {
-                        if (feature is Tree ordinaryTree) { obstacles.Add($"T{ordinaryTree.growthStage.Value}:{x},{y}"); continue; }
-                        if (feature is FruitTree fruitTree) { obstacles.Add($"F{fruitTree.growthStage.Value}:{x},{y}"); continue; }
+                        if (feature is Tree ordinaryTree) { obstacles.Add($"T{Math.Min(ordinaryTree.growthStage.Value, 5)}:{x},{y}"); continue; }
+                        if (feature is FruitTree fruitTree) { obstacles.Add($"F{Math.Min(fruitTree.growthStage.Value, 5)}:{x},{y}"); continue; }
                         if (feature is Grass) { obstacles.Add($"G:{x},{y}"); continue; }
                     }
 
