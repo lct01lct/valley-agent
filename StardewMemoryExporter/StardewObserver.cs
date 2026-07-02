@@ -142,7 +142,7 @@ namespace StardewMemoryExporter
                 // ========================================================================
 
                 string locationName = location.Name ?? "Unknown";
-                if (location is FarmHouse) locationName = $"FarmHouse_Level{player.HouseUpgradeLevel}";
+                // if (location is FarmHouse) locationName = $"FarmHouse_Level{player.HouseUpgradeLevel}";
 
                 if (locationName != _lastCachedLocation)
                 {

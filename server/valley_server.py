@@ -117,7 +117,7 @@ class StardewObserverClient:
         self.is_running = False
         self._has_new_data = False
 
-    def start(self):
+    def connect(self):
         self.is_running = True
         threading.Thread(target=self._network_loop, daemon=True).start()
         print("🚀 [StardewObserverClient] 已就绪...")
@@ -298,6 +298,7 @@ def render_live_map(
                         [x0 + margin, y0 + margin, x1 - margin, y1 - margin], fill=color, outline="#FFFFFF", width=1
                     )
                 elif layer_name in ["T1", "T2", "T3", "T4", "F1", "F2", "F3", "F4"]:
+
                     stage_num = int(layer_name[1])
                     circle_margin = int(grid_pixel * (0.4 - stage_num * 0.08))
                     draw.ellipse(
@@ -371,7 +372,7 @@ if __name__ == "__main__":
     from agent.action.valley_action.AStar import astar_solver
 
     observer_client = StardewObserverClient()
-    observer_client.start()
+    observer_client.connect()
 
     executor_client = StardewExecutorClient(host="127.0.0.1", port=8888)
     executor_client.connect()
@@ -419,8 +420,8 @@ if __name__ == "__main__":
                 elif current_loc == "BusStop":
                     target_location_name = "Town"
                 elif current_loc == "Town":
-                    # target_location_name = "Blacksmith"
-                    target_location_name = "Forest"
+                    target_location_name = "Blacksmith"
+                    # target_location_name = "Forest"
                 elif current_loc == "Forest":
                     target_location_name = "Woods"
 
@@ -519,7 +520,7 @@ if __name__ == "__main__":
                                     new_path[0] == (state.player_tile_x, state.player_tile_y)
                                     and new_path[1] == global_current_path[0]
                                 ):
-                                    print("🛑 [拦截] 阻挡重算 A* 试图塞回已消费格子，强行抛弃新路径防止原地抽搐！")
+                                    # print("🛑 [拦截] 阻挡重算 A* 试图塞回已消费格子，强行抛弃新路径防止原地抽搐！")
                                     new_path = None
 
                         if new_path is not None:
@@ -534,16 +535,16 @@ if __name__ == "__main__":
                         state=state, current_path=global_current_path, target_warp_passable=target_warp_passable
                     )
 
+                if state.location_name != "Blacksmith":
+                    executor_client.send_command(command)
+                else:
+                    executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+
                 if "render_thread" not in locals() or not render_thread.is_alive():
                     render_thread = threading.Thread(
                         target=async_render, args=(state, IMAGE_FILE, 40, global_current_path.copy()), daemon=True
                     )
                     render_thread.start()
-
-                if state.location_name != "Blacksmith":
-                    executor_client.send_command(command)
-                else:
-                    executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             except Exception:
                 pass
 

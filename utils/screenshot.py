@@ -1,3 +1,5 @@
+from typing import Literal, overload
+
 from PIL import Image
 import io
 import os
@@ -82,6 +84,23 @@ def image_to_base64(img_obj: Image.Image, format_name: str = "PNG") -> str:
     base64_encoded = base64.b64encode(img_bytes)
 
     return base64_encoded.decode("utf-8")
+
+
+@overload
+async def get_screenshot(type: Literal["base64"]) -> str: ...
+
+
+@overload
+async def get_screenshot(type: Literal["png"]) -> Image.Image: ...
+
+
+async def get_screenshot(type: Literal["base64", "png"] = "base64"):
+    TARGET_WINDOW = os.getenv("GAME_WINDOW_TITLE")
+    image = capture_specific_window(TARGET_WINDOW)
+
+    if type == "base64":
+        return image_to_base64(image)
+    return image
 
 
 # ===================== 使用示例 =====================

@@ -36,11 +36,11 @@ class LocationMoveChainItem(BaseModel):
     is_final: bool = Field(description="是否就是最终目的地")
 
 
-class LocationMoveChainItemWithMovementHistory(BaseModel):
-    current_location: Location = Field(description="当前所在的场景名称")
-    next_location: Location = Field(description="本阶段需要去场景名称或者交互目标")
-    is_final: bool = Field(description="是否就是最终目的地")
-    movement_history: List[Tuple[int, int]] = Field(description="移动历史记录")
+# class LocationMoveChainItemWithMovementHistory(BaseModel):
+#     current_location: Location = Field(description="当前所在的场景名称")
+#     next_location: Location = Field(description="本阶段需要去场景名称或者交互目标")
+#     is_final: bool = Field(description="是否就是最终目的地")
+#     movement_history: List[Tuple[int, int]] = Field(description="移动历史记录")
 
 
 LocationMoveChain = RootModel[list[LocationMoveChainItem]]

@@ -28,4 +28,3 @@ class ValleyLogger:
 
 
 valley_logger = ValleyLogger()
-main_logger = valley_logger.create_logger("logs/main.log")

@@ -26,7 +26,23 @@ class AStarParser:
 
     def _get_blocked_tiles(self, state: StardewState) -> Set[Tuple[int, int]]:
         blocked: Set[Tuple[int, int]] = set()
-        hard_layers = ["WALL", "OBJECT", "STONE", "BUSH", "TREE_STUMP", "T5", "F5"]
+        hard_layers = [
+            "WALL",
+            "OBJECT",
+            "STONE",
+            "BUSH",
+            "TREE_STUMP",
+            "T5",
+            "T4",
+            "T3",
+            "T2",
+            "T1",
+            "F5",
+            "F4",
+            "F3",
+            "F2",
+            "F1",
+        ]
 
         for layer in hard_layers:
             blocked.update(state.layers.get(layer, set()))
