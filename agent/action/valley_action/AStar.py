@@ -24,6 +24,28 @@ class AStarParser:
         self._last_px = 0.0
         self._last_py = 0.0
 
+    @staticmethod
+    def get_path_coords(path_point) -> Tuple[int, int]:
+        if isinstance(path_point, dict):
+            return int(path_point["x"]), int(path_point["y"])
+        return int(path_point[0]), int(path_point[1])
+
+    @classmethod
+    def annotate_path_points(cls, path, target_warp_passable: bool = True, target_warp_tile=None):
+        if not path:
+            return []
+
+        annotated_path = []
+        for tile in path:
+            tile_coords = cls.get_path_coords(tile)
+            point_type = "walk"
+            if not target_warp_passable and target_warp_tile is not None:
+                if cls.get_path_coords(target_warp_tile) == tile_coords:
+                    point_type = "open_door"
+            annotated_path.append({"x": tile_coords[0], "y": tile_coords[1], "type": point_type})
+
+        return annotated_path
+
     def _get_blocked_tiles(self, state: StardewState) -> Set[Tuple[int, int]]:
         blocked: Set[Tuple[int, int]] = set()
         hard_layers = [
@@ -194,13 +216,13 @@ class AStarParser:
 
     def get_next_move_command(
         self, state: StardewState, current_path: List[Tuple[int, int]], target_warp_passable: bool = True
-    ) -> Tuple[StardewCommand, List[Tuple[int, int]]]:
+    ) -> Tuple[StardewCommand, List[Tuple[int, int]], bool]:
         """
         引入终点自适应死区与绝对转向捕获机制
         """
         # 若路径走完，直接彻底静止（下一帧的绝对兜底，彻底无键静止）
         if not current_path:
-            return StardewCommand(action=StardewAction.IDLE), []
+            return StardewCommand(action=StardewAction.IDLE), [], False
 
         tile_size = 64
         px, py = state.position  # 精准中心
@@ -212,17 +234,21 @@ class AStarParser:
             self._last_px = px
             self._last_py = py
 
-        target_tile = current_path[0]
+        target_tile = self.get_path_coords(current_path[0])
 
         # 判定是否接近不可通行的大门
         is_approaching_blocked_warp = (not target_warp_passable) and (len(current_path) == 2)
 
         # 帧时效与卡挡状态计数
-        if target_tile == self._last_tracked_tile:
+        current_tile = self.get_path_coords(target_tile)
+        last_tracked_tile = (
+            self.get_path_coords(self._last_tracked_tile) if self._last_tracked_tile is not None else None
+        )
+        if current_tile == last_tracked_tile:
             self._current_tile_frame_count += 1
         else:
             self._current_tile_frame_count = 0
-            self._last_tracked_tile = target_tile
+            self._last_tracked_tile = current_tile
 
         # 计算这一帧的实际物理位移
         delta_x = abs(px - self._last_px)
@@ -241,8 +267,8 @@ class AStarParser:
                 current_path = []
             self._current_tile_frame_count = 0
             if not current_path:
-                return StardewCommand(action=StardewAction.IDLE), []
-            target_tile = current_path[0]
+                return StardewCommand(action=StardewAction.IDLE), [], False
+            target_tile = self.get_path_coords(current_path[0])
 
         # 1. 计算当前目标网格（当前踩着的站立格）的正中心物理坐标
         target_x = target_tile[0] * tile_size + (tile_size / 2)
@@ -259,14 +285,14 @@ class AStarParser:
             current_path = current_path[1:]
             self._current_tile_frame_count = 0
             if not current_path:
-                return StardewCommand(action=StardewAction.IDLE, key=[]), []
-            target_tile = current_path[0]
+                return StardewCommand(action=StardewAction.IDLE, key=[]), [], False
+            target_tile = self.get_path_coords(current_path[0])
             target_x = target_tile[0] * tile_size + (tile_size / 2)
             target_y = target_tile[1] * tile_size + (tile_size / 2)
 
         # 🌟【门前精准截断与单帧转身机制 - 漏洞修复版】
         if is_approaching_blocked_warp:
-            door_tile = current_path[1]  # 这才是不可通行大门的真实坐标
+            door_tile = self.get_path_coords(current_path[1])  # 这才是不可通行大门的真实坐标
 
             # 计算大门本身的物理中心点
             door_center_x = door_tile[0] * tile_size + (tile_size / 2)
@@ -290,9 +316,9 @@ class AStarParser:
                     turn_command = StardewCommand(action=StardewAction.MOVE_UP, key=["w"])
 
                 print(
-                    f"🏁 [极致贴近] 已彻底贴死在大门边缘 (到门中心距离: {dist_to_door:.2f}px)。执行单帧面向并清空路径。"
+                    f"\n🏁 [极致贴近] 已彻底贴死在大门边缘 (到门中心距离: {dist_to_door:.2f}px)。执行单帧面向并清空路径。"
                 )
-                return turn_command, []
+                return turn_command, [], True
 
         # 4. 严密的符号偏差与防震死区计算
         diff_x = target_x - px
@@ -333,7 +359,7 @@ class AStarParser:
         else:
             command = StardewCommand(action=StardewAction.IDLE)
 
-        return command, current_path
+        return command, current_path, False
 
 
 astar_solver = AStarParser()

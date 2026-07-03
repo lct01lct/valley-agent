@@ -7,6 +7,7 @@ from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.route_node import RouteNode
 from agent.behavior_tree.behavior_tree import Selector, Sequence
 from agent.behavior_tree.defend_node import Defend_Node
+from agent.behavior_tree.open_door_node import OpenDoorNode
 from agent.behavior_tree.llm_node import Agent_Model, LLM_Node
 from agent.behavior_tree.player_context import PlayerContext
 from utils.logger import valley_logger
@@ -26,7 +27,7 @@ class ValleyAgent:
         self.behavior_tree = Selector(
             [
                 Sequence(node_name="Guard", children=[Defend_Node()]),
-                Sequence(node_name="Route", children=[RouteNode()]),
+                Sequence(node_name="Route", children=[OpenDoorNode(), RouteNode()]),
                 LLM_Node(self),
             ]
         )

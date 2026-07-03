@@ -2,6 +2,8 @@ import threading
 import time
 from typing import List
 
+from matplotlib.pylab import True_
+
 from agent.action.location.location import Location
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
@@ -19,10 +21,12 @@ class RouteNode(BTNode):
         self.global_current_path = []
         self.routes: List[Location] | None = None
         self.route_idx = -1
+        self.is_doing = False
 
         self.IMAGE_FILE = "server/img/stardew_live_map.png"
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
+
         if not blackboard.macro_plan or blackboard.current_step_index >= len(blackboard.macro_plan):
             self.route_start_time = None
             return "FAILURE"
@@ -33,23 +37,29 @@ class RouteNode(BTNode):
             self.route_start_time = None
             return "FAILURE"
 
+        game_state = context.state
+
+        # 进入 RouteNode 后，先检查当前玩家是否已经在目标地点了，如果是，就直接流转到下一个任务
+        if not self.is_doing:
+            if game_state:
+                if game_state.location_name == current_task.target_loc:
+                    blackboard.current_step_index += 1
+                    self.route_start_time = None
+                    self.routes = []
+                    self.route_idx = -1
+                    self.global_current_path = []
+                    print(f"\n🏆 [RouteNode] 当前已经在【{current_task.target_loc}】，流转到下一个任务！")
+                    return "SUCCESS"
+            else:
+                return "RUNNING"
+
+        self.is_doing = True
         if self.route_start_time is None:
             self.route_start_time = time.time()
-            print(f"\n🏃‍♂️ [RouteNode] 首次踩入导航任务，开始全速前往目的地: 【{current_task.target_loc}】...")
+            print(f"\n🏃‍♂️ [RouteNode] 开始寻路任务，开始全速前往目的地: 【{current_task.target_loc}】...")
 
-        game_state = context.state
         if game_state:
             current_run_duration = time.time() - self.route_start_time
-
-            # if current_run_duration >= 100.0:
-            #     print(f"🏆 [RouteNode] 耗时 1s，双脚成功踩中目的地: 【{current_task.target_loc}】！")
-            #     # blackboard.current_step_index += 1
-
-            #     self.route_start_time = None
-            #     self.routes = []
-            #     self.route_idx = -1
-            #     self.global_current_path = []
-            #     return "SUCCESS"
 
             if not self.routes:
                 self.routes = self.stardew_map.find_route(game_state.location_name, current_task.target_loc)
@@ -58,7 +68,6 @@ class RouteNode(BTNode):
                     self.routes = self.routes[1:]
 
             if self.routes:
-
                 target_location_name = self.routes[self.route_idx]
                 if game_state.location_name == target_location_name:
                     self.route_idx += 1
@@ -69,8 +78,11 @@ class RouteNode(BTNode):
                         self.routes = []
                         self.route_idx = -1
                         self.global_current_path = []
+                        self.is_doing = False
 
-                        print(f"🏆 [RouteNode] 耗时 1s，双脚成功踩中目的地: 【{current_task.target_loc}】！")
+                        print(
+                            f"\n🏆 [RouteNode] 耗时 {current_run_duration:.2f}s，双脚成功踩中目的地: 【{current_task.target_loc}】！"
+                        )
                         return "SUCCESS"
 
                     target_location_name = self.routes[self.route_idx]
@@ -87,10 +99,11 @@ class RouteNode(BTNode):
                 is_path_blocked = False
 
                 if self.global_current_path:
+                    first_path_tile = astar_solver.get_path_coords(self.global_current_path[0])
                     # 1. 基础偏航判定：如果当前玩家所处的格子，离路径规划的第一格相差超过 2 个网格，视为严重偏航
                     if (
-                        abs(game_state.player_tile_x - self.global_current_path[0][0]) > 2
-                        or abs(game_state.player_tile_y - self.global_current_path[0][1]) > 2
+                        abs(game_state.player_tile_x - first_path_tile[0]) > 2
+                        or abs(game_state.player_tile_y - first_path_tile[1]) > 2
                     ):
                         is_deviated = True
 
@@ -98,10 +111,11 @@ class RouteNode(BTNode):
                     # 如果未来要踩雷，说明路径已过期，必须立刻唤醒 A* 动态绕路！
                     look_ahead_steps = min(3, len(self.global_current_path))
                     for i in range(look_ahead_steps):
+                        future_tile = astar_solver.get_path_coords(self.global_current_path[i])
                         # 如果未来这个格子刚好是不可通行的门，那这本身就是我们规划好的，不视作异常阻挡
-                        if self.global_current_path[i] == target_warp_tile and not target_warp_passable:
+                        if future_tile == target_warp_tile and not target_warp_passable:
                             continue
-                        if self.global_current_path[i] in current_blocked_tiles:
+                        if future_tile in current_blocked_tiles:
                             # print(
                             #     f"👁️‍🗨️ [视野更新] 发现已规划的未来格子 {global_current_path[i]} 刷新了障碍物！激活 A* 动态绕路。"
                             # )
@@ -152,31 +166,46 @@ class RouteNode(BTNode):
                         # 过滤试图开倒车的 A* 路径
                         # 如果旧路径已经被控制器推进切短了（比如此时第一格是 3），而新算出来的路径第一格却退回到 4
                         if self.global_current_path and new_path:
-                            if self.global_current_path[0] != new_path[0] and len(new_path) > len(
+                            if astar_solver.get_path_coords(
+                                self.global_current_path[0]
+                            ) != astar_solver.get_path_coords(new_path[0]) and len(new_path) > len(
                                 self.global_current_path
                             ):
                                 # 判定新路径的下一步是不是在倒退回我们刚刚切掉的那个格子
-                                if (
-                                    new_path[0] == (game_state.player_tile_x, game_state.player_tile_y)
-                                    and new_path[1] == self.global_current_path[0]
+                                if astar_solver.get_path_coords(new_path[0]) == (
+                                    game_state.player_tile_x,
+                                    game_state.player_tile_y,
+                                ) and astar_solver.get_path_coords(new_path[1]) == astar_solver.get_path_coords(
+                                    self.global_current_path[0]
                                 ):
                                     # print("🛑 [拦截] 阻挡重算 A* 试图塞回已消费格子，强行抛弃新路径防止原地抽搐！")
                                     new_path = None
 
                         if new_path is not None:
-                            self.global_current_path = new_path
+                            self.global_current_path = astar_solver.annotate_path_points(
+                                new_path,
+                                target_warp_passable=target_warp_passable,
+                                target_warp_tile=target_warp_tile,
+                            )
 
                 # 如果上面 new_path 成功算出来，它会正常走下面的 get_next_move_command
                 # 如果上面 new_path 是 None 触发了“绝路停机”，因为 global_current_path 被清空，
                 # 下面控制器也会安全返回 IDLE，双重保险保障角色绝对钉在原地不动。
                 # 只有在非绝路停机状态下，才允许让控制器去接管驱动逻辑，防止 command 覆盖冲突
                 if not is_dead_end:
-                    command, self.global_current_path = astar_solver.get_next_move_command(
+                    command, self.global_current_path, is_blocked_door = astar_solver.get_next_move_command(
                         state=game_state,
                         current_path=self.global_current_path,
                         target_warp_passable=target_warp_passable,
                     )
 
+                    # 需要开门
+                    if is_blocked_door and len(self.global_current_path) == 0:
+                        blackboard.require_open_door = True
+                        print(f"🟡 [RouteNode] 发现前方有不可通行大门，触发开门节点！")
+                        return "SUCCESS"
+                    else:
+                        blackboard.require_open_door = False
                 context.executor_client.send_command(command)
                 # print(
                 #     f"🏃‍♂️ [RouteNode] 正在前往 【{current_task.target_loc}】 途中... 已奔跑 {current_run_duration:.2f}s"
@@ -195,7 +224,6 @@ class RouteNode(BTNode):
                     render_thread.start()
                 return "RUNNING"
             else:
-
                 raise ValueError(
                     f"❌ [RouteNode]：从【{game_state.location_name}】到【{current_task.target_loc}】无法寻路！"
                 )

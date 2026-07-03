@@ -44,7 +44,8 @@ class Agent_Model:
             await asyncio.sleep(2.0)
 
             return [
-                RouteTask(task_type="ROUTE", desc="前往沙滩", target_loc="Beach"),
+                RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="SeedShop"),
+                # RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Town"),
                 RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
             ]
         else:

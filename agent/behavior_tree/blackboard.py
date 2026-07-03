@@ -11,3 +11,6 @@ class AgentBlackboard:
         # 🚦 异步 llm 标志位
         self.is_llm_thinking = False  # 大模型是否正在高维思考中
         self.new_plan_received = False  # 是否收到了刚出炉的新计划
+
+        # 开门
+        self.require_open_door = False

@@ -211,11 +211,16 @@ def render_live_map(
     grid_pixel: int = 40,
     route_list: Optional[List[Tuple[int, int]]] = None,
 ):
+    def extract_route_coords(route_point):
+        if isinstance(route_point, dict):
+            return int(route_point["x"]), int(route_point["y"])
+        return int(route_point[0]), int(route_point[1])
+
     all_points = [(state.player_tile_x, state.player_tile_y)]
     for layer in state.layers.values():
         all_points.extend(layer)
     if route_list:
-        all_points.extend(route_list)
+        all_points.extend(extract_route_coords(point) for point in route_list)
 
     min_x = min(pt[0] for pt in all_points) - 2
     max_x = max(pt[0] for pt in all_points) + 2
@@ -331,7 +336,8 @@ def render_live_map(
 
     if route_list and len(route_list) > 0:
         pixel_points = []
-        for tx, ty in route_list:
+        for route_point in route_list:
+            tx, ty = extract_route_coords(route_point)
             cx, cy = tx - min_x, ty - min_y
             center_x = cx * grid_pixel + grid_pixel // 2
             center_y = cy * grid_pixel + grid_pixel // 2
@@ -447,10 +453,11 @@ if __name__ == "__main__":
                 is_path_blocked = False
 
                 if global_current_path:
+                    first_path_tile = astar_solver.get_path_coords(global_current_path[0])
                     # 1. 基础偏航判定：如果当前玩家所处的格子，离路径规划的第一格相差超过 2 个网格，视为严重偏航
                     if (
-                        abs(state.player_tile_x - global_current_path[0][0]) > 2
-                        or abs(state.player_tile_y - global_current_path[0][1]) > 2
+                        abs(state.player_tile_x - first_path_tile[0]) > 2
+                        or abs(state.player_tile_y - first_path_tile[1]) > 2
                     ):
                         is_deviated = True
 
@@ -458,10 +465,11 @@ if __name__ == "__main__":
                     # 如果未来要踩雷，说明路径已过期，必须立刻唤醒 A* 动态绕路！
                     look_ahead_steps = min(3, len(global_current_path))
                     for i in range(look_ahead_steps):
+                        future_tile = astar_solver.get_path_coords(global_current_path[i])
                         # 如果未来这个格子刚好是不可通行的门，那这本身就是我们规划好的，不视作异常阻挡
-                        if global_current_path[i] == target_warp_tile and not target_warp_passable:
+                        if future_tile == target_warp_tile and not target_warp_passable:
                             continue
-                        if global_current_path[i] in current_blocked_tiles:
+                        if future_tile in current_blocked_tiles:
                             # print(
                             #     f"👁️‍🗨️ [视野更新] 发现已规划的未来格子 {global_current_path[i]} 刷新了障碍物！激活 A* 动态绕路。"
                             # )
@@ -514,24 +522,32 @@ if __name__ == "__main__":
                         # 过滤试图开倒车的 A* 路径
                         # 如果旧路径已经被控制器推进切短了（比如此时第一格是 3），而新算出来的路径第一格却退回到 4
                         if global_current_path and new_path:
-                            if global_current_path[0] != new_path[0] and len(new_path) > len(global_current_path):
+                            if astar_solver.get_path_coords(global_current_path[0]) != astar_solver.get_path_coords(
+                                new_path[0]
+                            ) and len(new_path) > len(global_current_path):
                                 # 判定新路径的下一步是不是在倒退回我们刚刚切掉的那个格子
-                                if (
-                                    new_path[0] == (state.player_tile_x, state.player_tile_y)
-                                    and new_path[1] == global_current_path[0]
+                                if astar_solver.get_path_coords(new_path[0]) == (
+                                    state.player_tile_x,
+                                    state.player_tile_y,
+                                ) and astar_solver.get_path_coords(new_path[1]) == astar_solver.get_path_coords(
+                                    global_current_path[0]
                                 ):
                                     # print("🛑 [拦截] 阻挡重算 A* 试图塞回已消费格子，强行抛弃新路径防止原地抽搐！")
                                     new_path = None
 
                         if new_path is not None:
-                            global_current_path = new_path
+                            global_current_path = astar_solver.annotate_path_points(
+                                new_path,
+                                target_warp_passable=target_warp_passable,
+                                target_warp_tile=target_warp_tile,
+                            )
 
                 # 如果上面 new_path 成功算出来，它会正常走下面的 get_next_move_command
                 # 如果上面 new_path 是 None 触发了“绝路停机”，因为 global_current_path 被清空，
                 # 下面控制器也会安全返回 IDLE，双重保险保障角色绝对钉在原地不动。
                 # 只有在非绝路停机状态下，才允许让控制器去接管驱动逻辑，防止 command 覆盖冲突
                 if not is_dead_end:
-                    command, global_current_path = astar_solver.get_next_move_command(
+                    command, global_current_path, require_open_door = astar_solver.get_next_move_command(
                         state=state, current_path=global_current_path, target_warp_passable=target_warp_passable
                     )
 
