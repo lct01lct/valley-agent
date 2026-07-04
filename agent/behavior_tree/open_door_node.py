@@ -10,7 +10,7 @@ class OpenDoorNode(BTNode):
         if blackboard.require_open_door:
             blackboard.require_open_door = False
 
-            # context.executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"]))
+            context.executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"]))
             return "SUCCESS"
         else:
 

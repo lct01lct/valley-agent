@@ -14,6 +14,8 @@ using StardewValley.TerrainFeatures;
 using StardewValley.Buildings;
 using Microsoft.Xna.Framework;
 using Newtonsoft.Json;
+using StardewModdingAPI.Events;
+using StardewValley.Menus;
 
 namespace StardewMemoryExporter
 {
@@ -29,12 +31,16 @@ namespace StardewMemoryExporter
         private readonly List<string> _cachedWarpJsonList = new List<string>();
         private readonly HashSet<string> _cachedWarpCoords = new HashSet<string>();
 
+        private List<string> _lastHudMessages = new List<string>();
         // 🛡️ 调试专用变量：记录上一次打印的玩家格子坐标，防止高频刷屏
         private Vector2 _lastLoggedPlayerTile = Vector2.Zero;
 
-        public StardewObserver(IMonitor monitor, int port = 9999)
+        private readonly SharedBlackboard _blackboard;
+
+        public StardewObserver(IMonitor monitor, SharedBlackboard blackboard, int port = 9999)
         {
             _monitor = monitor;
+            _blackboard = blackboard;
             Thread serverThread = new Thread(() => StartTcpServer(port)) { IsBackground = true };
             serverThread.Start();
         }

@@ -8,6 +8,9 @@ using Newtonsoft.Json.Linq;
 using Microsoft.Xna.Framework;
 using StardewModdingAPI;
 using StardewValley;
+using System.Linq;
+using StardewValley.Menus;
+using StardewModdingAPI.Events;
 
 namespace StardewMemoryExporter
 {
@@ -18,10 +21,12 @@ namespace StardewMemoryExporter
         private NetworkStream _netStream;
         private readonly IMonitor _monitor;
         private readonly IModHelper _helper;
+        private readonly SharedBlackboard _blackboard;
 
-        public StardewExecutor(IMonitor monitor, IModHelper helper, int port = 8888)
+        public StardewExecutor(IMonitor monitor, SharedBlackboard blackboard, IModHelper helper, int port = 8888)
         {
             _monitor = monitor;
+            _blackboard = blackboard;
             _helper = helper;
             Thread cmdThread = new Thread(() => StartCommandServer(port)) { IsBackground = true };
             cmdThread.Start();
@@ -103,19 +108,20 @@ namespace StardewMemoryExporter
 
                 JObject packet = JObject.Parse(jsonStr);
                 string actionType = packet["action"]?.ToString() ?? "IDLE";
+                var keysArray = packet["key"] as JArray;
+                List<string> pressedKeys = new List<string>();
+                if (keysArray != null)
+                {
+                    foreach (var k in keysArray)
+                    {
+                        string keyStr = k.ToString().ToLower().Trim();
+                        if (!string.IsNullOrEmpty(keyStr)) pressedKeys.Add(keyStr);
+                    }
+                }
 
                 if (actionType.StartsWith("MOVE", StringComparison.OrdinalIgnoreCase))
                 {
-                    var keysArray = packet["key"] as JArray;
-                    List<string> pressedKeys = new List<string>();
-                    if (keysArray != null)
-                    {
-                        foreach (var k in keysArray)
-                        {
-                            string keyStr = k.ToString().ToLower().Trim();
-                            if (!string.IsNullOrEmpty(keyStr)) pressedKeys.Add(keyStr);
-                        }
-                    }
+
 
                     // 2. 解析意图方向并高亮打印
                     string directionSummary = "";
@@ -145,7 +151,14 @@ namespace StardewMemoryExporter
                     return;
                 }
 
+                if (actionType.Equals("OPEN_DOOR", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
+                {
+                    _helper.Input.Press(SButton.X);
+                    _blackboard.IsWaitingForDoorResponse = true;
+                    _blackboard.FrameTimeoutCounter = 0;
 
+                    return;
+                }
                 // 非位移指令也只做打印
                 // _monitor.Log($"🛠️ [解析成功] 其它动作: {actionType}", LogLevel.Info);
                 SendResponseToPython("RECEIVED");
@@ -168,11 +181,14 @@ namespace StardewMemoryExporter
         {
             try
             {
+
                 if (_netStream != null && _connectedClient != null && _connectedClient.Connected)
                 {
                     byte[] msgBytes = Encoding.UTF8.GetBytes(status + "\n");
                     _netStream.Write(msgBytes, 0, msgBytes.Length);
+                    _netStream.Flush();
                 }
+
             }
             catch { }
         }
@@ -188,6 +204,33 @@ namespace StardewMemoryExporter
                 "d" => options.moveRightButton.Length > 0 ? options.moveRightButton[0].ToSButton() : SButton.D,
                 _ => null
             };
+        }
+
+        public void ListenDialogMessages(UpdateTickedEventArgs e)
+        {
+            if (_blackboard.IsWaitingForDoorResponse)
+            {
+                _blackboard.FrameTimeoutCounter++;
+
+                if (Game1.activeClickableMenu is DialogueBox dialogueBox)
+                {
+                    string dialogueText = dialogueBox.getCurrentString();
+
+                    SendResponseToPython(!string.IsNullOrEmpty(dialogueText) ? dialogueText : "SUCCESS");
+
+                    _blackboard.IsWaitingForDoorResponse = false;
+                    _blackboard.FrameTimeoutCounter = 0;
+                }
+
+                else if (_blackboard.FrameTimeoutCounter > 5)
+                {
+                    SendResponseToPython("TIMEOUT");
+                    _blackboard.IsWaitingForDoorResponse = false;
+                    _blackboard.FrameTimeoutCounter = 0;
+                }
+            }
+
+
         }
 
         public void CleanUp()

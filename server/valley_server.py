@@ -190,11 +190,20 @@ class StardewExecutorClient:
             print("⚠️ [StardewExecutorClient] 未建立网络连接，正在尝试自动重连...")
             self.connect()
             if not self.client_socket:
-                return
+                return None
 
         try:
             raw_packet = command.model_dump_json() + "\n"
             self.client_socket.sendall(raw_packet.encode("utf-8"))
+
+            response_buffer = ""
+            while "\n" not in response_buffer:
+                chunk = self.client_socket.recv(1024).decode("utf-8")
+                if not chunk:
+                    raise socket.error("[StardewExecutorClient] C# 异常关闭了连接")
+                response_buffer += chunk
+
+            return response_buffer.strip()
 
         except (socket.error, BrokenPipeError):
             print("❌ [StardewExecutorClient] 与游戏的动作控制连接断开！正在尝试重新恢复链路...")
@@ -390,6 +399,11 @@ if __name__ == "__main__":
     global_current_path = []
     last_location = None
 
+    # time.sleep(2.0)
+    # print(executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"])))
+    # print("-----------------")
+
+    # assert False
     try:
         while True:
             state = observer_client.pop_game_state()
@@ -555,6 +569,7 @@ if __name__ == "__main__":
                     executor_client.send_command(command)
                 else:
                     executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                # executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"]))
 
                 if "render_thread" not in locals() or not render_thread.is_alive():
                     render_thread = threading.Thread(
