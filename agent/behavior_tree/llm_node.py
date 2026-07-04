@@ -42,11 +42,15 @@ class Agent_Model:
     async def run(self, prompt: str, ctx: PlayerContext) -> List[BaseTask]:
         if self.is_mock_data:
             await asyncio.sleep(2.0)
-
+            if "打烊" in prompt:
+                return [
+                    RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Mountain"),
+                    RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
+                ]
             return [
                 RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="SeedShop"),
                 # RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Town"),
-                RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
+                RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
             ]
         else:
             return []
@@ -78,12 +82,12 @@ class LLM_Node(BTNode):
             blackboard.new_plan_received = False
 
             async def async_worker():
-                tasks = await self.agent.models.run(self.agent.task_original_str, ctx)
+                tasks = await self.agent.models.run(blackboard.prompt, ctx)
                 blackboard.macro_plan = tasks
                 blackboard.current_step_index = 0
                 blackboard.new_plan_received = True
 
-                self.agent.prompt = ""
+                blackboard.prompt = ""
 
             # 【绝对不加 await】，让它自己去后台跑
             asyncio.create_task(async_worker())

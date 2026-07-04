@@ -399,11 +399,15 @@ if __name__ == "__main__":
     global_current_path = []
     last_location = None
 
-    # time.sleep(2.0)
-    # print(executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"])))
-    # print("-----------------")
+    time.sleep(2.0)
+    print(executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"])))
+    print("-----------------")
 
-    # assert False
+    time.sleep(2.0)
+    print(executor_client.send_command(StardewCommand(action=StardewAction.CLOSE_DIALOG, key=["x"])))
+    print("-----------------")
+
+    assert False
     try:
         while True:
             state = observer_client.pop_game_state()

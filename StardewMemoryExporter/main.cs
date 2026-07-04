@@ -27,7 +27,6 @@ namespace StardewMemoryExporter
             _observer.PulseGameMemory();
             // _observer.ListenHudMessages(e);
             _executor.ListenDialogMessages(e);
-            _executor.UpdateMovementTick();
         }
 
         protected override void Dispose(bool disposing)

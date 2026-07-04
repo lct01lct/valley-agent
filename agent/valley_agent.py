@@ -34,7 +34,6 @@ class ValleyAgent:
 
     async def invoke(self, task: str):
         self.task_original_str = task
-        self.prompt = task
         self.ctx = PlayerContext()
         self.blackboard = AgentBlackboard()
 

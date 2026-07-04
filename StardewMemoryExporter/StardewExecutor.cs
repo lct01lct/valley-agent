@@ -121,47 +121,23 @@ namespace StardewMemoryExporter
 
                 if (actionType.StartsWith("MOVE", StringComparison.OrdinalIgnoreCase))
                 {
+                    HandleMove(actionType, pressedKeys);
 
-
-                    // 2. 解析意图方向并高亮打印
-                    string directionSummary = "";
-                    if (pressedKeys.Contains("w")) directionSummary += "[上(W)] ";
-                    if (pressedKeys.Contains("s")) directionSummary += "[下(S)] ";
-                    if (pressedKeys.Contains("a")) directionSummary += "[左(A)] ";
-                    if (pressedKeys.Contains("d")) directionSummary += "[右(D)] ";
-
-                    if (string.IsNullOrEmpty(directionSummary))
-                    {
-                        directionSummary = "[无有效移动键]";
-                    }
-
-                    // _monitor.Log($"🏃 [解析成功] 动作: {actionType} | 拟按下方向: {directionSummary}", LogLevel.Info);
-
-
-                    foreach (string keyStr in pressedKeys)
-                    {
-                        if (GetMoveButton(keyStr) is SButton btn)
-                        {
-                            _helper.Input.Press(btn);
-                        }
-                    }
-
-                    // 3. 实时响应 Python 端，防止 Python 端阻塞
-                    SendResponseToPython("RECEIVED");
-                    return;
                 }
-
-                if (actionType.Equals("OPEN_DOOR", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
+                else if (actionType.Equals("CLOSE_DIALOG", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
                 {
-                    _helper.Input.Press(SButton.X);
-                    _blackboard.IsWaitingForDoorResponse = true;
-                    _blackboard.FrameTimeoutCounter = 0;
-
-                    return;
+                    HandleCloseDialog(actionType, pressedKeys);
                 }
-                // 非位移指令也只做打印
-                // _monitor.Log($"🛠️ [解析成功] 其它动作: {actionType}", LogLevel.Info);
-                SendResponseToPython("RECEIVED");
+                else if (actionType.Equals("OPEN_DOOR", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
+                {
+                    HandleOpenDoor(actionType, pressedKeys);
+                }
+                else
+                {
+                    SendResponseToPython($"{actionType} | {string.Join(",", pressedKeys)}");
+                }
+
+
             }
             catch (Exception ex)
             {
@@ -169,13 +145,6 @@ namespace StardewMemoryExporter
             }
         }
 
-        /// <summary>
-        /// 暂时留空，不处理任何角色移动逻辑
-        /// </summary>
-        public void UpdateMovementTick()
-        {
-            // 调试期间，不给游戏注入任何输入，角色绝不会自己移动
-        }
 
         private void SendResponseToPython(string status)
         {
@@ -191,6 +160,58 @@ namespace StardewMemoryExporter
 
             }
             catch { }
+        }
+
+        private void HandleMove(string actionType, List<string> pressedKeys)
+        {
+            string directionSummary = "";
+            if (pressedKeys.Contains("w")) directionSummary += "[上(W)] ";
+            if (pressedKeys.Contains("s")) directionSummary += "[下(S)] ";
+            if (pressedKeys.Contains("a")) directionSummary += "[左(A)] ";
+            if (pressedKeys.Contains("d")) directionSummary += "[右(D)] ";
+
+            if (string.IsNullOrEmpty(directionSummary))
+            {
+                directionSummary = "[无有效移动键]";
+            }
+
+            // _monitor.Log($"🏃 [解析成功] 动作: {actionType} | 拟按下方向: {directionSummary}", LogLevel.Info);
+
+            foreach (string keyStr in pressedKeys)
+            {
+                if (GetMoveButton(keyStr) is SButton btn)
+                {
+                    _helper.Input.Press(btn);
+                }
+            }
+
+            SendResponseToPython("SUCCESS");
+            return;
+        }
+
+        private void HandleCloseDialog(string actionType, List<string> pressedKeys)
+        {
+            if (Game1.activeClickableMenu is DialogueBox dialogueBox)
+            {
+                _helper.Input.Press(SButton.X);
+                SendResponseToPython("SUCCESS");
+            }
+            else
+            {
+                SendResponseToPython("FAILURE");
+            }
+
+
+            return;
+        }
+
+        private void HandleOpenDoor(string actionType, List<string> pressedKeys)
+        {
+            _helper.Input.Press(SButton.X);
+            _blackboard.IsWaitingForDoorResponse = true;
+            _blackboard.FrameTimeoutCounter = 0;
+
+            return;
         }
 
         private SButton? GetMoveButton(string direction)

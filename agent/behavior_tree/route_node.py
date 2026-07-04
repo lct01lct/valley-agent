@@ -21,7 +21,7 @@ class RouteNode(BTNode):
         self.global_current_path = []
         self.routes: List[Location] | None = None
         self.route_idx = -1
-        self.is_doing = False
+        self.is_doing = False  # 标记是否正在执行寻路任务
 
         self.IMAGE_FILE = "server/img/stardew_live_map.png"
 
@@ -202,14 +202,18 @@ class RouteNode(BTNode):
                     # 需要开门
                     if is_blocked_door and len(self.global_current_path) == 0:
                         blackboard.require_open_door = True
+
+                        self.route_start_time = None
+                        self.routes = []
+                        self.route_idx = -1
+                        self.global_current_path = []
+                        self.is_doing = False
                         print(f"🟡 [RouteNode] 发现前方有不可通行大门，触发开门节点！")
                         return "SUCCESS"
                     else:
                         blackboard.require_open_door = False
                 context.executor_client.send_command(command)
-                # print(
-                #     f"🏃‍♂️ [RouteNode] 正在前往 【{current_task.target_loc}】 途中... 已奔跑 {current_run_duration:.2f}s"
-                # )
+
                 print(
                     f"\r🏃‍♂️ [RouteNode] 正在前往 【{current_task.target_loc}】 途中... 已奔跑 {current_run_duration:.2f}s",
                     end="",
@@ -260,6 +264,8 @@ class HardcodedStardewMap:
         "Desert": {"BusStop"},
         "ElliottHouse": {"Beach"},
         "Farm": {
+            "FarmHouse",
+            "Greenhouse",
             "BusStop",
             "Backwoods",
             # "Forest",
@@ -277,7 +283,14 @@ class HardcodedStardewMap:
         "LockedDoorWarp": {"ScienceHouse"},
         "ManorHouse": {"Town"},
         "Mine": {"Mountain", "Town"},
-        "Mountain": {"Backwoods", "BusStop", "Town", "Mine", "Railroad", "Tent", "ScienceHouse"},
+        "Mountain": {
+            # "Backwoods",
+            "Town",
+            "Mine",
+            "Railroad",
+            "Tent",
+            "ScienceHouse",
+        },
         "Railroad": {"Mountain", "Backwoods"},
         "Saloon": {"Town"},
         "SamHouse": {"Town"},
