@@ -284,7 +284,7 @@ class HardcodedStardewMap:
         "ManorHouse": {"Town"},
         "Mine": {"Mountain", "Town"},
         "Mountain": {
-            # "Backwoods",
+            "Backwoods",
             "Town",
             "Mine",
             "Railroad",

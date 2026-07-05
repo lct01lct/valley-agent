@@ -400,12 +400,16 @@ if __name__ == "__main__":
     last_location = None
 
     time.sleep(2.0)
-    print(executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"])))
+    print(executor_client.send_command(StardewCommand(action=StardewAction.USE_TOOL, key=["c"])))
     print("-----------------")
 
-    time.sleep(2.0)
-    print(executor_client.send_command(StardewCommand(action=StardewAction.CLOSE_DIALOG, key=["x"])))
-    print("-----------------")
+    # time.sleep(2.0)
+    # print(executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"])))
+    # print("-----------------")
+
+    # time.sleep(2.0)
+    # print(executor_client.send_command(StardewCommand(action=StardewAction.CLOSE_DIALOG, key=["x"])))
+    # print("-----------------")
 
     assert False
     try:

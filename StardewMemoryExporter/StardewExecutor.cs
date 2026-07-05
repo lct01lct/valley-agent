@@ -121,17 +121,22 @@ namespace StardewMemoryExporter
 
                 if (actionType.StartsWith("MOVE", StringComparison.OrdinalIgnoreCase))
                 {
-                    HandleMove(actionType, pressedKeys);
+                    HandleMove(pressedKeys);
 
                 }
                 else if (actionType.Equals("CLOSE_DIALOG", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
                 {
-                    HandleCloseDialog(actionType, pressedKeys);
+                    HandleCloseDialog(pressedKeys);
                 }
                 else if (actionType.Equals("OPEN_DOOR", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
                 {
-                    HandleOpenDoor(actionType, pressedKeys);
+                    HandleOpenDoor(pressedKeys);
                 }
+                else if (actionType.Equals("USE_TOOL", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("c"))
+                {
+                    HandleUseTool(pressedKeys);
+                }
+
                 else
                 {
                     SendResponseToPython($"{actionType} | {string.Join(",", pressedKeys)}");
@@ -162,7 +167,7 @@ namespace StardewMemoryExporter
             catch { }
         }
 
-        private void HandleMove(string actionType, List<string> pressedKeys)
+        private void HandleMove(List<string> pressedKeys)
         {
             string directionSummary = "";
             if (pressedKeys.Contains("w")) directionSummary += "[上(W)] ";
@@ -189,7 +194,7 @@ namespace StardewMemoryExporter
             return;
         }
 
-        private void HandleCloseDialog(string actionType, List<string> pressedKeys)
+        private void HandleCloseDialog(List<string> pressedKeys)
         {
             if (Game1.activeClickableMenu is DialogueBox dialogueBox)
             {
@@ -205,12 +210,19 @@ namespace StardewMemoryExporter
             return;
         }
 
-        private void HandleOpenDoor(string actionType, List<string> pressedKeys)
+        private void HandleOpenDoor(List<string> pressedKeys)
         {
             _helper.Input.Press(SButton.X);
             _blackboard.IsWaitingForDoorResponse = true;
             _blackboard.FrameTimeoutCounter = 0;
 
+            return;
+        }
+
+        private void HandleUseTool(List<string> pressedKeys)
+        {
+            _helper.Input.Press(SButton.C);
+            SendResponseToPython("SUCCESS");
             return;
         }
 

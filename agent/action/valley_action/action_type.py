@@ -1,4 +1,5 @@
 from enum import Enum
+from tkinter import SW
 from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -23,14 +24,16 @@ class StardewAction(Enum):
     # =========================================================================
     # 🛠️ 2. 农业与资源采集工具 (Tool Actions - 绝大多数消耗体力)
     # =========================================================================
-    USE_AXE = "USE_AXE"  # 使用斧头：砍伐树木、清除大树桩、清理散落的木头
-    USE_PICKAXE = "USE_PICKAXE"  # 使用镐子：开采矿石、砸碎废石、清除错误刨出的耕地、回收摆放的家具
-    USE_HOE = "USE_HOE"  # 使用锄头：在可耕种土地上锄地、挖掘远古蚯蚓(远古种子/文物)
-    USE_WATERING_CAN = "USE_WATERING_CAN"  # 使用浇水壶：给耕地上的作物浇水、给宠物的水碗倒水
-    USE_SCYTHE = "USE_SCYTHE"  # 使用镰刀：收割成熟牧草(转化为干草)、清理杂草 (不消耗体力)
-    USE_FISHING_ROD = "USE_FISHING_ROD"  # 使用鱼竿：在水边抛竿、拉竿、触发并执行钓鱼小游戏
-    USE_MILK_PAIL = "USE_MILK_PAIL"  # 使用挤奶桶：靠近并采集奶牛、山羊等动物的奶
-    USE_SHEARS = "USE_SHEARS"  # 使用剪毛器/毛刷：靠近绵羊剪取羊毛，或抚摸动物提高好感度
+    SWITCH_TOOL = "SWITCH_TOOL"  # 切换工具：按下数字键 1-9，切换当前手中处于激活状态的工具或物品
+    USE_TOOL = "USE_TOOL"  # 使用工具：手持工具右键使用，触发对应的工具行为（如锄地、砍树、浇水等）
+    # USE_AXE = "USE_AXE"  # 使用斧头：砍伐树木、清除大树桩、清理散落的木头
+    # USE_PICKAXE = "USE_PICKAXE"  # 使用镐子：开采矿石、砸碎废石、清除错误刨出的耕地、回收摆放的家具
+    # USE_HOE = "USE_HOE"  # 使用锄头：在可耕种土地上锄地、挖掘远古蚯蚓(远古种子/文物)
+    # USE_WATERING_CAN = "USE_WATERING_CAN"  # 使用浇水壶：给耕地上的作物浇水、给宠物的水碗倒水
+    # USE_SCYTHE = "USE_SCYTHE"  # 使用镰刀：收割成熟牧草(转化为干草)、清理杂草 (不消耗体力)
+    # USE_FISHING_ROD = "USE_FISHING_ROD"  # 使用鱼竿：在水边抛竿、拉竿、触发并执行钓鱼小游戏
+    # USE_MILK_PAIL = "USE_MILK_PAIL"  # 使用挤奶桶：靠近并采集奶牛、山羊等动物的奶
+    # USE_SHEARS = "USE_SHEARS"  # 使用剪毛器/毛刷：靠近绵羊剪取羊毛，或抚摸动物提高好感度
 
     # =========================================================================
     # 📦 3. 世界交互与空手采集 (World Interaction - 通常不消耗体力)
@@ -57,7 +60,7 @@ class StardewAction(Enum):
     PLACE_BOMB = "PLACE_BOMB"  # 放置炸弹：手持并在地面放置樱桃炸弹/巨型炸弹，进行大面积岩石与矿产爆破
 
 
-type KeyType = Literal["w", "a", "s", "d", "x"]
+type KeyType = Literal["w", "a", "s", "d", "x", "c"]
 
 
 class MouseType(BaseModel):
