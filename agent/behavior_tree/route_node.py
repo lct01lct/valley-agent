@@ -1,6 +1,8 @@
 import threading
 import time
-from typing import List
+from collections import deque
+from typing import List, Optional, Tuple
+
 
 from matplotlib.pylab import True_
 
@@ -11,7 +13,7 @@ from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
 from agent.base_task import BaseTask, TaskType
 from agent.action.valley_action.AStar import astar_solver
-from server.valley_server import async_render
+from server.valley_server import StardewState, async_render
 
 
 class RouteNode(BTNode):
@@ -241,8 +243,84 @@ class RouteTask(BaseTask):
         self.target_loc: Location = target_loc
 
 
-from collections import deque
-from typing import List, Optional
+def stardew_survival_cost_function(
+    current: Tuple[int, int], neighbor: Tuple[int, int], state: StardewState, base_cost: float
+) -> Tuple[bool, float, str]:
+    """
+    return: (is_passable: bool, total_cost: float, action_type: str)
+    """
+
+    # 1. 🛑 提取硬阻挡图层 (死墙、静态不可交互障碍)
+    # 这些格子属于“绝对不可逾越”，哪怕满级工具也破坏不了，直接熔断
+    absolute_walls = state.layers.get("WALL", set()).union(state.layers.get("BUSH", set()))
+    if neighbor in absolute_walls:
+        return False, float("inf"), "blocked"
+
+    # 2. 🚪 识别大门图层与交互开关
+    # 假设你的图层里有大门或者带有锁性质的建筑物
+    doors = state.layers.get("OBJECT", set())  # 游戏里许多门和障碍在 OBJECT 层
+    # 这里你可以结合你 state 里的具体门禁状态判断，如果是关着的门
+    if neighbor in doors and getattr(state, "is_door_at_tile", lambda x: False)(neighbor):
+        # 门可以通过，但是需要开门成本 (例如多花费 2.0 秒动作成本)，标记为 "open_door"
+        return True, base_cost + 2.0, "open_door"
+
+    # 3. 🪓 识别可破坏的硬图层 (树、石头、大树桩)
+    trees = state.layers.get("TREE_STUMP", set()).union(
+        state.layers.get("T1", set()), state.layers.get("T2", set()), state.layers.get("T3", set())
+    )
+    stones = state.layers.get("STONE", set())
+
+    # ------------------ 🌳 砍树决策细分 ------------------
+    if neighbor in trees:
+        # 门禁 1：检查工具。手里没斧头，物理上不可能砍开
+        if not getattr(state, "player_has_tool", lambda x: False)("AXE"):
+            return False, float("inf"), "blocked"
+
+        # 门禁 2：检查体力。体力濒临耗尽（比如小于 15 点），拒绝砍树，逼迫算法绕行
+        if getattr(state, "player_current_stamina", 100) < 15:
+            return False, float("inf"), "blocked"
+
+        # 门禁 3：🎒 背包格子与掉落物经济评估
+        backpack_full = getattr(state, "is_backpack_full", lambda: False)()
+        has_wood_stack = getattr(state, "has_item_stack", lambda x: False)("Wood")  # 包里是否有木头格子可堆叠
+
+        # 算经济账：
+        if not backpack_full or has_wood_stack:
+            # 包没满，或者可以完美吸附堆叠。掉落的木头是有效资源，产生正向收益，抵消部分砍树痛苦
+            reward_bonus = 3.0
+        else:
+            # 包满了且无法堆叠！掉落物掉在地上捡不起来，白白浪费。给予高额痛苦惩罚成本
+            reward_bonus = -5.0
+
+        # 砍树固定消耗高昂的时间与耐久成本 (比如 8.0)
+        destroy_tree_cost = 8.0 - reward_bonus
+        return True, base_cost + destroy_tree_cost, "destroy"
+
+    # ------------------ 🪨 砸石头决策细分 ------------------
+    if neighbor in stones:
+        # 门禁 1：没稿子，物理上砸不开
+        if not getattr(state, "player_has_tool", lambda x: False)("PICKAXE"):
+            return False, float("inf"), "blocked"
+
+        # 门禁 2：防累晕保险
+        if getattr(state, "player_current_stamina", 100) < 10:
+            return False, float("inf"), "blocked"
+
+        # 门禁 3：🎒 检查石头掉落物容纳格子
+        backpack_full = getattr(state, "is_backpack_full", lambda: False)()
+        has_stone_stack = getattr(state, "has_item_stack", lambda x: False)("Stone")
+
+        if not backpack_full or has_stone_stack:
+            reward_bonus = 2.0  # 石头价值稍低，给予小幅度收益抵消
+        else:
+            reward_bonus = -4.0  # 满包惩罚
+
+        destroy_stone_cost = 5.0 - reward_bonus
+        return True, base_cost + destroy_stone_cost, "destroy"
+
+    # 4. 🟢 顺畅空地放行
+    # 没有任何硬图层阻挡，完全是康庄大道，保持原本的 A* 基础位移时间代价 (base_cost 是 1.0 或 1.414)
+    return True, base_cost, "walk"
 
 
 class HardcodedStardewMap:

@@ -349,7 +349,7 @@ namespace StardewMemoryExporter
             int mapHeight = location.map.Layers[0].LayerHeight;
 
 
-            // 预扫灌木
+
             HashSet<string> bushWallTiles = new HashSet<string>();
             var largeFeatures = location.largeTerrainFeatures;
             if (largeFeatures != null)
@@ -372,7 +372,7 @@ namespace StardewMemoryExporter
                     if (clump == null) continue;
                     for (int rx = (int)clump.Tile.X; rx < (int)clump.Tile.X + clump.width.Value; rx++)
                         for (int ry = (int)clump.Tile.Y; ry < (int)clump.Tile.Y + clump.height.Value; ry++)
-                            clumpTiles[$"{rx},{ry}"] = $"T:{rx},{ry}";
+                            clumpTiles[$"{rx},{ry}"] = $"TreeStump:{rx},{ry}";
                 }
             }
 
@@ -382,15 +382,23 @@ namespace StardewMemoryExporter
                 {
                     if (x < 0 || y < 0 || x >= mapWidth || y >= mapHeight)
                     {
-                        obstacles.Add($"W:{x},{y}");
+                        obstacles.Add($"Wall:{x},{y}");
                         continue;
                     }
 
                     string coordKey = $"{x},{y}";
                     Vector2 v = new Vector2(x, y);
 
+
+
+
                     if (clumpTiles.ContainsKey(coordKey)) { obstacles.Add(clumpTiles[coordKey]); continue; }
-                    if (bushWallTiles.Contains(coordKey)) { obstacles.Add($"W:{x},{y}"); continue; }
+                    if (bushWallTiles.Contains(coordKey)) { obstacles.Add($"Wall:{x},{y}"); continue; }
+
+                    // if (location.Objects.TryGetValue(v, out StardewValley.Object obje) && obje != null)
+                    // {
+                    //     _monitor.Log($"📍 格子 ({x}, {y}) 上的物品:{obje.DisplayName}({obje.Name}) (ID: {obje.ParentSheetIndex})", LogLevel.Info);
+                    // }
 
                     // 1. 建筑高精度碰撞检测（不再受延伸格子的干扰，只通过 CollisionMap 决定墙体）
                     bool blockedByBuilding = false;
@@ -408,49 +416,55 @@ namespace StardewMemoryExporter
 
                     if (blockedByBuilding)
                     {
-                        obstacles.Add($"W:{x},{y}");
+                        obstacles.Add($"Wall:{x},{y}");
                         continue;
                     }
 
                     // 2. 原生图层物理通行度判断
                     if (!location.isTilePassable(new xTile.Dimensions.Location(x, y), Game1.viewport))
                     {
-                        obstacles.Add($"W:{x},{y}");
+                        obstacles.Add($"Wall:{x},{y}");
                         continue;
                     }
 
                     // 3. 普通实体对象碰撞
                     if (location.Objects.TryGetValue(v, out StardewValley.Object obj) && obj != null)
                     {
+
+
                         if (obj.ParentSheetIndex == 590 || (obj.Name != null && obj.Name.Contains("Artifact Spot")))
-                            obstacles.Add($"H:{x},{y}");
+                            obstacles.Add($"Worm:{x},{y}");
                         else if (obj.Name != null && obj.Name.Contains("Stone"))
-                            obstacles.Add($"S:{x},{y}");
+                            obstacles.Add($"Stone:{x},{y}");
+                        else if (obj.Name != null && obj.Name.Contains("Weeds"))
+                            obstacles.Add($"Weeds:{x},{y}");
+                        else if (obj.Name != null && obj.Name.Contains("Twig"))
+                            obstacles.Add($"Twig:{x},{y}");
                         else
-                            obstacles.Add($"O:{x},{y}");
+                            obstacles.Add($"Object:{x},{y}");
                         continue;
                     }
 
                     // 4. 地表特征（树、草等）
                     if (location.terrainFeatures.TryGetValue(v, out TerrainFeature feature))
                     {
-                        if (feature is Tree ordinaryTree) { obstacles.Add($"T{Math.Min(ordinaryTree.growthStage.Value, 5)}:{x},{y}"); continue; }
-                        if (feature is FruitTree fruitTree) { obstacles.Add($"F{Math.Min(fruitTree.growthStage.Value, 5)}:{x},{y}"); continue; }
-                        if (feature is Grass) { obstacles.Add($"G:{x},{y}"); continue; }
+                        if (feature is Tree ordinaryTree) { obstacles.Add($"Tree{Math.Min(ordinaryTree.growthStage.Value, 5)}:{x},{y}"); continue; }
+                        if (feature is FruitTree fruitTree) { obstacles.Add($"FruitTree{Math.Min(fruitTree.growthStage.Value, 5)}:{x},{y}"); continue; }
+                        if (feature is Grass) { obstacles.Add($"Grass:{x},{y}"); continue; }
                     }
 
                     // 5. 家具检测
                     var furnitureObj = location.GetFurnitureAt(v);
                     if (furnitureObj != null)
                     {
-                        obstacles.Add(furnitureObj.Name != null && furnitureObj.Name.Contains("rug") ? $"R:{x},{y}" : $"O:{x},{y}");
+                        obstacles.Add(furnitureObj.Name != null ? $"Furniture|{furnitureObj.Name}:{x},{y}" : $"Object:{x},{y}");
                         continue;
                     }
 
                     // 6. 统一的基础地图无机属性（不可耕种区等）扫描判定
                     if (location.doesTileHaveProperty(x, y, "Diggable", "Back") == null || location.doesTileHaveProperty(x, y, "NoSpawn", "Back") != null)
                     {
-                        obstacles.Add($"X:{x},{y}");
+                        obstacles.Add($"Dead:{x},{y}");
                     }
                 }
             }

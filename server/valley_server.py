@@ -52,33 +52,36 @@ class StardewState:
             )
 
         self.layers: Dict[str, Set[Tuple[int, int]]] = {
-            "DEAD": set(),
-            "RUG": set(),
-            "GRASS": set(),
-            "WALL": set(),
-            "OBJECT": set(),
-            "STONE": set(),
-            "BUSH": set(),
-            "WORM": set(),
-            "TREE_STUMP": set(),  # 🌟【与 C# 对齐】：新增硬木大树桩、陨石资源堆图层 (T)
+            "Dead": set(),
+            "Bed": set(),
+            "Rug": set(),
+            "Grass": set(),
+            "Wall": set(),
+            "Object": set(),
+            "Stone": set(),
+            "Weeds": set(),
+            "Twig": set(),
+            "Bush": set(),
+            "Worm": set(),
+            "TreeStump": set(),  # 硬木大树桩、陨石资源堆图层
             # 普通树的 6 个阶段
-            "T0": set(),
-            "T1": set(),
-            "T2": set(),
-            "T3": set(),
-            "T4": set(),
-            "T5": set(),
+            "Tree0": set(),
+            "Tree1": set(),
+            "Tree2": set(),
+            "Tree3": set(),
+            "Tree4": set(),
+            "Tree5": set(),
             # 果树的 6 个阶段
-            "F0": set(),
-            "F1": set(),
-            "F2": set(),
-            "F3": set(),
-            "F4": set(),
-            "F5": set(),
+            "FruitTree0": set(),
+            "FruitTree1": set(),
+            "FruitTree2": set(),
+            "FruitTree3": set(),
+            "FruitTree4": set(),
+            "FruitTree5": set(),
         }
 
         for item in raw_json_data.get("obstacles", []):
-            clean_str = item.replace('"', "").strip()
+            clean_str: str = item.replace('"', "").strip()
             if ":" in clean_str:
                 prefix, coords = clean_str.split(":", 1)
                 if "," in coords:
@@ -86,24 +89,34 @@ class StardewState:
                         tx, ty = map(int, coords.split(","))
                         if prefix in self.layers:
                             self.layers[prefix].add((tx, ty))
-                        elif prefix == "W":
-                            self.layers["WALL"].add((tx, ty))
-                        elif prefix == "T":
-                            self.layers["TREE_STUMP"].add((tx, ty))  # 🌟【与 C# 对齐】：解析硬木大树桩 T:x,y
-                        elif prefix == "O":
-                            self.layers["OBJECT"].add((tx, ty))
-                        elif prefix == "S":
-                            self.layers["STONE"].add((tx, ty))
-                        elif prefix == "B":
-                            self.layers["BUSH"].add((tx, ty))
-                        elif prefix == "R":
-                            self.layers["RUG"].add((tx, ty))
-                        elif prefix == "G":
-                            self.layers["GRASS"].add((tx, ty))
-                        elif prefix == "H":
-                            self.layers["WORM"].add((tx, ty))
-                        elif prefix == "X":
-                            self.layers["DEAD"].add((tx, ty))
+                        elif prefix == "Wall":
+                            self.layers["Wall"].add((tx, ty))
+                        elif prefix == "TreeStump":
+                            self.layers["TreeStump"].add((tx, ty))  # 🌟【与 C# 对齐】：解析硬木大树桩 T:x,y
+                        elif prefix == "Object":
+                            self.layers["Object"].add((tx, ty))
+                        elif prefix == "Stone":
+                            self.layers["Stone"].add((tx, ty))
+                        elif prefix == "Weeds":
+                            self.layers["Weeds"].add((tx, ty))
+                        elif prefix == "Twig":
+                            self.layers["Twig"].add((tx, ty))
+                        elif prefix == "Bush":
+                            self.layers["Bush"].add((tx, ty))
+                        elif "Furniture|" in prefix:
+                            prefix = prefix.replace("Furniture|", "")
+                            if "Rug" in prefix:
+                                self.layers["Rug"].add((tx, ty))
+                            elif "Bed" in prefix:
+                                self.layers["Bed"].add((tx, ty))
+                            else:
+                                self.layers["Object"].add((tx, ty))
+                        elif prefix == "Grass":
+                            self.layers["Grass"].add((tx, ty))
+                        elif prefix == "Worm":
+                            self.layers["Worm"].add((tx, ty))
+                        elif prefix == "Dead":
+                            self.layers["Dead"].add((tx, ty))
                     except ValueError:
                         pass
 
@@ -214,17 +227,18 @@ class StardewExecutorClient:
             self.client_socket.close()
 
 
+def extract_route_coords(route_point):
+    if isinstance(route_point, dict):
+        return int(route_point["x"]), int(route_point["y"])
+    return int(route_point[0]), int(route_point[1])
+
+
 def render_live_map(
     state: StardewState,
     output_path: str,
     grid_pixel: int = 40,
-    route_list: Optional[List[Tuple[int, int]]] = None,
+    route_list: Optional[List[dict]] = None,
 ):
-    def extract_route_coords(route_point):
-        if isinstance(route_point, dict):
-            return int(route_point["x"]), int(route_point["y"])
-        return int(route_point[0]), int(route_point[1])
-
     all_points = [(state.player_tile_x, state.player_tile_y)]
     for layer in state.layers.values():
         all_points.extend(layer)
@@ -243,51 +257,32 @@ def render_live_map(
     draw = ImageDraw.Draw(img)
 
     color_map = {
-        "DEAD": "#07583A",
-        "RUG": "#DDA7A5",
-        "GRASS": "#A3E04F",
-        "WALL": "#30241A",
-        "OBJECT": "#64BC26",
-        "STONE": "#AB9794",
-        "BUSH": "#317F43",
-        "WORM": "#8A5A36",
-        "TREE_STUMP": "#5C4033",  # 🌟【与 C# 对齐】：深褐色渲染硬木大树桩
-        "T0": "#8B5A2B",
-        "T1": "#B3D175",
-        "T2": "#80B143",
-        "T3": "#4C8A36",
-        "T4": "#2E6B27",
-        "T5": "#1D5C2E",
-        "F0": "#FF6347",
-        "F1": "#FF8C69",
-        "F2": "#FFA07A",
-        "F3": "#CD853F",
-        "F4": "#4E8B67",
-        "F5": "#2E5C3E",
+        "Dead": "#07583A",  # 不可种植的地块
+        "Bed": "#8B4513",
+        "Rug": "#DDA7A5",
+        "Grass": "#A3E04F",  # 牧草
+        "Wall": "#30241A",
+        "Object": "blue",
+        "Stone": "#AB9794",
+        "Weeds": "#2D5A27",
+        "Twig": "#6B4C2A",
+        "Bush": "#5C4033",
+        "Worm": "#8A5A36",
+        "TreeStump": "#5C4033",  # 硬木大树桩
+        "Tree0": "#8B5A2B",
+        "Tree1": "#B3D175",
+        "Tree2": "#80B143",
+        "Tree3": "#4C8A36",
+        "Tree4": "#2E6B27",
+        "Tree5": "#1D5C2E",
+        "FruitTree0": "#FF6347",
+        "FruitTree1": "#FF8C69",
+        "FruitTree2": "#FFA07A",
+        "FruitTree3": "#CD853F",
+        "FruitTree4": "#4E8B67",
+        "FruitTree5": "#2E5C3E",
     }
-    render_order = [
-        "DEAD",
-        "RUG",
-        "GRASS",
-        "WALL",
-        "OBJECT",
-        "STONE",
-        "BUSH",
-        "WORM",
-        "TREE_STUMP",
-        "T0",
-        "T1",
-        "T2",
-        "T3",
-        "T4",
-        "T5",
-        "F0",
-        "F1",
-        "F2",
-        "F3",
-        "F4",
-        "F5",
-    ]
+    render_order = color_map.keys()
 
     for layer_name in render_order:
         color = color_map[layer_name]
@@ -297,23 +292,32 @@ def render_live_map(
                 x0, y0 = cx * grid_pixel, cy * grid_pixel
                 x1, y1 = x0 + grid_pixel - 1, y0 + grid_pixel - 1
 
-                if layer_name == "WORM":
+                if layer_name == "Worm":
                     draw.rectangle([x0, y0, x1, y1], fill=color)
                     core_margin = int(grid_pixel * 0.25)
                     draw.rectangle(
                         [x0 + core_margin, y0 + core_margin, x1 - core_margin, y1 - core_margin], fill="#E64A19"
                     )
-                elif layer_name == "TREE_STUMP":  # 🌟 给大树桩画个同心内圈，便于一眼在雷达上看出来
+                elif layer_name == "TreeStump":  # 🌟 给大树桩画个同心内圈，便于一眼在雷达上看出来
                     draw.rectangle([x0, y0, x1, y1], fill=color)
                     draw.rectangle([x0 + 6, y0 + 6, x1 - 6, y1 - 6], outline="#8B4513", width=2)
-                elif layer_name in ["T0", "F0"]:
+                elif layer_name in ["Tree0", "FruitTree0"]:
                     margin = int(grid_pixel * 0.3)
                     draw.rectangle(
                         [x0 + margin, y0 + margin, x1 - margin, y1 - margin], fill=color, outline="#FFFFFF", width=1
                     )
-                elif layer_name in ["T1", "T2", "T3", "T4", "F1", "F2", "F3", "F4"]:
+                elif layer_name in [
+                    "Tree1",
+                    "Tree2",
+                    "Tree3",
+                    "Tree4",
+                    "FruitTree1",
+                    "FruitTree2",
+                    "FruitTree3",
+                    "FruitTree4",
+                ]:
 
-                    stage_num = int(layer_name[1])
+                    stage_num = int(layer_name[-1])
                     circle_margin = int(grid_pixel * (0.4 - stage_num * 0.08))
                     draw.ellipse(
                         [x0 + circle_margin, y0 + circle_margin, x1 - circle_margin, y1 - circle_margin],
@@ -355,7 +359,7 @@ def render_live_map(
         if len(pixel_points) >= 2:
             draw.line(pixel_points, fill="#42A5F5", width=4, joint="curve")
 
-        end_tx, end_ty = route_list[-1]
+        end_tx, end_ty, route_type = route_list[-1].values()
         ecx, ecy = end_tx - min_x, end_ty - min_y
         if 0 <= ecx < map_width and 0 <= ecy < map_height:
             ex0, ey0 = ecx * grid_pixel, ecy * grid_pixel
@@ -400,8 +404,8 @@ if __name__ == "__main__":
     last_location = None
 
     time.sleep(2.0)
-    print(executor_client.send_command(StardewCommand(action=StardewAction.USE_TOOL, key=["c"])))
-    print("-----------------")
+    # print(executor_client.send_command(StardewCommand(action=StardewAction.USE_TOOL, key=["c"])))
+    # print("-----------------")
 
     # time.sleep(2.0)
     # print(executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"])))
@@ -411,7 +415,7 @@ if __name__ == "__main__":
     # print(executor_client.send_command(StardewCommand(action=StardewAction.CLOSE_DIALOG, key=["x"])))
     # print("-----------------")
 
-    assert False
+    # assert False
     try:
         while True:
             state = observer_client.pop_game_state()
@@ -436,7 +440,7 @@ if __name__ == "__main__":
             # except Exception:
             #     pass
 
-            try:
+            if True:
                 target_location_name: Location = "Farm"
                 current_loc = state.location_name
 
@@ -579,13 +583,12 @@ if __name__ == "__main__":
                     executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
                 # executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"]))
 
+                # render_live_map(state, IMAGE_FILE, 40, global_current_path.copy())
                 if "render_thread" not in locals() or not render_thread.is_alive():
                     render_thread = threading.Thread(
                         target=async_render, args=(state, IMAGE_FILE, 40, global_current_path.copy()), daemon=True
                     )
                     render_thread.start()
-            except Exception:
-                pass
 
     except KeyboardInterrupt:
         print("\n🏁 [StardewObserverClient] 服务端已安全退出。")
