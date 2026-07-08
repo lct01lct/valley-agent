@@ -3,12 +3,14 @@ import json
 import threading
 import time
 import os
-from typing import List, Tuple, Dict, Set, Optional
+from typing import List, Dict, Set, Optional
 from PIL import Image, ImageDraw
 
 import sys
 
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
+
+from server.type import Position, Tile
 
 sys.path.append("agent")
 from agent.action.location.location import Location
@@ -18,13 +20,11 @@ class WarpZone:
     def __init__(
         self,
         target_location: str,
-        tile_x: int,
-        tile_y: int,
+        tile: Tile,
         is_passable: bool,
     ):
         self.target_location: str = target_location
-        self.tile_x: int = tile_x
-        self.tile_y: int = tile_y
+        self.tile = tile
         self.is_passable: bool = is_passable
 
 
@@ -34,24 +34,22 @@ class StardewState:
         self.tile_size: int = raw_json_data.get("tile_size", 0)
 
         raw_position = raw_json_data.get("position", [0.0, 0.0])
-        self.position: Tuple[float, float] = (raw_position[0], raw_position[1])
+        self.position = Position(raw_position[0], raw_position[1])
 
         tile_coord = raw_json_data.get("tile_coordinate", [0, 0])
-        self.player_tile_x: int = tile_coord[0]
-        self.player_tile_y: int = tile_coord[1]
+        self.player_tile = Tile(tile_coord[0], tile_coord[1])
 
         self.warps: List[WarpZone] = []
         for w_dict in raw_json_data.get("warps", []):
             self.warps.append(
                 WarpZone(
                     target_location=w_dict.get("target_location", "Unknown"),
-                    tile_x=int(w_dict.get("tile_x", 0)),
-                    tile_y=int(w_dict.get("tile_y", 0)),
+                    tile=Tile(int(w_dict.get("tile_x", 0)), int(w_dict.get("tile_y", 0))),
                     is_passable=bool(w_dict.get("is_passable", False)),
                 )
             )
 
-        self.layers: Dict[str, Set[Tuple[int, int]]] = {
+        self.layers: Dict[str, Set[Tile]] = {
             "Dead": set(),
             "Bed": set(),
             "Rug": set(),
@@ -88,35 +86,35 @@ class StardewState:
                     try:
                         tx, ty = map(int, coords.split(","))
                         if prefix in self.layers:
-                            self.layers[prefix].add((tx, ty))
+                            self.layers[prefix].add(Tile(tx, ty))
                         elif prefix == "Wall":
-                            self.layers["Wall"].add((tx, ty))
+                            self.layers["Wall"].add(Tile(tx, ty))
                         elif prefix == "TreeStump":
-                            self.layers["TreeStump"].add((tx, ty))  # 🌟【与 C# 对齐】：解析硬木大树桩 T:x,y
+                            self.layers["TreeStump"].add(Tile(tx, ty))  # 🌟【与 C# 对齐】：解析硬木大树桩 T:x,y
                         elif prefix == "Object":
-                            self.layers["Object"].add((tx, ty))
+                            self.layers["Object"].add(Tile(tx, ty))
                         elif prefix == "Stone":
-                            self.layers["Stone"].add((tx, ty))
+                            self.layers["Stone"].add(Tile(tx, ty))
                         elif prefix == "Weeds":
-                            self.layers["Weeds"].add((tx, ty))
+                            self.layers["Weeds"].add(Tile(tx, ty))
                         elif prefix == "Twig":
-                            self.layers["Twig"].add((tx, ty))
+                            self.layers["Twig"].add(Tile(tx, ty))
                         elif prefix == "Bush":
-                            self.layers["Bush"].add((tx, ty))
+                            self.layers["Bush"].add(Tile(tx, ty))
                         elif "Furniture|" in prefix:
                             prefix = prefix.replace("Furniture|", "")
                             if "Rug" in prefix:
-                                self.layers["Rug"].add((tx, ty))
+                                self.layers["Rug"].add(Tile(tx, ty))
                             elif "Bed" in prefix:
-                                self.layers["Bed"].add((tx, ty))
+                                self.layers["Bed"].add(Tile(tx, ty))
                             else:
-                                self.layers["Object"].add((tx, ty))
+                                self.layers["Object"].add(Tile(tx, ty))
                         elif prefix == "Grass":
-                            self.layers["Grass"].add((tx, ty))
+                            self.layers["Grass"].add(Tile(tx, ty))
                         elif prefix == "Worm":
-                            self.layers["Worm"].add((tx, ty))
+                            self.layers["Worm"].add(Tile(tx, ty))
                         elif prefix == "Dead":
-                            self.layers["Dead"].add((tx, ty))
+                            self.layers["Dead"].add(Tile(tx, ty))
                     except ValueError:
                         pass
 
@@ -163,7 +161,6 @@ class StardewObserverClient:
                                 self._latest_state = state_obj
                                 self._has_new_data = True
                         except json.JSONDecodeError:
-                            print(1)
                             continue
             except socket.error:
                 time.sleep(2.0)
@@ -227,10 +224,12 @@ class StardewExecutorClient:
             self.client_socket.close()
 
 
-def extract_route_coords(route_point):
+def extract_route_coords(route_point) -> Tile:
+    if isinstance(route_point, Tile):
+        return Tile(int(route_point.x), int(route_point.y))
     if isinstance(route_point, dict):
-        return int(route_point["x"]), int(route_point["y"])
-    return int(route_point[0]), int(route_point[1])
+        return Tile(int(route_point["x"]), int(route_point["y"]))
+    return Tile(int(route_point[0]), int(route_point[1]))
 
 
 def render_live_map(
@@ -239,16 +238,16 @@ def render_live_map(
     grid_pixel: int = 40,
     route_list: Optional[List[dict]] = None,
 ):
-    all_points = [(state.player_tile_x, state.player_tile_y)]
+    all_points: list[Tile] = [state.player_tile]
     for layer in state.layers.values():
         all_points.extend(layer)
     if route_list:
         all_points.extend(extract_route_coords(point) for point in route_list)
 
-    min_x = min(pt[0] for pt in all_points) - 2
-    max_x = max(pt[0] for pt in all_points) + 2
-    min_y = min(pt[1] for pt in all_points) - 2
-    max_y = max(pt[1] for pt in all_points) + 2
+    min_x = min(pt.x for pt in all_points) - 2
+    max_x = max(pt.x for pt in all_points) + 2
+    min_y = min(pt.y for pt in all_points) - 2
+    max_y = max(pt.y for pt in all_points) + 2
 
     map_width = max_x - min_x + 1
     map_height = max_y - min_y + 1
@@ -286,7 +285,8 @@ def render_live_map(
 
     for layer_name in render_order:
         color = color_map[layer_name]
-        for tx, ty in state.layers[layer_name]:
+        for tile in state.layers[layer_name]:
+            tx, ty = tile.x, tile.y
             cx, cy = tx - min_x, ty - min_y
             if 0 <= cx < map_width and 0 <= cy < map_height:
                 x0, y0 = cx * grid_pixel, cy * grid_pixel
@@ -329,7 +329,7 @@ def render_live_map(
                     draw.rectangle([x0, y0, x1, y1], fill=color)
 
     for warp in state.warps:
-        cx, cy = warp.tile_x - min_x, warp.tile_y - min_y
+        cx, cy = warp.tile.x - min_x, warp.tile.y - min_y
         if 0 <= cx < map_width and 0 <= cy < map_height:
             x0, y0 = cx * grid_pixel, cy * grid_pixel
             x1, y1 = x0 + grid_pixel - 1, y0 + grid_pixel - 1
@@ -350,7 +350,8 @@ def render_live_map(
     if route_list and len(route_list) > 0:
         pixel_points = []
         for route_point in route_list:
-            tx, ty = extract_route_coords(route_point)
+            tile = extract_route_coords(route_point)
+            tx, ty = tile.x, tile.y
             cx, cy = tx - min_x, ty - min_y
             center_x = cx * grid_pixel + grid_pixel // 2
             center_y = cy * grid_pixel + grid_pixel // 2
@@ -366,7 +367,7 @@ def render_live_map(
             ex1, ey1 = ex0 + grid_pixel - 1, ey0 + grid_pixel - 1
             draw.rectangle([ex0 + 4, ey0 + 4, ex1 - 4, ey1 - 4], outline="#00E676", width=2)
 
-    px, py = state.player_tile_x - min_x, state.player_tile_y - min_y
+    px, py = state.player_tile.x - min_x, state.player_tile.y - min_y
     if 0 <= px < map_width and 0 <= py < map_height:
         x0, y0 = px * grid_pixel, py * grid_pixel
         x1, y1 = x0 + grid_pixel - 1, y0 + grid_pixel - 1
@@ -388,7 +389,7 @@ def async_render(state_copy, file_path, grid, path):
 
 
 if __name__ == "__main__":
-    from agent.action.valley_action.AStar import astar_solver
+    from agent.action.valley_action.AStar import astar_solver, RouteTile
 
     observer_client = StardewObserverClient()
     observer_client.connect()
@@ -472,18 +473,18 @@ if __name__ == "__main__":
                 for warp in state.warps:
                     if warp.target_location == target_location_name:
                         target_warp_passable = getattr(warp, "is_passable", True)
-                        target_warp_tile = (warp.tile_x, warp.tile_y)
+                        target_warp_tile = warp.tile
                         break
 
                 is_deviated = False
                 is_path_blocked = False
 
                 if global_current_path:
-                    first_path_tile = astar_solver.get_path_coords(global_current_path[0])
+                    first_path_tile = global_current_path[0]
                     # 1. 基础偏航判定：如果当前玩家所处的格子，离路径规划的第一格相差超过 2 个网格，视为严重偏航
                     if (
-                        abs(state.player_tile_x - first_path_tile[0]) > 2
-                        or abs(state.player_tile_y - first_path_tile[1]) > 2
+                        abs(state.player_tile.x - first_path_tile.x) > 2
+                        or abs(state.player_tile.y - first_path_tile.y) > 2
                     ):
                         is_deviated = True
 
@@ -491,7 +492,7 @@ if __name__ == "__main__":
                     # 如果未来要踩雷，说明路径已过期，必须立刻唤醒 A* 动态绕路！
                     look_ahead_steps = min(3, len(global_current_path))
                     for i in range(look_ahead_steps):
-                        future_tile = astar_solver.get_path_coords(global_current_path[i])
+                        future_tile = global_current_path[i]
                         # 如果未来这个格子刚好是不可通行的门，那这本身就是我们规划好的，不视作异常阻挡
                         if future_tile == target_warp_tile and not target_warp_passable:
                             continue
@@ -509,8 +510,8 @@ if __name__ == "__main__":
                     # 如果大门不可通行，且我们已经在门口
                     is_already_at_blocked_door = (not target_warp_passable) and (
                         target_warp_tile is not None
-                        and abs(state.player_tile_x - target_warp_tile[0]) <= 1
-                        and abs(state.player_tile_y - target_warp_tile[1]) <= 1
+                        and abs(state.player_tile.x - target_warp_tile.x) <= 1
+                        and abs(state.player_tile.y - target_warp_tile.y) <= 1
                     )
                     if not is_already_at_blocked_door:
                         should_trigger_astar = True
@@ -524,7 +525,9 @@ if __name__ == "__main__":
                 if should_trigger_astar:
                     toal_tiles = astar_solver.get_goal_tiles(state, target_location_name)
                     new_path = astar_solver.find_path_to_warp_zone(
-                        state, (state.player_tile_x, state.player_tile_y), toal_tiles
+                        state,
+                        RouteTile(*state.player_tile, type="walk"),
+                        toal_tiles,
                     )
 
                     # 当发现目标被包裹、被障碍物堵死或无路可走时
@@ -548,16 +551,9 @@ if __name__ == "__main__":
                         # 过滤试图开倒车的 A* 路径
                         # 如果旧路径已经被控制器推进切短了（比如此时第一格是 3），而新算出来的路径第一格却退回到 4
                         if global_current_path and new_path:
-                            if astar_solver.get_path_coords(global_current_path[0]) != astar_solver.get_path_coords(
-                                new_path[0]
-                            ) and len(new_path) > len(global_current_path):
+                            if global_current_path[0] != new_path[0] and len(new_path) > len(global_current_path):
                                 # 判定新路径的下一步是不是在倒退回我们刚刚切掉的那个格子
-                                if astar_solver.get_path_coords(new_path[0]) == (
-                                    state.player_tile_x,
-                                    state.player_tile_y,
-                                ) and astar_solver.get_path_coords(new_path[1]) == astar_solver.get_path_coords(
-                                    global_current_path[0]
-                                ):
+                                if new_path[0] == state.player_tile and new_path[1] == global_current_path[0]:
                                     # print("🛑 [拦截] 阻挡重算 A* 试图塞回已消费格子，强行抛弃新路径防止原地抽搐！")
                                     new_path = None
 

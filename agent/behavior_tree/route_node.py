@@ -4,16 +4,15 @@ from collections import deque
 from typing import List, Optional, Tuple
 
 
-from matplotlib.pylab import True_
-
 from agent.action.location.location import Location
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
 from agent.base_task import BaseTask, TaskType
-from agent.action.valley_action.AStar import astar_solver
+from agent.action.valley_action.AStar import RouteActionType, RouteTile, astar_solver
 from server.valley_server import StardewState, async_render
+from server.type import Tile
 
 
 class RouteNode(BTNode):
@@ -95,17 +94,17 @@ class RouteNode(BTNode):
                 for warp in game_state.warps:
                     if warp.target_location == target_location_name:
                         target_warp_passable = getattr(warp, "is_passable", True)
-                        target_warp_tile = (warp.tile_x, warp.tile_y)
+                        target_warp_tile = warp.tile
                         break
                 is_deviated = False
                 is_path_blocked = False
 
                 if self.global_current_path:
-                    first_path_tile = astar_solver.get_path_coords(self.global_current_path[0])
+                    first_path_tile = self.global_current_path[0]
                     # 1. 基础偏航判定：如果当前玩家所处的格子，离路径规划的第一格相差超过 2 个网格，视为严重偏航
                     if (
-                        abs(game_state.player_tile_x - first_path_tile[0]) > 2
-                        or abs(game_state.player_tile_y - first_path_tile[1]) > 2
+                        abs(game_state.player_tile.x - first_path_tile.x) > 2
+                        or abs(game_state.player_tile.y - first_path_tile.y) > 2
                     ):
                         is_deviated = True
 
@@ -113,7 +112,7 @@ class RouteNode(BTNode):
                     # 如果未来要踩雷，说明路径已过期，必须立刻唤醒 A* 动态绕路！
                     look_ahead_steps = min(3, len(self.global_current_path))
                     for i in range(look_ahead_steps):
-                        future_tile = astar_solver.get_path_coords(self.global_current_path[i])
+                        future_tile = self.global_current_path[i]
                         # 如果未来这个格子刚好是不可通行的门，那这本身就是我们规划好的，不视作异常阻挡
                         if future_tile == target_warp_tile and not target_warp_passable:
                             continue
@@ -130,8 +129,8 @@ class RouteNode(BTNode):
                     # 如果大门不可通行，且我们已经在门口
                     is_already_at_blocked_door = (not target_warp_passable) and (
                         target_warp_tile is not None
-                        and abs(game_state.player_tile_x - target_warp_tile[0]) <= 1
-                        and abs(game_state.player_tile_y - target_warp_tile[1]) <= 1
+                        and abs(game_state.player_tile.x - target_warp_tile.x) <= 1
+                        and abs(game_state.player_tile.y - target_warp_tile.y) <= 1
                     )
                     if not is_already_at_blocked_door:
                         should_trigger_astar = True
@@ -145,7 +144,10 @@ class RouteNode(BTNode):
                 if should_trigger_astar:
                     toal_tiles = astar_solver.get_goal_tiles(game_state, target_location_name)
                     new_path = astar_solver.find_path_to_warp_zone(
-                        game_state, (game_state.player_tile_x, game_state.player_tile_y), toal_tiles
+                        game_state,
+                        RouteTile(*game_state.player_tile, type="walk"),
+                        toal_tiles,
+                        # route_cost_function,
                     )
 
                     # 当发现目标被包裹、被障碍物堵死或无路可走时
@@ -159,7 +161,7 @@ class RouteNode(BTNode):
                                 f"⚠️ [绝路停机] 视野内推断出目标 {toal_tiles} 已被障碍物彻底包裹，无法前往！执行紧急切停。"
                             )
                         # 1. 强行清空当前的全局记忆路径，防止继续消费过期的残余路径
-                        self.global_current_path = []
+                        self.global_current_path: List[RouteTile] = []
                         # 2. 覆盖当前帧的 command，直接原地大推 IDLE 静止
                         command = StardewCommand(action=StardewAction.IDLE, key=[])
                         is_dead_end = True
@@ -168,18 +170,11 @@ class RouteNode(BTNode):
                         # 过滤试图开倒车的 A* 路径
                         # 如果旧路径已经被控制器推进切短了（比如此时第一格是 3），而新算出来的路径第一格却退回到 4
                         if self.global_current_path and new_path:
-                            if astar_solver.get_path_coords(
-                                self.global_current_path[0]
-                            ) != astar_solver.get_path_coords(new_path[0]) and len(new_path) > len(
+                            if self.global_current_path[0] != new_path[0] and len(new_path) > len(
                                 self.global_current_path
                             ):
                                 # 判定新路径的下一步是不是在倒退回我们刚刚切掉的那个格子
-                                if astar_solver.get_path_coords(new_path[0]) == (
-                                    game_state.player_tile_x,
-                                    game_state.player_tile_y,
-                                ) and astar_solver.get_path_coords(new_path[1]) == astar_solver.get_path_coords(
-                                    self.global_current_path[0]
-                                ):
+                                if new_path[0] == game_state.player_tile and new_path[1] == self.global_current_path[0]:
                                     # print("🛑 [拦截] 阻挡重算 A* 试图塞回已消费格子，强行抛弃新路径防止原地抽搐！")
                                     new_path = None
 
@@ -243,80 +238,93 @@ class RouteTask(BaseTask):
         self.target_loc: Location = target_loc
 
 
-def stardew_survival_cost_function(
-    current: Tuple[int, int], neighbor: Tuple[int, int], state: StardewState, base_cost: float
-) -> Tuple[bool, float, str]:
+def route_cost_function(
+    current: Tile, neighbor: Tile, state: StardewState, base_cost: float
+) -> Tuple[bool, float, RouteActionType]:
     """
     return: (is_passable: bool, total_cost: float, action_type: str)
     """
 
     # 1. 🛑 提取硬阻挡图层 (死墙、静态不可交互障碍)
     # 这些格子属于“绝对不可逾越”，哪怕满级工具也破坏不了，直接熔断
-    absolute_walls = state.layers.get("WALL", set()).union(state.layers.get("BUSH", set()))
+    absolute_walls = state.layers.get("Wall", set()).union(state.layers.get("Bush", set()))
     if neighbor in absolute_walls:
         return False, float("inf"), "blocked"
 
-    # 2. 🚪 识别大门图层与交互开关
-    # 假设你的图层里有大门或者带有锁性质的建筑物
-    doors = state.layers.get("OBJECT", set())  # 游戏里许多门和障碍在 OBJECT 层
-    # 这里你可以结合你 state 里的具体门禁状态判断，如果是关着的门
-    if neighbor in doors and getattr(state, "is_door_at_tile", lambda x: False)(neighbor):
-        # 门可以通过，但是需要开门成本 (例如多花费 2.0 秒动作成本)，标记为 "open_door"
-        return True, base_cost + 2.0, "open_door"
+    # # 2. 🚪 识别大门图层与交互开关
+    # # 假设你的图层里有大门或者带有锁性质的建筑物
+    # doors = state.layers.get("OBJECT", set())  # 游戏里许多门和障碍在 OBJECT 层
+    # # 这里你可以结合你 state 里的具体门禁状态判断，如果是关着的门
+    # if neighbor in doors and getattr(state, "is_door_at_tile", lambda x: False)(neighbor):
+    #     # 门可以通过，但是需要开门成本 (例如多花费 2.0 秒动作成本)，标记为 "open_door"
+    #     return True, base_cost + 2.0, "open_door"
 
     # 3. 🪓 识别可破坏的硬图层 (树、石头、大树桩)
-    trees = state.layers.get("TREE_STUMP", set()).union(
-        state.layers.get("T1", set()), state.layers.get("T2", set()), state.layers.get("T3", set())
+    trees = state.layers.get("Tree5", set()).union(
+        state.layers.get("Tree1", set()),
+        state.layers.get("Tree2", set()),
+        state.layers.get("Tree3", set()),
+        state.layers.get("Tree4", set()),
     )
-    stones = state.layers.get("STONE", set())
+    stones = state.layers.get("Stone", set())
+    weeds = state.layers.get("Weeds", set())
+    twigs = state.layers.get("Twig", set())
+
+    if neighbor in weeds:
+        return True, base_cost, "weeds"
+
+    if neighbor in twigs:
+        return True, base_cost, "twig"
 
     # ------------------ 🌳 砍树决策细分 ------------------
-    if neighbor in trees:
-        # 门禁 1：检查工具。手里没斧头，物理上不可能砍开
-        if not getattr(state, "player_has_tool", lambda x: False)("AXE"):
-            return False, float("inf"), "blocked"
+    # if neighbor in trees:
+    #     # 门禁 1：检查工具。手里没斧头，物理上不可能砍开
+    #     if not getattr(state, "player_has_tool", lambda x: False)("AXE"):
+    #         return False, float("inf"), "blocked"
 
-        # 门禁 2：检查体力。体力濒临耗尽（比如小于 15 点），拒绝砍树，逼迫算法绕行
-        if getattr(state, "player_current_stamina", 100) < 15:
-            return False, float("inf"), "blocked"
+    #     # 门禁 2：检查体力。体力濒临耗尽（比如小于 15 点），拒绝砍树，逼迫算法绕行
+    #     if getattr(state, "player_current_stamina", 100) < 15:
+    #         return False, float("inf"), "blocked"
 
-        # 门禁 3：🎒 背包格子与掉落物经济评估
-        backpack_full = getattr(state, "is_backpack_full", lambda: False)()
-        has_wood_stack = getattr(state, "has_item_stack", lambda x: False)("Wood")  # 包里是否有木头格子可堆叠
+    #     # 门禁 3：🎒 背包格子与掉落物经济评估
+    #     backpack_full = getattr(state, "is_backpack_full", lambda: False)()
+    #     has_wood_stack = getattr(state, "has_item_stack", lambda x: False)("Wood")  # 包里是否有木头格子可堆叠
 
-        # 算经济账：
-        if not backpack_full or has_wood_stack:
-            # 包没满，或者可以完美吸附堆叠。掉落的木头是有效资源，产生正向收益，抵消部分砍树痛苦
-            reward_bonus = 3.0
-        else:
-            # 包满了且无法堆叠！掉落物掉在地上捡不起来，白白浪费。给予高额痛苦惩罚成本
-            reward_bonus = -5.0
+    #     # 算经济账：
+    #     if not backpack_full or has_wood_stack:
+    #         # 包没满，或者可以完美吸附堆叠。掉落的木头是有效资源，产生正向收益，抵消部分砍树痛苦
+    #         reward_bonus = 3.0
+    #     else:
+    #         # 包满了且无法堆叠！掉落物掉在地上捡不起来，白白浪费。给予高额痛苦惩罚成本
+    #         reward_bonus = -5.0
 
-        # 砍树固定消耗高昂的时间与耐久成本 (比如 8.0)
-        destroy_tree_cost = 8.0 - reward_bonus
-        return True, base_cost + destroy_tree_cost, "destroy"
+    #     # 砍树固定消耗高昂的时间与耐久成本 (比如 8.0)
+    #     destroy_tree_cost = 8.0 - reward_bonus
+    #     return True, base_cost + destroy_tree_cost, "destroy"
 
     # ------------------ 🪨 砸石头决策细分 ------------------
     if neighbor in stones:
-        # 门禁 1：没稿子，物理上砸不开
-        if not getattr(state, "player_has_tool", lambda x: False)("PICKAXE"):
-            return False, float("inf"), "blocked"
+        # # 门禁 1：没稿子，物理上砸不开
+        # if not getattr(state, "player_has_tool", lambda x: False)("PICKAXE"):
+        #     return False, float("inf"), "blocked"
 
-        # 门禁 2：防累晕保险
-        if getattr(state, "player_current_stamina", 100) < 10:
-            return False, float("inf"), "blocked"
+        # # 门禁 2：防累晕保险
+        # if getattr(state, "player_current_stamina", 100) < 10:
+        #     return False, float("inf"), "blocked"
 
-        # 门禁 3：🎒 检查石头掉落物容纳格子
-        backpack_full = getattr(state, "is_backpack_full", lambda: False)()
-        has_stone_stack = getattr(state, "has_item_stack", lambda x: False)("Stone")
+        # # 门禁 3：🎒 检查石头掉落物容纳格子
+        # backpack_full = getattr(state, "is_backpack_full", lambda: False)()
+        # has_stone_stack = getattr(state, "has_item_stack", lambda x: False)("Stone")
 
-        if not backpack_full or has_stone_stack:
-            reward_bonus = 2.0  # 石头价值稍低，给予小幅度收益抵消
-        else:
-            reward_bonus = -4.0  # 满包惩罚
+        # if not backpack_full or has_stone_stack:
+        #     reward_bonus = 2.0  # 石头价值稍低，给予小幅度收益抵消
+        # else:
+        #     reward_bonus = -4.0  # 满包惩罚
 
-        destroy_stone_cost = 5.0 - reward_bonus
-        return True, base_cost + destroy_stone_cost, "destroy"
+        # destroy_stone_cost = 5.0 - reward_bonus
+        # return True, base_cost + destroy_stone_cost, "destroy"
+
+        return True, base_cost, "stone"
 
     # 4. 🟢 顺畅空地放行
     # 没有任何硬图层阻挡，完全是康庄大道，保持原本的 A* 基础位移时间代价 (base_cost 是 1.0 或 1.414)
