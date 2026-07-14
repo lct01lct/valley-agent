@@ -21,6 +21,15 @@
 
 `README.md` 目前更像历史路线图，可能包含较旧的 VLM-heavy 方案。当前方向应以“SMAPI 结构化状态 + 行为树 + AI Planner”为准。
 
+## 项目 Skills
+
+项目内 Skill 位于 `skills/`。执行对应任务前，先阅读相关入口文件：
+
+- 新增、修改、重构或审查代码：`skills/code-style/SKILL.md`
+- 新增、修改或审查行为树节点：`skills/behavior-tree/SKILL.md`
+
+如果任务同时涉及编码规范和行为树节点，应同时遵循两个 Skill；行为树专属契约以 `behavior-tree` Skill 为准。
+
 ## 开发原则
 
 - 优先使用 SMAPI 导出的结构化游戏状态，而不是截图/VLM 感知。
@@ -114,4 +123,3 @@ rg "class |def |async def" agent server StardewMemoryExporter
    - 购买指定物品和数量
    - 验证背包和金钱变化
 4. 只有在状态验证成功后才返回任务成功，而不是到达某个地点就算完成。
-

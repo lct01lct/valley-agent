@@ -1,85 +1,38 @@
 ---
 name: code-style
-description: [TODO: Complete and informative explanation of what the skill does and when to use it. Include WHEN to use this skill - specific scenarios, file types, or tasks that trigger it.]
+description: 在星露谷 AI Agent 项目中新增、修改、重构或审查代码时使用。覆盖 Python Agent、行为树、TCP 客户端、SMAPI C# Mod、Python/C# 协议模型、日志、异常处理、类型标注和验证方式；当任务要求“按照当前项目风格编码”、增加功能、修复缺陷或统一代码质量时触发。
 ---
 
-# Code Style
+# 项目编码风格
 
-## Overview
+## 工作流程
 
-[TODO: 1-2 sentences explaining what this skill enables]
+1. 先阅读 `AGENTS.md`，再检查待修改文件及同目录中最接近的实现。
+2. 执行 `git status --short`，识别并保留用户已有改动。
+3. 判断改动属于 Python、C#/SMAPI，还是跨语言协议，并阅读对应参考：
+   - Python：`references/python-style.md`
+   - C#/SMAPI：`references/csharp-smapi-style.md`
+   - TCP/JSON 协议或跨语言改动：`references/protocol-and-validation.md`
+4. 如果涉及行为树节点，同时阅读 `skills/behavior-tree/SKILL.md`；行为树专属契约以该 Skill 为准。
+5. 做小而聚焦的改动，复用现有数据模型、动作枚举和执行路径。
+6. 运行与风险相称的检查，并在交付时说明已验证内容和仍需游戏内实测的内容。
 
-## Structuring This Skill
+## 核心规则
 
-[TODO: Choose the structure that best fits this skill's purpose. Common patterns:
+- 保持当前架构方向：行为树负责实时控制，AI 负责高层规划，确定性技能负责执行与状态验证。
+- 以相邻代码的公开接口和命名为兼容基线，但不要复制明显的遗留问题，例如无用导入、阻塞异步循环、静默吞错或无类型的新接口。
+- 新增 Python 公共函数、任务模型和协议结构时添加类型标注；结构化数据优先使用明确的数据类或 Pydantic 模型。
+- 在异步行为树路径中使用 `await asyncio.sleep(...)`，不要使用 `time.sleep(...)`。
+- 代码标识符使用英文；注释、文档和面向开发者的运行日志优先使用简洁中文。协议常量保持稳定英文，例如 `SUCCESS`、`FAILURE`、`MOVE_UP`。
+- 新增 state 传输字段时，尽可能沿用 SMAPI／Stardew Valley API 原生属性名及其大小写；Python 在协议边界保持该名称，本地变量再遵循 `snake_case`。
+- 不要仅因命令已发送就判定成功；尽量通过新的游戏状态或结构化动作结果验证。
+- 不要静默吞掉失败。记录足够定位问题的上下文，并把可恢复失败交给黑板、任务结果或协议响应。
+- 不要顺手重写无关模块，也不要为局部改动同时大范围调整 Python 和 C#。
 
-**1. Workflow-Based** (best for sequential processes)
-- Works well when there are clear step-by-step procedures
-- Example: DOCX skill with "Workflow Decision Tree" -> "Reading" -> "Creating" -> "Editing"
-- Structure: ## Overview -> ## Workflow Decision Tree -> ## Step 1 -> ## Step 2...
+## 完成检查
 
-**2. Task-Based** (best for tool collections)
-- Works well when the skill offers different operations/capabilities
-- Example: PDF skill with "Quick Start" -> "Merge PDFs" -> "Split PDFs" -> "Extract Text"
-- Structure: ## Overview -> ## Quick Start -> ## Task Category 1 -> ## Task Category 2...
-
-**3. Reference/Guidelines** (best for standards or specifications)
-- Works well for brand guidelines, coding standards, or requirements
-- Example: Brand styling with "Brand Guidelines" -> "Colors" -> "Typography" -> "Features"
-- Structure: ## Overview -> ## Guidelines -> ## Specifications -> ## Usage...
-
-**4. Capabilities-Based** (best for integrated systems)
-- Works well when the skill provides multiple interrelated features
-- Example: Product Management with "Core Capabilities" -> numbered capability list
-- Structure: ## Overview -> ## Core Capabilities -> ### 1. Feature -> ### 2. Feature...
-
-Patterns can be mixed and matched as needed. Most skills combine patterns (e.g., start with task-based, add workflow for complex operations).
-
-Delete this entire "Structuring This Skill" section when done - it's just guidance.]
-
-## [TODO: Replace with the first main section based on chosen structure]
-
-[TODO: Add content here. See examples in existing skills:
-- Code samples for technical skills
-- Decision trees for complex workflows
-- Concrete examples with realistic user requests
-- References to scripts/templates/references as needed]
-
-## Resources (optional)
-
-Create only the resource directories this skill actually needs. Delete this section if no resources are required.
-
-### scripts/
-Executable code (Python/Bash/etc.) that can be run directly to perform specific operations.
-
-**Examples from other skills:**
-- PDF skill: `fill_fillable_fields.py`, `extract_form_field_info.py` - utilities for PDF manipulation
-- DOCX skill: `document.py`, `utilities.py` - Python modules for document processing
-
-**Appropriate for:** Python scripts, shell scripts, or any executable code that performs automation, data processing, or specific operations.
-
-**Note:** Scripts may be executed without loading into context, but can still be read by Codex for patching or environment adjustments.
-
-### references/
-Documentation and reference material intended to be loaded into context to inform Codex's process and thinking.
-
-**Examples from other skills:**
-- Product management: `communication.md`, `context_building.md` - detailed workflow guides
-- BigQuery: API reference documentation and query examples
-- Finance: Schema documentation, company policies
-
-**Appropriate for:** In-depth documentation, API references, database schemas, comprehensive guides, or any detailed information that Codex should reference while working.
-
-### assets/
-Files not intended to be loaded into context, but rather used within the output Codex produces.
-
-**Examples from other skills:**
-- Brand styling: PowerPoint template files (.pptx), logo files
-- Frontend builder: HTML/React boilerplate project directories
-- Typography: Font files (.ttf, .woff2)
-
-**Appropriate for:** Templates, boilerplate code, document templates, images, icons, fonts, or any files meant to be copied or used in the final output.
-
----
-
-**Not every skill requires all three types of resources.**
+- 删除新增的未使用导入、死代码、临时调试输出和无意义注释。
+- 确认命名、返回类型、空值处理和失败路径清晰。
+- 协议改动必须同步核对生产端与消费端。
+- 纯文档或 Skill 改动运行 Skill 校验；Python 改动至少进行编译检查；C# 改动在环境允许时构建 Mod。
+- 不把 `.env`、日志、截图或本机部署路径加入版本控制。
