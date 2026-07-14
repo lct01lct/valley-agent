@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目编码风格"
+  short_description: "遵循星露谷 AI Agent 项目的编码与验证规范"
+  default_prompt: "使用 $code-style 按照当前项目风格实现这项代码改动。"
