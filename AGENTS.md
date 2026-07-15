@@ -38,12 +38,22 @@ Selector
 ├── Sequence("Route")
 │   ├── OpenDoorNode
 │   └── RouteNode
-└── LLM_Node
+└── Sequence("LLM")
+    └── LLM_Node
 ```
 
 `ValleyAgent` 在主循环中先刷新 `PlayerContext.state`，再运行行为树。`Selector` 每个 tick 从左到右轮询子节点，遇到 `RUNNING` 或 `SUCCESS` 就停止本轮扫描。
 
-因此，`Guard`、`Route` 分支和 `LLM_Node` 是顶层 Selector 下的同级候选分支。`LLM_Node` 是最后的兜底分支：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+因此，`Guard`、`Route` 和 `LLM` 是顶层 Selector 下的同级候选分支。`LLM` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+
+### Context 负责状态输入和动作输出
+
+`PlayerContext` 是运行时上下文模块，内部提供两条主要链路：
+
+- 状态输入链路：SMAPI `observer server` -> Python `observer client` -> `State` -> 行为树。
+- 动作输出链路：行为树 -> `Command` -> Python `Executor client` -> SMAPI `Executor`。
+
+`ValleyAgent` 的 tick driver 每轮同时驱动 context 更新和行为树轮询。行为树不直接拥有 Observer/Executor 连接，而是通过 `PlayerContext` 读取最新状态、发送控制命令。
 
 ### AgentBlackboard 是调度状态中心
 

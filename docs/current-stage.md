@@ -36,10 +36,11 @@ Selector
 ├── Sequence("Route")
 │   ├── OpenDoorNode
 │   └── RouteNode
-└── LLM_Node
+└── Sequence("LLM")
+    └── LLM_Node
 ```
 
-`Route` 分支和 `LLM_Node` 都是顶层 Selector 下的候选分支。`LLM_Node` 是最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
+`Route` 分支和 `LLM` 分支都是顶层 Selector 下的候选分支。`LLM` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
 
 `AgentBlackboard` 是跨节点通讯和调度状态中心，当前至少保存：
 

@@ -8,7 +8,7 @@ Valley Agent 是一个让 AI 自主游玩《星露谷物语》的实验项目。
 
 自主规划并完成《星露谷物语》中的长期任务，包括导航、交互、种植、采集、交易、战斗和日程管理。
 
-项目不会让 LLM 直接控制每一帧按键。实时动作由行为树、A*、确定性节点和 SMAPI 状态验证完成；LLM 只负责低频的高层计划、失败反思和记忆。
+项目不会让 LLM 直接控制每一帧按键。实时动作由行为树、A\*、确定性节点和 SMAPI 状态验证完成；LLM 只负责低频的高层计划、失败反思和记忆。
 
 ## 当前阶段
 
@@ -20,40 +20,12 @@ Valley Agent 是一个让 AI 自主游玩《星露谷物语》的实验项目。
 
 ## 系统架构
 
-```mermaid
-flowchart LR
-    subgraph StateLoop["独立高频 State 通道（不依赖行为树）"]
-        Game["Stardew Valley"] --> Observer["SMAPI Observer"]
-        Observer --> ObserverClient["Python Observer Client"]
-        ObserverClient --> Context["PlayerContext.state"]
-    end
+![Valley Agent 系统架构](docs/structure.drawio.svg)
 
-    Main["main.py"] --> Agent["ValleyAgent<br/>tick driver"]
-    Agent --> Selector["Selector<br/>从左到右轮询"]
-
-    Selector --> Guard["Guard 分支<br/>Defend_Node"]
-    Selector --> RouteBranch["Route 分支<br/>OpenDoorNode + RouteNode"]
-    Selector --> LLM["LLM_Node<br/>最后兜底"]
-
-    Blackboard["AgentBlackboard<br/>跨节点通讯与调度状态中心"]
-    Guard <--> Blackboard
-    RouteBranch <--> Blackboard
-    LLM <--> Blackboard
-
-    Context -.->|最新状态| Guard
-    Context -.->|最新状态| RouteBranch
-    Context -.->|规划上下文| LLM
-
-    RouteBranch --> AStar["A* / 确定性动作"]
-    AStar --> ExecutorClient["Python Executor Client"]
-    ExecutorClient --> Executor["SMAPI Executor"]
-    Executor --> Game
-```
-
-这张图里有两个需要分清的通道：
-
-- `State` 是独立高频更新的数据通道，由 SMAPI Observer 持续写入 `PlayerContext.state`，不依赖行为树运行。
-- 行为树是运行时控制通道，`ValleyAgent` 每个 tick 刷新 state 后轮询节点，并通过 `AgentBlackboard` 协调计划和跨节点信号。
+- 运行中心是 `ValleyAgent` 的 tick driver。
+- `PlayerContext` 是上下文模块，提供 `observer client`、`Executor client`、最新 `State` 和待执行 `Command` 的通道。
+- `observer server -> observer client -> State -> BT` 是状态输入链路；`BT -> Command -> Executor client -> Executor` 是动作输出链路。
+- `AgentBlackboard` 在 BT 外侧承担计划、进度和跨节点信号协作；BT 每个 tick 读取 state 与 blackboard 后决定当前节点行为。
 
 ## 当前行为树
 
@@ -64,17 +36,18 @@ Selector
 ├── Sequence("Route")
 │   ├── OpenDoorNode
 │   └── RouteNode
-└── LLM_Node
+└── Sequence("LLM")
+    └── LLM_Node
 ```
 
 行为树每个 tick 从高优先级分支开始扫描：
 
 1. `Defend_Node` 预留给紧急安全行为。
 2. `OpenDoorNode` 和 `RouteNode` 消费当前路线计划并执行确定性动作。
-3. `LLM_Node` 是最后兜底：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
+3. `Sequence("LLM")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
 4. 新计划到达后，Selector 重新从高优先级节点扫描。
 
-因此，`LLM_Node` 和 `Route` 分支在顶层 Selector 视角是同级概念，只是优先级更低、职责更偏规划兜底。
+因此，`LLM` 分支和 `Route` 分支在顶层 Selector 视角是同级概念，只是优先级更低、职责更偏规划兜底。
 
 ## AgentBlackboard 的角色
 

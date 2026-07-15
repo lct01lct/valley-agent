@@ -26,9 +26,25 @@ class ValleyAgent:
         self.models = Agent_Model()
         self.behavior_tree = Selector(
             [
-                Sequence(node_name="Guard", children=[Defend_Node()]),
-                Sequence(node_name="Route", children=[OpenDoorNode(), RouteNode()]),
-                LLM_Node(self),
+                Sequence(
+                    node_name="Guard",
+                    children=[
+                        Defend_Node(),
+                    ],
+                ),
+                Sequence(
+                    node_name="Route",
+                    children=[
+                        OpenDoorNode(),
+                        RouteNode(),
+                    ],
+                ),
+                Sequence(
+                    node_name="Think",
+                    children=[
+                        LLM_Node(self),
+                    ],
+                ),
             ]
         )
 
