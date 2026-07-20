@@ -4,6 +4,7 @@ from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
+from agent.behavior_tree.tool_selection import get_required_tool_for_obstacle, is_current_tool
 from server.type import Tile
 
 
@@ -11,7 +12,6 @@ CLEARABLE_OBSTACLE_LAYERS: dict[str, tuple[str, ...]] = {
     "stone": ("Stone",),
     "twig": ("Twig",),
     "weeds": ("Weeds",),
-    "tree": ("Tree1", "Tree2", "Tree3", "Tree4", "Tree5"),
 }
 
 
@@ -45,8 +45,20 @@ class ClearObstacleNode(BTNode):
             return "SUCCESS"
 
         if not self._is_next_to_target(game_state.player_tile, target_tile):
-            self._fail(blackboard, f"玩家不在障碍物相邻格，无法清理: player={game_state.player_tile}, target={target_tile}")
+            self._fail(blackboard, f"玩家不在障碍物上下左右相邻格，无法清理: player={game_state.player_tile}, target={target_tile}")
             return "SUCCESS"
+
+        required_tool = blackboard.required_tool or get_required_tool_for_obstacle(obstacle_type)
+        if required_tool is None:
+            self._fail(blackboard, f"障碍物没有配置可用工具: obstacle_type={obstacle_type}")
+            return "SUCCESS"
+
+        if not is_current_tool(game_state, required_tool):
+            blackboard.required_tool = required_tool
+            blackboard.require_switch_tool = True
+            blackboard.is_switching_tool = True
+            print(f"\n🟡 [ClearObstacleNode] 当前工具不是 {required_tool}，等待切换工具后再清理。")
+            return "RUNNING"
 
         if self._started_at is not None and time.time() - self._started_at > 8.0:
             self._fail(blackboard, f"清障超时: {obstacle_type} @ {target_tile}")
@@ -90,6 +102,9 @@ class ClearObstacleNode(BTNode):
         blackboard.require_clear_obstacle = False
         blackboard.clear_obstacle_tile = None
         blackboard.clear_obstacle_type = None
+        blackboard.require_switch_tool = False
+        blackboard.is_switching_tool = False
+        blackboard.required_tool = None
         self._reset()
 
     def _fail(self, blackboard: AgentBlackboard, reason: str) -> None:
@@ -100,6 +115,9 @@ class ClearObstacleNode(BTNode):
         blackboard.require_clear_obstacle = False
         blackboard.clear_obstacle_tile = None
         blackboard.clear_obstacle_type = None
+        blackboard.require_switch_tool = False
+        blackboard.is_switching_tool = False
+        blackboard.required_tool = None
         self._reset()
 
     def _reset(self) -> None:
@@ -119,7 +137,7 @@ class ClearObstacleNode(BTNode):
     def _is_next_to_target(self, player_tile: Tile, target_tile: Tile) -> bool:
         distance_x = abs(player_tile.x - target_tile.x)
         distance_y = abs(player_tile.y - target_tile.y)
-        return max(distance_x, distance_y) == 1
+        return distance_x + distance_y == 1
 
     def _build_face_command(self, player_tile: Tile, target_tile: Tile) -> StardewCommand:
         if target_tile.x > player_tile.x:

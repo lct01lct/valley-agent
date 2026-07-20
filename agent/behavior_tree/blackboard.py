@@ -24,3 +24,8 @@ class AgentBlackboard:
         self.clear_obstacle_tile: Tile | None = None
         self.clear_obstacle_type: str | None = None
         self.failed_clear_obstacles: set[tuple[int, int]] = set()
+
+        # 切换工具
+        self.require_switch_tool = False
+        self.is_switching_tool = False
+        self.required_tool: str | None = None

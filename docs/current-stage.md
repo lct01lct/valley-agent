@@ -35,6 +35,7 @@ Selector
 │   └── Defend_Node
 ├── Sequence("Route")
 │   ├── OpenDoorNode
+│   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   └── RouteNode
 └── Sequence("Think")
@@ -51,13 +52,17 @@ Selector
 - `new_plan_received`
 - `prompt`
 - `require_open_door`
+- `require_switch_tool`
 - `require_clear_obstacle`
+- `required_tool`
 
 ## 当前寻路与移动模型
 
 当前移动控制已经从“Python 单次按键”调整为“Python 决策方向 + C# 持续保持方向”：
 
 - Python `RouteNode` 缓存跨地图路线、当前 `tile_path` 和 `path_index`。
+- `HardcodedStardewMap` 已移动到 `agent/action/map/map.py`，负责硬编码场景连通图和最少场景跳数候选路线枚举。
+- RouteNode 会按候选路线评分选择跨场景路线：场景跳数优先；未知后续距离时优先当前第一跳传送门距离；已知距离时优先总距离。
 - A* 只在必要时执行：初始路径为空、场景变化、路径过期、未来路径阻塞、清障/开门后重规划等。
 - `MoveController` 每 tick 根据最新 `State`、玩家位置、`player_size=(48, 32)` 和目标 tile 输出当前移动方向。
 - C# `StardewExecutor` 会持续按住最后一次 MOVE 命令对应的方向；Python 发送新 MOVE 用于更新方向，发送 `IDLE` 用于停止移动。
@@ -65,19 +70,22 @@ Selector
 - Town 等大场景未来路径被阻挡时，优先启动后台 A*；旧路径继续执行，只有障碍已经接近才停下等待。
 - 后台 A* 结果切换前需要对齐当前玩家位置，避免使用过期起点导致人物回头。
 - 绝路、目标 warp 不存在、路径放弃或交给兜底规划前，RouteNode 必须先发送 `IDLE`，否则 C# 会继续保持旧方向。
+- 可破坏障碍当前仅包括 `Stone`、`Twig`、`Weeds`；普通树和 `TreeStump` 暂视为不可破坏障碍。
+- 不允许斜向破坏障碍物。A* 不应斜向进入可破坏障碍格；RouteNode 和 ClearObstacleNode 只有在玩家位于目标上下左右相邻格时才触发/执行清障。
 
 ## 当前进度
 
 | 能力 | 状态 | 当前说明 |
 | --- | --- | --- |
 | 模拟宏观计划 | 已有基础 | `LLM_Node` 异步返回硬编码 `RouteTask` |
-| 跨地图规划 | 已有基础 | `HardcodedStardewMap` 使用 BFS 生成地点链路 |
-| SMAPI 结构化感知 | 已有基础 | 导出地点、位置、Warp 和局部障碍物 |
-| 局部 A* | 已有基础 | 支持格子路径、硬障碍和目标 Warp |
+| 跨地图规划 | 已有基础 | `HardcodedStardewMap` 已迁移到 `agent/action/map/map.py`，可枚举候选路线；RouteNode 按传送门距离缓存做路线评分 |
+| SMAPI 结构化感知 | 已有基础 | 导出地点、位置、Warp、局部障碍物、`CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items` |
+| 局部 A* | 已有基础 | 支持格子路径、硬障碍、目标 Warp 和可破坏障碍代价；已限制斜向清障路径 |
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
-| 破坏障碍物 | 基础接入 | A* 可标记石头、树枝、杂草等必要清障点，`ClearObstacleNode` 已接入 Route 分支；工具选择和游戏内验证仍需完善 |
+| 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
+| 破坏障碍物 | 基础接入 | A* 可标记 Stone、Twig、Weeds；RouteNode 触发清障，SwitchToolNode 切工具，ClearObstacleNode 使用工具并验证障碍消失 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
@@ -85,20 +93,21 @@ Selector
 ## 已有基础
 
 - `LLM_Node` 可异步返回模拟 `RouteTask`。
-- `HardcodedStardewMap` 可做跨地图 BFS 路线分解。
-- SMAPI Observer 可导出地点、玩家位置、Warp 和局部障碍物。
+- `HardcodedStardewMap` 可做跨地图候选路线枚举，RouteNode 可根据传送门距离选择路线。
+- SMAPI Observer 可导出地点、玩家位置、Warp、局部障碍物和基础背包/工具栏状态。
 - 本地 A* 支持格子路径、动态路径过期检测、偏航检测和重新计算。
 - RouteNode 已缓存 `tile_path` 和 `path_index`，并通过 MoveController 做局部跟随。
 - C# Executor 已支持保持最后移动方向，改善低频命令下的蠕动问题。
 - RouteNode 失败路径已开始显式发送 `IDLE`，避免绝路后继续沿旧方向移动。
-- Route/OpenDoor/ClearObstacle 之间已有黑板标志协作。
-- C# Executor 已支持基础移动、开门、关闭对话和使用工具。
+- Route/OpenDoor/SwitchTool/ClearObstacle 之间已有黑板标志协作。
+- C# Executor 已支持基础移动、开门、关闭对话、切换工具和使用工具。
 
 ## 当前缺口
 
 - `ValleyAgent.invoke(task)` 保存了原始任务，但尚未稳定注入 Planner Prompt；第一阶段可继续使用 mock 计划。
-- `ClearObstacleNode` 当前复用现有 `USE_TOOL` 协议，只能使用当前手持工具；还没有工具选择、体力检查和工具栏状态验证。
-- 树木、石头、树枝、杂草等可破坏物的工具、体力和背包约束尚未形成完整决策。
+- `SwitchToolNode` 已有基础切工具流程，但仍需要更多游戏内验证和异常恢复策略。
+- `ClearObstacleNode` 已能验证当前工具并使用工具，但体力检查、工具等级、背包掉落容量和失败恢复仍需完善。
+- 树木、TreeStump 等需要工具等级或长动作的障碍暂不纳入可清障目标。
 - `OpenDoorNode` 仍有异步路径使用 `time.sleep()`、结果验证不足等问题。
 - `StardewExecutorClient.send_command()` 是阻塞式等待响应，缺少可靠超时和结构化 Action Result。
 - Python 端当前仍会每 tick 重发当前移动方向；未来可优化为仅在方向变化、IDLE 或交互动作时发送，但必须保证安全停机语义不变。
@@ -111,8 +120,8 @@ Selector
 
 1. 保持 `LLM_Node` mock 计划稳定，确保黑板能够连续消费多个 `RouteTask`。
 2. 继续校验硬编码场景连通图和 warp 目标名称，避免错误跨场景边导致目标 warp 不存在。
-3. 为 A* 正式接入障碍代价函数，区分不可通行、可绕行和可破坏障碍。
-4. 完善 `ClearObstacleNode` 的工具选择、体力检查和更多可安全处理的障碍类型。
+3. 继续验证 A* 障碍代价函数，区分不可通行、可绕行和可破坏障碍，并保持“不允许斜向清障”的路径约束。
+4. 完善 `SwitchToolNode` 和 `ClearObstacleNode` 的游戏内验证、体力检查、工具等级和失败恢复。
 5. 强化玩家朝向、清障动作、超时与障碍消失验证。
 6. 完善 `OpenDoorNode` 的非阻塞状态机和门结果验证。
 7. 增加确定性寻路场景测试与游戏内端到端验收。

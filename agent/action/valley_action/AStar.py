@@ -5,7 +5,7 @@ from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from server.valley_server import StardewState
 from server.type import Tile
 
-destructible_obstacles = ["weeds", "twig", "warp"]
+destructible_obstacles = ["weeds", "twig", "stone"]
 type RouteActionType = Literal["walk", "blocked", "weeds", "twig", "stone", "warp", "door"]
 
 
@@ -219,14 +219,18 @@ class AStarParser:
 
                 if not is_passable:
                     continue
+                if dx != 0 and dy != 0 and action_type in destructible_obstacles:
+                    continue
 
                 # 斜向防切墙角逻辑（同样升级为由代价函数判定斜角两侧通断）
                 if dx != 0 and dy != 0:
                     side_tile_1 = Tile(current.x + dx, current.y)
                     side_tile_2 = Tile(current.x, current.y + dy)
-                    s1_pass, _, _ = cost_function(current, side_tile_1, state, 1.0)
-                    s2_pass, _, _ = cost_function(current, side_tile_2, state, 1.0)
+                    s1_pass, _, s1_action_type = cost_function(current, side_tile_1, state, 1.0)
+                    s2_pass, _, s2_action_type = cost_function(current, side_tile_2, state, 1.0)
                     if not s1_pass or not s2_pass:
+                        continue
+                    if s1_action_type in destructible_obstacles or s2_action_type in destructible_obstacles:
                         continue
 
                 tentative_g = current_g + step_cost

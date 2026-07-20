@@ -35,6 +35,7 @@ Selector
 │   └── Defend_Node
 ├── Sequence("Route")
 │   ├── OpenDoorNode
+│   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   └── RouteNode
 └── Sequence("Think")
@@ -44,7 +45,7 @@ Selector
 行为树每个 tick 从高优先级分支开始扫描：
 
 1. `Defend_Node` 预留给紧急安全行为。
-2. `OpenDoorNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性动作。
+2. `OpenDoorNode`、`SwitchToolNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性动作。
 3. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
 4. 新计划到达后，Selector 重新从高优先级节点扫描。
 
@@ -65,7 +66,8 @@ valley-agent/
 │   ├── valley_agent.py             # 主循环和行为树装配
 │   ├── base_task.py                # 基础任务类型
 │   ├── behavior_tree/              # 节点、黑板和玩家上下文
-│   ├── action/valley_action/       # 动作模型和 A*
+│   ├── action/map/                 # 硬编码场景连通图和跨场景候选路线
+│   ├── action/valley_action/       # 动作模型、A* 和局部移动控制器
 │   └── prompt/                     # Planner 提示词
 ├── server/
 │   └── valley_server.py            # Python TCP 客户端与状态解析

@@ -37,6 +37,7 @@ Selector
 │   └── Defend_Node
 ├── Sequence("Route")
 │   ├── OpenDoorNode
+│   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   └── RouteNode
 └── Sequence("Think")
@@ -46,6 +47,13 @@ Selector
 `ValleyAgent` 在主循环中先刷新 `PlayerContext.state`，再运行行为树。`Selector` 每个 tick 从左到右轮询子节点，遇到 `RUNNING` 或 `SUCCESS` 就停止本轮扫描。
 
 因此，`Guard`、`Route` 和 `Think` 是顶层 Selector 下的同级候选分支。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+
+`Route` 分支内部的职责边界：
+
+- `OpenDoorNode`：处理 RouteNode 发现的不可直接通行门，发送开门/关闭对话命令并暴露失败原因。
+- `SwitchToolNode`：根据 `context.state` 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items` 切换到清障所需工具。
+- `ClearObstacleNode`：在玩家位于障碍物上下左右相邻格时使用当前工具清理 Stone、Twig、Weeds，并验证障碍消失。
+- `RouteNode`：选择跨场景路线、缓存 tile path、触发 A*、驱动 MoveController、发现门/清障需求并写入 blackboard。
 
 ### Context 负责状态输入和动作输出
 
@@ -108,6 +116,7 @@ Selector
 - `main.py`：当前入口，加载环境、清理日志、初始化 `ValleyAgent` 并提交任务。
 - `agent/valley_agent.py`：创建行为树、`PlayerContext` 和 `AgentBlackboard`，运行高频 tick 循环。
 - `agent/behavior_tree/`：行为树节点、黑板、玩家上下文、规划兜底和寻路控制。
+- `agent/action/map/map.py`：`HardcodedStardewMap`，维护硬编码场景连通图和最少场景跳数候选路线枚举。
 - `agent/action/valley_action/AStar.py`：本地 A* 寻路、路线动作标注和障碍代价函数。
 - `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。
 - `server/valley_server.py`：Python 侧 SMAPI Observer/Executor TCP 客户端和状态解析。
@@ -122,7 +131,8 @@ Selector
 - `LLM_Node` 只做最后兜底的宏观计划生成、补计划或恢复建议，不参与每帧移动控制。
 - 每个任务和节点都应有前置条件、执行逻辑、成功判定、超时和恢复策略。
 - 寻路需要区分硬障碍、可绕行障碍、可破坏障碍和交互式门。
-- 清障必须验证工具可用、体力允许、玩家朝向正确，并在动作后从新状态确认障碍已经消失。
+- 清障必须验证工具可用、玩家位于上下左右相邻格、朝向正确，并在动作后从新状态确认障碍已经消失；当前不允许斜向破坏障碍物。
+- 工具切换应优先读取 SMAPI state 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items`，不要在 Python 端硬猜当前工具。
 - 不重复实现寻路或动作逻辑；共享行为下沉到 A*、动作层或复用节点。
 - 不让 A* 每帧重算；优先维护 RouteNode 的路径缓存、path_index 推进和 MoveController 局部跟随。
 - 不把 C# Executor 的 MOVE 当成单帧脉冲；它会保持最后方向，失败和交互前必须显式 `IDLE`。

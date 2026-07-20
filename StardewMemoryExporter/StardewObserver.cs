@@ -12,6 +12,7 @@ using StardewValley.Objects;
 using StardewValley.Locations;
 using StardewValley.TerrainFeatures;
 using StardewValley.Buildings;
+using StardewValley.Tools;
 using Microsoft.Xna.Framework;
 using Newtonsoft.Json;
 using StardewModdingAPI.Events;
@@ -184,6 +185,9 @@ namespace StardewMemoryExporter
                     state_scope = "local",
                     scan_range = ObstacleScanRange,
                     map_size = new[] { mapWidth, mapHeight },
+                    CurrentToolIndex = player.CurrentToolIndex,
+                    CurrentToolbarIndex = player.CurrentToolIndex / 12,
+                    Items = CreateItemsSnapshot(player),
                     warps = _cachedWarpDataList,
                     obstacles = obstacles.ToList(),
                 };
@@ -311,6 +315,30 @@ namespace StardewMemoryExporter
                 tile_x = tileX,
                 tile_y = tileY,
             };
+        }
+
+        private List<object> CreateItemsSnapshot(Farmer player)
+        {
+            var items = new List<object>();
+
+            for (int index = 0; index < player.Items.Count; index++)
+            {
+                Item item = player.Items[index];
+                if (item == null) continue;
+
+                items.Add(new
+                {
+                    Index = index,
+                    Name = item.Name ?? "",
+                    DisplayName = item.DisplayName ?? "",
+                    QualifiedItemId = item.QualifiedItemId ?? "",
+                    Category = item.Category,
+                    Stack = item.Stack,
+                    IsTool = item is Tool,
+                });
+            }
+
+            return items;
         }
 
         // private string GetObstacleTypeAtTile(GameLocation location, Farmer player, int x, int y)

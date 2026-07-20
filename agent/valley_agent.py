@@ -9,6 +9,7 @@ from agent.behavior_tree.behavior_tree import Selector, Sequence
 from agent.behavior_tree.defend_node import Defend_Node
 from agent.behavior_tree.clear_obstacle_node import ClearObstacleNode
 from agent.behavior_tree.open_door_node import OpenDoorNode
+from agent.behavior_tree.switch_tool_node import SwitchToolNode
 from agent.behavior_tree.llm_node import Agent_Model, LLM_Node
 from agent.behavior_tree.player_context import PlayerContext
 from utils.logger import valley_logger
@@ -37,6 +38,7 @@ class ValleyAgent:
                     node_name="Route",
                     children=[
                         OpenDoorNode(),
+                        SwitchToolNode(),
                         ClearObstacleNode(),
                         RouteNode(),
                     ],

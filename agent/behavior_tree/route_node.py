@@ -1,15 +1,16 @@
 import asyncio
 import threading
 import time
-from collections import deque
-from typing import List, Optional, Set, Tuple
+from typing import List, Set, Tuple
 
 from agent.action.location.location import Location
+from agent.action.map.map import HardcodedStardewMap
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.route_debug_logger import RouteDebugLogger
+from agent.behavior_tree.tool_selection import get_required_tool_for_obstacle
 from agent.base_task import BaseTask, TaskType
 from agent.action.valley_action.move_controller import MoveController
 from agent.action.valley_action.AStar import RouteActionType, RouteTile, astar_solver
@@ -38,12 +39,15 @@ class RouteNode(BTNode):
         self.last_command_interval: float | None = None
         self.last_send_duration: float | None = None
         self.route_debug_logger = RouteDebugLogger()
+        self.clear_obstacle_debug_logger = RouteDebugLogger("logs/clear_obstacle_debug.log")
         self.last_replan_distance: int | None = None
         self.pending_astar_task: asyncio.Task[List[RouteTile] | None] | None = None
         self.pending_astar_reason: str | None = None
         self.pending_astar_target_location: Location | None = None
         self.pending_astar_started_at: float | None = None
         self.failed_route_signature: tuple[int, Location, Location, Location] | None = None
+        self.last_clear_obstacle_debug_signature: tuple | None = None
+        self.scene_warp_distance_cache: dict[Location, dict[Location, float]] = {}
 
         self.IMAGE_FILE = "server/img/stardew_live_map.png"
 
@@ -88,9 +92,10 @@ class RouteNode(BTNode):
 
         if game_state:
             current_run_duration = time.time() - self.route_start_time
+            self._update_scene_warp_distance_cache(game_state)
 
             if not self.routes:
-                self.routes = self.stardew_map.find_route(game_state.location_name, current_task.target_loc)
+                self.routes = self._select_best_scene_route(game_state, current_task.target_loc)
                 self.route_idx = 0
                 if self.routes:
                     self.routes = self.routes[1:]
@@ -207,6 +212,7 @@ class RouteNode(BTNode):
                                 f"A* 完成: cost={astar_duration_ms:.1f}ms, "
                                 f"path_len={len(new_path)}, next={self._get_next_path_tile()}"
                             )
+                            self._log_clear_obstacles_in_path(game_state, new_path, "A* 完成")
                         elif self.global_current_path:
                             self.should_trigger_astar = False
                             self._log_route_debug(
@@ -221,12 +227,24 @@ class RouteNode(BTNode):
 
                     clear_obstacle_tile = self._get_next_reachable_clear_obstacle_tile(game_state, blackboard)
                     if clear_obstacle_tile is not None:
+                        required_tool = get_required_tool_for_obstacle(clear_obstacle_tile.type)
+                        context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                        blackboard.require_switch_tool = required_tool is not None
+                        blackboard.is_switching_tool = required_tool is not None
+                        blackboard.required_tool = required_tool
                         blackboard.require_clear_obstacle = True
                         blackboard.clear_obstacle_tile = Tile(clear_obstacle_tile.x, clear_obstacle_tile.y)
                         blackboard.clear_obstacle_type = clear_obstacle_tile.type
 
                         self.should_trigger_astar = True
                         self.toal_tiles = set()
+                        self._log_clear_obstacle_debug(
+                            f"触发清障节点: tile={clear_obstacle_tile}, type={clear_obstacle_tile.type}, "
+                            f"required_tool={required_tool}, player={game_state.player_tile}, "
+                            f"path_index={self.path_index}, path_len={len(self.global_current_path)}, "
+                            f"CurrentToolIndex={game_state.inventory.current_tool_index}, "
+                            f"CurrentToolbarIndex={game_state.inventory.current_toolbar_index}"
+                        )
                         print(
                             f"\n🟡 [RouteNode] 发现必要清障点: {clear_obstacle_tile.type} @ {clear_obstacle_tile}，触发清障节点！"
                         )
@@ -288,6 +306,8 @@ class RouteNode(BTNode):
                         f"已奔跑 {current_run_duration:.2f}s",
                         end="",
                     )
+
+                    # async_render(game_state, self.IMAGE_FILE, 40, self._get_remaining_path())
                     if "render_thread" not in locals() or not render_thread.is_alive():  # type: ignore
                         render_thread = threading.Thread(
                             target=async_render,
@@ -322,6 +342,111 @@ class RouteNode(BTNode):
         print(f"\n🏁 [Door] 已站到门前格，面向门 {door_tile} 并触发开门节点。")
         return self.move_controller.build_face_command(anchor_tile, door_tile), True
 
+    def _select_best_scene_route(self, game_state: StardewState, target_location: Location) -> List[Location] | None:
+        candidate_routes = self.stardew_map.find_candidate_routes(
+            game_state.location_name,
+            target_location,
+        )
+        if not candidate_routes:
+            return None
+
+        scored_routes = [
+            self._score_scene_route(game_state, route)
+            for route in candidate_routes
+        ]
+        selected_route = min(scored_routes, key=lambda scored_route: scored_route["score"])
+
+        score_lines = []
+        for scored_route in sorted(scored_routes, key=lambda item: item["score"]):
+            route_text = "->".join(scored_route["route"])
+            score_lines.append(
+                f"route={route_text}, hops={scored_route['hops']}, "
+                f"first={scored_route['first_edge_distance']:.1f}, "
+                f"known_sum={scored_route['known_distance_sum']:.1f}, "
+                f"unknown={scored_route['unknown_edge_count']}, score={scored_route['score']}"
+            )
+
+        self._log_route_debug(
+            "候选跨场景路线评分: "
+            + " | ".join(score_lines)
+            + f" | selected={'->'.join(selected_route['route'])}"
+        )
+        return selected_route["route"]
+
+    def _score_scene_route(self, game_state: StardewState, route: List[Location]) -> dict:
+        hops = max(0, len(route) - 1)
+        edge_distances: list[float] = []
+        unknown_edge_count = 0
+
+        for index in range(hops):
+            source_location = route[index]
+            target_location = route[index + 1]
+            edge_distance = self._get_scene_edge_distance(
+                game_state=game_state,
+                source_location=source_location,
+                target_location=target_location,
+            )
+            if edge_distance is None:
+                unknown_edge_count += 1
+                edge_distance = 0.0
+            edge_distances.append(edge_distance)
+
+        first_edge_distance = edge_distances[0] if edge_distances else 0.0
+        known_distance_sum = sum(edge_distances)
+
+        if unknown_edge_count > 0:
+            score = (hops, first_edge_distance, known_distance_sum, unknown_edge_count)
+        else:
+            score = (hops, known_distance_sum, first_edge_distance, unknown_edge_count)
+
+        return {
+            "route": route,
+            "hops": hops,
+            "first_edge_distance": first_edge_distance,
+            "known_distance_sum": known_distance_sum,
+            "unknown_edge_count": unknown_edge_count,
+            "score": score,
+        }
+
+    def _get_scene_edge_distance(
+        self,
+        game_state: StardewState,
+        source_location: Location,
+        target_location: Location,
+    ) -> float | None:
+        if source_location == game_state.location_name:
+            return self._get_current_scene_warp_distance(game_state, target_location)
+
+        return self.scene_warp_distance_cache.get(source_location, {}).get(target_location)
+
+    def _update_scene_warp_distance_cache(self, game_state: StardewState) -> None:
+        if not game_state.warps:
+            return
+
+        scene_distances = self.scene_warp_distance_cache.setdefault(game_state.location_name, {})
+        for warp in game_state.warps:
+            distance = self._get_tile_distance(game_state.player_tile, warp.tile)
+            previous_distance = scene_distances.get(warp.target_location)
+            if previous_distance is None or distance < previous_distance:
+                scene_distances[warp.target_location] = distance
+
+    def _get_current_scene_warp_distance(
+        self,
+        game_state: StardewState,
+        target_location: Location,
+    ) -> float | None:
+        candidate_distances = [
+            self._get_tile_distance(game_state.player_tile, warp.tile)
+            for warp in game_state.warps
+            if warp.target_location == target_location
+        ]
+        if not candidate_distances:
+            return None
+        return min(candidate_distances)
+
+    def _get_tile_distance(self, start_tile: Tile, end_tile: Tile) -> float:
+        return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
+
     def _reset_route_state(self) -> None:
         self.route_start_time = None
         self.routes = []
@@ -345,6 +470,7 @@ class RouteNode(BTNode):
         self.pending_astar_target_location = None
         self.pending_astar_started_at = None
         self.failed_route_signature = None
+        self.last_clear_obstacle_debug_signature = None
 
     def _get_replan_reason(self, game_state: StardewState, blackboard: AgentBlackboard) -> str | None:
         self.last_replan_distance = None
@@ -391,6 +517,26 @@ class RouteNode(BTNode):
                 return f"未来路径被阻挡: {future_tile}"
             if current_action_type in CLEARABLE_ROUTE_TYPES and future_tile.type != current_action_type:
                 self.last_replan_distance = replan_distance
+                signature = (
+                    "dynamic_clear_obstacle",
+                    game_state.location_name,
+                    game_state.player_tile.x,
+                    game_state.player_tile.y,
+                    self.path_index,
+                    future_tile.x,
+                    future_tile.y,
+                    current_action_type,
+                )
+                if signature != self.last_clear_obstacle_debug_signature:
+                    self.last_clear_obstacle_debug_signature = signature
+                    self._log_clear_obstacle_debug(
+                        f"未来路径动态发现可清障障碍: action_type={current_action_type}, "
+                        f"path_tile={future_tile}, path_tile_type={future_tile.type}, "
+                        f"player={game_state.player_tile}, path_index={self.path_index}, "
+                        f"future_index={future_index}, distance={replan_distance}, "
+                        f"CurrentToolIndex={game_state.inventory.current_tool_index}, "
+                        f"CurrentToolbarIndex={game_state.inventory.current_toolbar_index}"
+                    )
                 return f"未来路径出现新清障点: {current_action_type} @ {future_tile}"
 
         return None
@@ -403,12 +549,84 @@ class RouteNode(BTNode):
             if route_tile.type not in CLEARABLE_ROUTE_TYPES:
                 continue
             if (route_tile.x, route_tile.y) in blackboard.failed_clear_obstacles:
+                self._log_clear_obstacle_candidate(
+                    game_state=game_state,
+                    route_tile=route_tile,
+                    look_ahead_end=look_ahead_end,
+                    reason="已标记为清障失败，跳过",
+                    is_reachable=False,
+                )
                 continue
-            if self._is_player_next_to_tile(game_state.player_tile, route_tile):
+            if self._is_player_cardinally_next_to_tile(game_state.player_tile, route_tile):
+                self._log_clear_obstacle_candidate(
+                    game_state=game_state,
+                    route_tile=route_tile,
+                    look_ahead_end=look_ahead_end,
+                    reason="玩家已在上下左右相邻格，可触发清障",
+                    is_reachable=True,
+                )
                 return route_tile
+            self._log_clear_obstacle_candidate(
+                game_state=game_state,
+                route_tile=route_tile,
+                look_ahead_end=look_ahead_end,
+                reason="玩家尚未到达相邻格，继续移动靠近",
+                is_reachable=False,
+            )
             return None
 
         return None
+
+    def _log_clear_obstacles_in_path(
+        self,
+        game_state: StardewState,
+        path: List[RouteTile],
+        reason: str,
+    ) -> None:
+        clear_obstacle_tiles = [route_tile for route_tile in path if route_tile.type in CLEARABLE_ROUTE_TYPES]
+        if not clear_obstacle_tiles:
+            return
+
+        preview = ", ".join(
+            f"{route_tile.type}@({route_tile.x},{route_tile.y})"
+            for route_tile in clear_obstacle_tiles[:8]
+        )
+        self._log_clear_obstacle_debug(
+            f"路径包含可清障障碍: reason={reason}, loc={game_state.location_name}, "
+            f"player={game_state.player_tile}, path_index={self.path_index}, "
+            f"count={len(clear_obstacle_tiles)}, preview=[{preview}]"
+        )
+
+    def _log_clear_obstacle_candidate(
+        self,
+        game_state: StardewState,
+        route_tile: RouteTile,
+        look_ahead_end: int,
+        reason: str,
+        is_reachable: bool,
+    ) -> None:
+        required_tool = get_required_tool_for_obstacle(route_tile.type)
+        signature = (
+            game_state.location_name,
+            game_state.player_tile.x,
+            game_state.player_tile.y,
+            self.path_index,
+            route_tile.x,
+            route_tile.y,
+            route_tile.type,
+            reason,
+        )
+        if signature == self.last_clear_obstacle_debug_signature:
+            return
+
+        self.last_clear_obstacle_debug_signature = signature
+        self._log_clear_obstacle_debug(
+            f"清障候选: tile={route_tile}, type={route_tile.type}, required_tool={required_tool}, "
+            f"is_reachable={is_reachable}, reason={reason}, player={game_state.player_tile}, "
+            f"path_index={self.path_index}, lookahead_end={look_ahead_end}, "
+            f"path_len={len(self.global_current_path)}, CurrentToolIndex={game_state.inventory.current_tool_index}, "
+            f"CurrentToolbarIndex={game_state.inventory.current_toolbar_index}"
+        )
 
     def _get_next_path_tile(self) -> RouteTile | None:
         if self.path_index >= len(self.global_current_path):
@@ -431,6 +649,9 @@ class RouteNode(BTNode):
 
     def _log_route_debug(self, message: str) -> None:
         self.route_debug_logger.log(f"[RouteNode] {message}")
+
+    def _log_clear_obstacle_debug(self, message: str) -> None:
+        self.clear_obstacle_debug_logger.log(f"[RouteNode] {message}")
 
     def _stop_route_on_failure(
         self,
@@ -560,6 +781,7 @@ class RouteNode(BTNode):
             f"后台 A* 切换成功: reason={pending_reason}, cost={duration_ms:.1f}ms, "
             f"path_len={len(aligned_path)}, next={self._get_next_path_tile()}"
         )
+        self._log_clear_obstacles_in_path(game_state, aligned_path, "后台 A* 切换成功")
 
     def _align_pending_path_to_current_player(
         self,
@@ -618,6 +840,11 @@ class RouteNode(BTNode):
         distance_y = abs(player_tile.y - target_tile.y)
         return max(distance_x, distance_y) == 1
 
+    def _is_player_cardinally_next_to_tile(self, player_tile: Tile, target_tile: Tile) -> bool:
+        distance_x = abs(player_tile.x - target_tile.x)
+        distance_y = abs(player_tile.y - target_tile.y)
+        return distance_x + distance_y == 1
+
     def _is_backtracking_path(self, game_state: StardewState, new_path: List[RouteTile]) -> bool:
         if not self.global_current_path or len(new_path) < 2:
             return False
@@ -669,10 +896,10 @@ def route_cost_function(
     twigs = state.layers.get("Twig", set())
 
     if neighbor in weeds:
-        return True, base_cost, "weeds"
+        return True, base_cost + 4.0, "weeds"
 
     if neighbor in twigs:
-        return True, base_cost, "twig"
+        return True, base_cost + 6.0, "twig"
 
     # ------------------ 🪨 砸石头决策细分 ------------------
     if neighbor in stones:
@@ -696,125 +923,9 @@ def route_cost_function(
         # destroy_stone_cost = 5.0 - reward_bonus
         # return True, base_cost + destroy_stone_cost, "destroy"
 
-        return True, base_cost, "stone"
+        return True, base_cost + 8.0, "stone"
 
     # 4. 🟢 顺畅空地放行
     # 没有任何硬图层阻挡，完全是康庄大道，保持原本的 A* 基础位移时间代价 (base_cost 是 1.0 或 1.414)
     return True, base_cost, "walk"
 
-
-class HardcodedStardewMap:
-    """
-    🗺️ 完全静态写死的星露谷物语场景连通图 (基于官方 Warp 数据建模)
-    不需要任何动态解析，运行效率极高，专为 Agent 长途寻路提供数据支撑。
-    """
-
-    # 将去重后的邻接拓扑网完全写死在类属性中
-    GRAPH: dict[Location, set[Location]] = {
-        "AdventureGuild": {"Town"},
-        "AnimalShop": {"Forest"},
-        "ArchaeologyHouse": {"Town"},
-        "Backwoods": {"Farm", "Mountain"},
-        "Beach": {"Town", "FishShop"},
-        "Blacksmith": {"Town"},
-        "BusStop": {"Desert", "Tunnel", "Town", "Mountain", "Farm"},
-        "CommunityCenter": {"Town"},
-        "Desert": {"BusStop"},
-        "ElliottHouse": {"Beach"},
-        "Farm": {
-            "FarmHouse",
-            "Greenhouse",
-            "BusStop",
-            "Backwoods",
-            # "Forest",
-        },
-        "FarmCave": {"Backwoods"},
-        "FarmHouse": {"Farm"},
-        "FishShop": {"Beach"},
-        "Forest": {"Town", "Farm", "AnimalShop", "WizardHouse", "LeahHouse", "Woods"},
-        "Greenhouse": {"Farm"},
-        "HaleyHouse": {"Town"},
-        "Hospital": {"Town"},
-        "JojaMart": {"Town"},
-        "JoshHouse": {"Town"},
-        "LeahHouse": {"Forest"},
-        "LockedDoorWarp": {"ScienceHouse"},
-        "ManorHouse": {"Town"},
-        "Mine": {"Mountain", "Town"},
-        "Mountain": {
-            "Backwoods",
-            "Town",
-            "Mine",
-            "Railroad",
-            "Tent",
-            "ScienceHouse",
-        },
-        "Railroad": {"Mountain", "Backwoods"},
-        "Saloon": {"Town"},
-        "SamHouse": {"Town"},
-        "ScienceHouse": {"Mountain", "LockedDoorWarp"},
-        "SeedShop": {"Town"},
-        "Tent": {"Mountain", "Town"},
-        "Town": {
-            "BusStop",
-            "Mountain",
-            "Forest",
-            "Beach",
-            "CommunityCenter",
-            "JojaMart",
-            "Hospital",
-            "SeedShop",
-            "JoshHouse",
-            "Trailer",
-            "Saloon",
-            "Blacksmith",
-            "SamHouse",
-            "ManorHouse",
-            "HaleyHouse",
-            "ArchaeologyHouse",
-            "ElliottHouse",
-            "AdventureGuild",
-            "Mine",
-            "Tent",
-        },
-        "Trailer": {"Town"},
-        "Tunnel": {"BusStop"},
-        "WizardHouse": {"Forest"},
-        "Woods": {"Forest"},
-    }
-
-    @classmethod
-    def find_route(cls, start: Location, end: Location) -> Optional[List[Location]]:
-        """
-        🔍 根据静态写死的地图，寻找从起点到终点过门次数最少的最短场景路径
-        :param start: 起点场景名 (如 "Farm")
-        :param end: 终点场景名 (如 "SeedShop")
-        :return: 路径场景名列表，如果无法连通则返回 None
-        """
-        # 门禁：防止传入不存在的场景名
-        if start not in cls.GRAPH or end not in cls.GRAPH:
-            print(f"❌ [MapService] 导航失败：找不到场景 【{start}】 或 【{end}】")
-            return None
-
-        if start == end:
-            return [start]
-
-        # BFS 队列：存储元组 (当前场景, 走到当前场景经历的路径数组)
-        queue: deque[tuple[Location, List[Location]]] = deque([(start, [start])])
-        # 履历集合：防止回溯死循环
-        visited = {start}
-
-        while queue:
-            current_loc, current_path = queue.popleft()
-
-            # 遍历当前场景写死的邻居们
-            for neighbor in cls.GRAPH[current_loc]:
-                if neighbor == end:
-                    # 抓到终点，路径拼接完成，直接返回
-                    return current_path + [neighbor]
-
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, current_path + [neighbor]))
-
-        return None

@@ -144,6 +144,10 @@ namespace StardewMemoryExporter
                 {
                     HandleUseTool(pressedKeys);
                 }
+                else if (actionType.Equals("SWITCH_TOOL", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleSwitchTool(pressedKeys);
+                }
 
                 else
                 {
@@ -239,6 +243,24 @@ namespace StardewMemoryExporter
             return;
         }
 
+        private void HandleSwitchTool(List<string> pressedKeys)
+        {
+            ClearHeldMoveButtons();
+
+            bool hasValidKey = false;
+            foreach (string keyStr in pressedKeys)
+            {
+                if (GetToolSwitchButton(keyStr) is SButton button)
+                {
+                    _helper.Input.Press(button);
+                    hasValidKey = true;
+                }
+            }
+
+            SendResponseToPython(hasValidKey ? "SUCCESS" : "FAILURE");
+            return;
+        }
+
         private SButton? GetMoveButton(string direction)
         {
             var options = Game1.options;
@@ -248,6 +270,27 @@ namespace StardewMemoryExporter
                 "s" => options.moveDownButton.Length > 0 ? options.moveDownButton[0].ToSButton() : SButton.S,
                 "a" => options.moveLeftButton.Length > 0 ? options.moveLeftButton[0].ToSButton() : SButton.A,
                 "d" => options.moveRightButton.Length > 0 ? options.moveRightButton[0].ToSButton() : SButton.D,
+                _ => null
+            };
+        }
+
+        private SButton? GetToolSwitchButton(string key)
+        {
+            return key.ToLower() switch
+            {
+                "tab" => SButton.Tab,
+                "1" => SButton.D1,
+                "2" => SButton.D2,
+                "3" => SButton.D3,
+                "4" => SButton.D4,
+                "5" => SButton.D5,
+                "6" => SButton.D6,
+                "7" => SButton.D7,
+                "8" => SButton.D8,
+                "9" => SButton.D9,
+                "0" => SButton.D0,
+                "-" => SButton.OemMinus,
+                "=" => SButton.OemPlus,
                 _ => null
             };
         }

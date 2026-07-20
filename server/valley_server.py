@@ -19,13 +19,37 @@ from agent.action.location.location import Location
 class WarpZone:
     def __init__(
         self,
-        target_location: str,
+        target_location: Location,
         tile: Tile,
         is_passable: bool,
     ):
-        self.target_location: str = target_location
+        self.target_location: Location = target_location
         self.tile = tile
         self.is_passable: bool = is_passable
+
+
+class InventoryItem:
+    def __init__(self, raw_item: dict):
+        # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
+        self.index: int = int(raw_item.get("Index", -1))
+        self.name: str = raw_item.get("Name", "")
+        self.display_name: str = raw_item.get("DisplayName", "")
+        self.qualified_item_id: str = raw_item.get("QualifiedItemId", "")
+        self.category: int = int(raw_item.get("Category", 0))
+        self.stack: int = int(raw_item.get("Stack", 0))
+        self.is_tool: bool = bool(raw_item.get("IsTool", False))
+
+
+class InventoryState:
+    def __init__(self, raw_inventory: dict):
+        # CurrentToolIndex 直接对应 SMAPI / Stardew Valley 的玩家当前工具槽位。
+        self.current_tool_index: int = int(raw_inventory.get("CurrentToolIndex", -1))
+        # CurrentToolbarIndex 是由 CurrentToolIndex // 12 派生出的当前工具栏页，用于 Python 端决定是否按 Tab。
+        self.current_toolbar_index: int = int(raw_inventory.get("CurrentToolbarIndex", 0))
+        self.items: list[InventoryItem] = []
+        for raw_item in raw_inventory.get("Items", []):
+            if isinstance(raw_item, dict):
+                self.items.append(InventoryItem(raw_item))
 
 
 class StardewState:
@@ -43,6 +67,13 @@ class StardewState:
         tile_coord = raw_json_data.get("tile_coordinate", [0, 0])
         self.player_tile = Tile(tile_coord[0], tile_coord[1])
         self.player_size = (48, 32)
+        self.inventory = InventoryState(
+            {
+                "CurrentToolIndex": raw_json_data.get("CurrentToolIndex", -1),
+                "CurrentToolbarIndex": raw_json_data.get("CurrentToolbarIndex", 0),
+                "Items": raw_json_data.get("Items", []),
+            }
+        )
 
         self.warps: List[WarpZone] = []
         for w_dict in raw_json_data.get("warps", []):

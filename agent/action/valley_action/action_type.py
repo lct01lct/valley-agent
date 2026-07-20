@@ -1,5 +1,4 @@
 from enum import Enum
-from tkinter import SW
 from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -60,7 +59,27 @@ class StardewAction(Enum):
     PLACE_BOMB = "PLACE_BOMB"  # 放置炸弹：手持并在地面放置樱桃炸弹/巨型炸弹，进行大面积岩石与矿产爆破
 
 
-type KeyType = Literal["w", "a", "s", "d", "x", "c"]
+type KeyType = Literal[
+    "w",
+    "a",
+    "s",
+    "d",
+    "x",
+    "c",
+    "tab",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "0",
+    "-",
+    "=",
+]
 
 
 class MouseType(BaseModel):

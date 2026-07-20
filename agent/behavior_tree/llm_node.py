@@ -44,19 +44,19 @@ class Agent_Model:
             await asyncio.sleep(2.0)
             if "打烊" in prompt:
                 return [
-                    RouteTask(task_type="ROUTE", desc="前往后山", target_loc="BusStop"),
+                    RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Mountain"),
                     RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
                 ]
             return [
-                RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="FishShop"),
-                # RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Town"),
+                RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="SeedShop"),
                 RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
             ]
-            # return [
-            #     RouteTask(task_type="ROUTE", desc="前往后山", target_loc="FarmHouse"),
-            #     RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Blacksmith"),
-            #     RouteTask(task_type="ROUTE", desc="前往Town", target_loc="SeedShop"),
-            # ]
+            return [
+                # RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Backwoods"),
+                # RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Forest"),
+                # RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Blacksmith"),
+                # RouteTask(task_type="ROUTE", desc="前往Town", target_loc="SeedShop"),
+            ]
         else:
             return []
 
