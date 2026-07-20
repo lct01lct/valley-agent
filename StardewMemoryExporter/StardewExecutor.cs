@@ -8,7 +8,6 @@ using Newtonsoft.Json.Linq;
 using Microsoft.Xna.Framework;
 using StardewModdingAPI;
 using StardewValley;
-using System.Linq;
 using StardewValley.Menus;
 using StardewModdingAPI.Events;
 
@@ -22,6 +21,8 @@ namespace StardewMemoryExporter
         private readonly IMonitor _monitor;
         private readonly IModHelper _helper;
         private readonly SharedBlackboard _blackboard;
+        private readonly object _moveLock = new object();
+        private readonly HashSet<SButton> _heldMoveButtons = new HashSet<SButton>();
 
         public StardewExecutor(IMonitor monitor, SharedBlackboard blackboard, IModHelper helper, int port = 8888)
         {
@@ -74,10 +75,12 @@ namespace StardewMemoryExporter
                             }
                         }
 
+                        ClearHeldMoveButtons();
                         _monitor.Log("🔌 [DebugServer] Python 控制端已优雅断开连接。", LogLevel.Warn);
                     }
                     catch (Exception clientEx)
                     {
+                        ClearHeldMoveButtons();
                         _monitor.Log($"🔌 [DebugServer] Python 客户端异常断开 ({clientEx.Message})，正在重置服务器以等待下次连入...", LogLevel.Warn);
                     }
                     // finally
@@ -123,6 +126,11 @@ namespace StardewMemoryExporter
                 {
                     HandleMove(pressedKeys);
 
+                }
+                else if (actionType.Equals("IDLE", StringComparison.OrdinalIgnoreCase))
+                {
+                    ClearHeldMoveButtons();
+                    SendResponseToPython("SUCCESS");
                 }
                 else if (actionType.Equals("CLOSE_DIALOG", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
                 {
@@ -180,22 +188,25 @@ namespace StardewMemoryExporter
                 directionSummary = "[无有效移动键]";
             }
 
-            // _monitor.Log($"🏃 [解析成功] 动作: {actionType} | 拟按下方向: {directionSummary}", LogLevel.Info);
+            // _monitor.Log($"🏃 [解析成功] 移动方向更新: {directionSummary}", LogLevel.Info);
 
+            HashSet<SButton> nextMoveButtons = new HashSet<SButton>();
             foreach (string keyStr in pressedKeys)
             {
                 if (GetMoveButton(keyStr) is SButton btn)
                 {
-                    _helper.Input.Press(btn);
+                    nextMoveButtons.Add(btn);
                 }
             }
 
+            SetHeldMoveButtons(nextMoveButtons);
             SendResponseToPython("SUCCESS");
             return;
         }
 
         private void HandleCloseDialog(List<string> pressedKeys)
         {
+            ClearHeldMoveButtons();
             if (Game1.activeClickableMenu is DialogueBox dialogueBox)
             {
                 _helper.Input.Press(SButton.X);
@@ -212,6 +223,7 @@ namespace StardewMemoryExporter
 
         private void HandleOpenDoor(List<string> pressedKeys)
         {
+            ClearHeldMoveButtons();
             _helper.Input.Press(SButton.X);
             _blackboard.IsWaitingForDoorResponse = true;
             _blackboard.FrameTimeoutCounter = 0;
@@ -221,6 +233,7 @@ namespace StardewMemoryExporter
 
         private void HandleUseTool(List<string> pressedKeys)
         {
+            ClearHeldMoveButtons();
             _helper.Input.Press(SButton.C);
             SendResponseToPython("SUCCESS");
             return;
@@ -237,6 +250,37 @@ namespace StardewMemoryExporter
                 "d" => options.moveRightButton.Length > 0 ? options.moveRightButton[0].ToSButton() : SButton.D,
                 _ => null
             };
+        }
+
+        private void SetHeldMoveButtons(HashSet<SButton> buttons)
+        {
+            lock (_moveLock)
+            {
+                _heldMoveButtons.Clear();
+                foreach (SButton button in buttons)
+                {
+                    _heldMoveButtons.Add(button);
+                }
+            }
+        }
+
+        private void ClearHeldMoveButtons()
+        {
+            SetHeldMoveButtons(new HashSet<SButton>());
+        }
+
+        public void ApplyHeldMove()
+        {
+            HashSet<SButton> buttonsToHold;
+            lock (_moveLock)
+            {
+                buttonsToHold = new HashSet<SButton>(_heldMoveButtons);
+            }
+
+            foreach (SButton button in buttonsToHold)
+            {
+                _helper.Input.Press(button);
+            }
         }
 
         public void ListenDialogMessages(UpdateTickedEventArgs e)
@@ -268,6 +312,7 @@ namespace StardewMemoryExporter
 
         public void CleanUp()
         {
+            ClearHeldMoveButtons();
             try { _netStream?.Close(); _connectedClient?.Close(); _cmdServer?.Stop(); } catch { }
             _netStream = null; _connectedClient = null;
         }

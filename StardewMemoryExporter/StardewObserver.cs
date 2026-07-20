@@ -28,8 +28,9 @@ namespace StardewMemoryExporter
         private readonly IMonitor _monitor;
 
         private string _lastCachedLocation = "";
-        private readonly List<string> _cachedWarpJsonList = new List<string>();
+        private readonly List<object> _cachedWarpDataList = new List<object>();
         private readonly HashSet<string> _cachedWarpCoords = new HashSet<string>();
+        private const int ObstacleScanRange = 25;
 
         private List<string> _lastHudMessages = new List<string>();
         // 🛡️ 调试专用变量：记录上一次打印的玩家格子坐标，防止高频刷屏
@@ -155,6 +156,9 @@ namespace StardewMemoryExporter
                     RefreshWarpCache(location, locationName);
                 }
 
+                var currentMap = location.Map ?? location.map;
+                int mapWidth = currentMap?.Layers?[0]?.LayerWidth ?? 0;
+                int mapHeight = currentMap?.Layers?[0]?.LayerHeight ?? 0;
                 HashSet<string> obstacles = ScanLocalObstacles(location, player);
 
                 // if (locationName == "Farm")
@@ -167,17 +171,25 @@ namespace StardewMemoryExporter
                 //     }
                 // }
 
-                StringBuilder sb = new StringBuilder();
-                sb.Append("{\n");
-                sb.Append($"  \"location_name\": \"{locationName}\",\n");
-                sb.Append($"  \"position\": [{player.StandingPixel.X:F1}, {player.StandingPixel.Y:F1}],\n");
-                sb.Append($"  \"tile_coordinate\": [{(int)player.TilePoint.X}, {(int)player.TilePoint.Y}],\n");
-                sb.Append($"  \"tile_size\": {Game1.tileSize},\n");
-                sb.Append("  \"warps\": [\n    " + string.Join(",\n    ", _cachedWarpJsonList) + "\n  ],\n");
-                sb.Append("  \"obstacles\": [" + string.Join(", ", obstacles.Select(s => "\"" + s + "\"")) + "]\n");
-                sb.Append("}\nEOF_END\n");
+                var stateSnapshot = new
+                {
+                    location_name = locationName,
+                    position = new[]
+                    {
+                        Math.Round((double)player.StandingPixel.X, 1),
+                        Math.Round((double)player.StandingPixel.Y, 1),
+                    },
+                    tile_coordinate = new[] { (int)player.TilePoint.X, (int)player.TilePoint.Y },
+                    tile_size = Game1.tileSize,
+                    state_scope = "local",
+                    scan_range = ObstacleScanRange,
+                    map_size = new[] { mapWidth, mapHeight },
+                    warps = _cachedWarpDataList,
+                    obstacles = obstacles.ToList(),
+                };
 
-                byte[] data = Encoding.UTF8.GetBytes(sb.ToString());
+                string packet = JsonConvert.SerializeObject(stateSnapshot) + "\nEOF_END\n";
+                byte[] data = Encoding.UTF8.GetBytes(packet);
                 lock (_streamLock)
                 {
                     if (_netStream != null)
@@ -196,7 +208,7 @@ namespace StardewMemoryExporter
         private void RefreshWarpCache(GameLocation location, string locationName)
         {
             _lastCachedLocation = locationName;
-            _cachedWarpJsonList.Clear();
+            _cachedWarpDataList.Clear();
             _cachedWarpCoords.Clear();
 
             var currentMap = location.Map ?? location.map;
@@ -209,15 +221,12 @@ namespace StardewMemoryExporter
             {
 
                 if (w == null) continue;
-                var warpData = new
-                {
-                    target_location = w.TargetName,
-                    tile_x = w.X,
-                    tile_y = w.Y,
-                    is_passable = location.isTilePassable(new Vector2(w.X, w.Y))
-                };
-
-                _cachedWarpJsonList.Add(JsonConvert.SerializeObject(warpData));
+                _cachedWarpDataList.Add(CreateWarpSnapshot(
+                    w.TargetName,
+                    w.X,
+                    w.Y,
+                    location.isTilePassable(new Vector2(w.X, w.Y))
+                ));
                 _cachedWarpCoords.Add($"{w.X},{w.Y}");
             }
 
@@ -229,7 +238,7 @@ namespace StardewMemoryExporter
                     {
                         if (!_cachedWarpCoords.Contains($"{door.Key.X},{door.Key.Y}"))
                         {
-                            _cachedWarpJsonList.Add($"{{\"target_location\": \"{door.Value}\", \"tile_x\": {door.Key.X}, \"tile_y\": {door.Key.Y}}}");
+                            _cachedWarpDataList.Add(CreateWarpSnapshot(door.Value, door.Key.X, door.Key.Y));
                             _cachedWarpCoords.Add($"{door.Key.X},{door.Key.Y}");
                         }
                     }
@@ -253,7 +262,7 @@ namespace StardewMemoryExporter
                                            buildingType.Contains("Cabin") ? "Cabin" :
                                            buildingType.Contains("Farmhouse") ? "FarmHouse" : buildingType;
 
-                        _cachedWarpJsonList.Add($"{{\"target_location\": \"{targetMap}\", \"tile_x\": {doorX}, \"tile_y\": {doorY}}}");
+                        _cachedWarpDataList.Add(CreateWarpSnapshot(targetMap, doorX, doorY));
                         _cachedWarpCoords.Add(doorKey);
                     }
                 }
@@ -276,11 +285,32 @@ namespace StardewMemoryExporter
                             target = part;
                             break;
                         }
-                        _cachedWarpJsonList.Add($"{{\"target_location\": \"{target}\", \"tile_x\": {x}, \"tile_y\": {y}}}");
+                        _cachedWarpDataList.Add(CreateWarpSnapshot(target, x, y));
                         _cachedWarpCoords.Add($"{x},{y}");
                     }
                 }
             }
+        }
+
+        private object CreateWarpSnapshot(string targetLocation, int tileX, int tileY, bool? isPassable = null)
+        {
+            if (isPassable.HasValue)
+            {
+                return new
+                {
+                    target_location = targetLocation,
+                    tile_x = tileX,
+                    tile_y = tileY,
+                    is_passable = isPassable.Value,
+                };
+            }
+
+            return new
+            {
+                target_location = targetLocation,
+                tile_x = tileX,
+                tile_y = tileY,
+            };
         }
 
         // private string GetObstacleTypeAtTile(GameLocation location, Farmer player, int x, int y)
@@ -341,8 +371,17 @@ namespace StardewMemoryExporter
 
         private HashSet<string> ScanLocalObstacles(GameLocation location, Farmer player)
         {
+            return ScanObstacles(location, player, ObstacleScanRange);
+        }
+
+        private HashSet<string> ScanGlobalObstacles(GameLocation location, Farmer player)
+        {
+            return ScanObstacles(location, player, null);
+        }
+
+        private HashSet<string> ScanObstacles(GameLocation location, Farmer player, int? scanRange)
+        {
             HashSet<string> obstacles = new HashSet<string>();
-            int scanRange = 25;
             int tx = (int)player.TilePoint.X;
             int ty = (int)player.TilePoint.Y;
             int mapWidth = location.map.Layers[0].LayerWidth;
@@ -376,9 +415,14 @@ namespace StardewMemoryExporter
                 }
             }
 
-            for (int x = tx - scanRange; x < tx + scanRange; x++)
+            int startX = scanRange.HasValue ? tx - scanRange.Value : 0;
+            int endX = scanRange.HasValue ? tx + scanRange.Value : mapWidth;
+            int startY = scanRange.HasValue ? ty - scanRange.Value : 0;
+            int endY = scanRange.HasValue ? ty + scanRange.Value : mapHeight;
+
+            for (int x = startX; x < endX; x++)
             {
-                for (int y = ty - scanRange; y < ty + scanRange; y++)
+                for (int y = startY; y < endY; y++)
                 {
                     if (x < 0 || y < 0 || x >= mapWidth || y >= mapHeight)
                     {

@@ -25,7 +25,9 @@ class PlayerContext:
         print("🛠️ [System]：Stardew Observer Client 初始化。。。")
 
     def update(self):
-        self.state = self.observer_client.pop_game_state()
+        latest_state = self.observer_client.pop_game_state()
+        if latest_state is not None:
+            self.state = latest_state
 
     def run(self, command: StardewCommand):
         self.executor_client.send_command(command)

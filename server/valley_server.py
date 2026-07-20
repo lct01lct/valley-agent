@@ -32,12 +32,17 @@ class StardewState:
     def __init__(self, raw_json_data: dict):
         self.location_name: Location = raw_json_data.get("location_name", "UnknownScene")
         self.tile_size: int = raw_json_data.get("tile_size", 0)
+        self.state_scope: str = raw_json_data.get("state_scope", "local")
+        self.scan_range: int | None = raw_json_data.get("scan_range")
+        raw_map_size = raw_json_data.get("map_size", [0, 0])
+        self.map_size: tuple[int, int] = (int(raw_map_size[0]), int(raw_map_size[1]))
 
         raw_position = raw_json_data.get("position", [0.0, 0.0])
         self.position = Position(raw_position[0], raw_position[1])
 
         tile_coord = raw_json_data.get("tile_coordinate", [0, 0])
         self.player_tile = Tile(tile_coord[0], tile_coord[1])
+        self.player_size = (48, 32)
 
         self.warps: List[WarpZone] = []
         for w_dict in raw_json_data.get("warps", []):
@@ -118,6 +123,33 @@ class StardewState:
                     except ValueError:
                         pass
 
+    def merge_known_layers_from(self, previous_state: "StardewState") -> None:
+        if previous_state.location_name != self.location_name:
+            return
+        if self.state_scope == "global":
+            return
+        if self.scan_range is None:
+            return
+
+        for layer_name, previous_tiles in previous_state.layers.items():
+            current_tiles = self.layers.setdefault(layer_name, set())
+            for tile in previous_tiles:
+                if not self.is_tile_inside_current_scan(tile):
+                    current_tiles.add(tile)
+
+    def is_tile_inside_current_scan(self, tile: Tile) -> bool:
+        if self.state_scope == "global":
+            return True
+        if self.scan_range is None:
+            return True
+
+        min_x = self.player_tile.x - self.scan_range
+        max_x = self.player_tile.x + self.scan_range - 1
+        min_y = self.player_tile.y - self.scan_range
+        max_y = self.player_tile.y + self.scan_range - 1
+
+        return min_x <= tile.x <= max_x and min_y <= tile.y <= max_y
+
 
 class StardewObserverClient:
     def __init__(self, host: str = "127.0.0.1", port: int = 9999):
@@ -158,6 +190,8 @@ class StardewObserverClient:
                             raw_json = json.loads(complete_packet)
                             state_obj = StardewState(raw_json)
                             with self._lock:
+                                if self._latest_state is not None:
+                                    state_obj.merge_known_layers_from(self._latest_state)
                                 self._latest_state = state_obj
                                 self._has_new_data = True
                         except json.JSONDecodeError:

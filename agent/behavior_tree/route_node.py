@@ -1,34 +1,49 @@
+import asyncio
 import threading
 import time
 from collections import deque
 from typing import List, Optional, Set, Tuple
-
 
 from agent.action.location.location import Location
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
+from agent.behavior_tree.route_debug_logger import RouteDebugLogger
 from agent.base_task import BaseTask, TaskType
+from agent.action.valley_action.move_controller import MoveController
 from agent.action.valley_action.AStar import RouteActionType, RouteTile, astar_solver
 from server.valley_server import StardewState, async_render
 from server.type import Tile
 
 CLEARABLE_ROUTE_TYPES: set[RouteActionType] = {"weeds", "twig", "stone"}
+NEAR_REPLAN_DISTANCE = 2
 
 
 class RouteNode(BTNode):
     def __init__(self):
         self.route_start_time = None
         self.stardew_map = HardcodedStardewMap()
-        self.global_current_path = []
+        self.global_current_path: List[RouteTile] = []
+        self.path_index = 1
+        self.move_controller = MoveController()
         self.routes: List[Location] | None = None
         self.route_idx = -1
         self.is_doing = False  # 标记是否正在执行寻路任务
-        self.should_trigger_astar = True  # 优化寻路性能，只有到了下一个格子才出触发
+        self.should_trigger_astar = True
         self.toal_tiles: Set[RouteTile] = set()
         self.current_task_signature: tuple[int, Location] | None = None
         self.last_location_name: Location | None = None
+        self.last_move_command_at: float | None = None
+        self.last_command_interval: float | None = None
+        self.last_send_duration: float | None = None
+        self.route_debug_logger = RouteDebugLogger()
+        self.last_replan_distance: int | None = None
+        self.pending_astar_task: asyncio.Task[List[RouteTile] | None] | None = None
+        self.pending_astar_reason: str | None = None
+        self.pending_astar_target_location: Location | None = None
+        self.pending_astar_started_at: float | None = None
+        self.failed_route_signature: tuple[int, Location, Location, Location] | None = None
 
         self.IMAGE_FILE = "server/img/stardew_live_map.png"
 
@@ -96,39 +111,87 @@ class RouteNode(BTNode):
 
                     target_location_name = self.routes[self.route_idx]
                     self.global_current_path = []
+                    self.path_index = 1
                     self.should_trigger_astar = True
                     self.toal_tiles = set()
 
-                replan_reason = self._get_replan_reason(game_state)
+                self._consume_pending_astar_result(game_state, target_location_name)
+                replan_reason = self._get_replan_reason(game_state, blackboard)
+                failure_signature = (
+                    blackboard.current_step_index,
+                    current_task.target_loc,
+                    game_state.location_name,
+                    target_location_name,
+                )
+
+                if self.failed_route_signature == failure_signature:
+                    return "FAILURE"
+
+                if replan_reason and not self.should_trigger_astar and self._should_replan_in_background():
+                    self._start_background_astar(game_state, target_location_name, blackboard, replan_reason)
+                    replan_reason = None
+
+                if (
+                    replan_reason
+                    and not self.should_trigger_astar
+                    and self._has_pending_astar()
+                    and self._should_wait_for_pending_replan()
+                ):
+                    self._log_route_debug(
+                        f"障碍已接近，等待后台 A*: reason={replan_reason}, "
+                        f"distance={self.last_replan_distance}, path={self.path_index}/{len(self.global_current_path)}"
+                    )
+                    context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                    return "RUNNING"
+
                 if self.should_trigger_astar or replan_reason:
+                    astar_reason = replan_reason or "should_trigger_astar"
+                    astar_start_time = time.perf_counter()
                     if len(self.toal_tiles) == 0:
                         self.toal_tiles = astar_solver.get_goal_tiles(game_state, target_location_name)
 
-                    # def cost_fn(
-                    #     current: Tile, neighbor: Tile, state: StardewState, base_cost: float
-                    # ) -> Tuple[bool, float, RouteActionType]:
-                    #     if (neighbor.x, neighbor.y) in blackboard.failed_clear_obstacles:
-                    #         return False, float("inf"), "blocked"
-                    #     return route_cost_function(current, neighbor, state, base_cost)
+                    self._log_route_debug(
+                        f"触发 A*: reason={astar_reason}, "
+                        f"loc={game_state.location_name}, target={target_location_name}, "
+                        f"routes={self.routes}, route_idx={self.route_idx}, final_target={current_task.target_loc}, "
+                        f"player={game_state.player_tile}, path_index={self.path_index}, "
+                        f"path_len={len(self.global_current_path)}"
+                    )
+
+                    def cost_fn(
+                        current: Tile, neighbor: Tile, state: StardewState, base_cost: float
+                    ) -> Tuple[bool, float, RouteActionType]:
+                        if (neighbor.x, neighbor.y) in blackboard.failed_clear_obstacles:
+                            return False, float("inf"), "blocked"
+                        return route_cost_function(current, neighbor, state, base_cost)
 
                     new_path = astar_solver.find_path_to_warp_zone(
                         game_state,
                         RouteTile(*game_state.player_tile, type="walk"),
                         self.toal_tiles,
-                        # cost_fn,
+                        cost_fn,
                     )
+                    astar_duration_ms = (time.perf_counter() - astar_start_time) * 1000
 
                     if new_path is None:
                         if not self.toal_tiles:
-                            print(
-                                f"❌ [绝路停机] 无法在当前场景 {game_state.location_name} 中找到去往目标地点 [{target_location_name}] 的任何传送门！"
+                            failure_reason = (
+                                f"无法在当前场景 {game_state.location_name} 中找到去往目标地点 "
+                                f"[{target_location_name}] 的任何传送门"
                             )
+                            print(f"\n ❌ [绝路停机] {failure_reason}！")
                         else:
-                            print(
-                                f"⚠️ [绝路停机] 视野内推断出目标 {self.toal_tiles} 已被障碍物彻底包裹，无法前往！执行紧急切停。"
-                            )
-                        self.global_current_path: List[RouteTile] = []
+                            failure_reason = f"视野内推断出目标 {self.toal_tiles} 已被障碍物彻底包裹，无法前往"
+                            print(f"\n ⚠️ [绝路停机] {failure_reason}！执行紧急切停。")
 
+                        self._stop_route_on_failure(
+                            context=context,
+                            blackboard=blackboard,
+                            failure_signature=failure_signature,
+                            reason=failure_reason,
+                            target_location_name=target_location_name,
+                            current_task=current_task,
+                        )
                         return "FAILURE"
 
                     else:
@@ -138,9 +201,19 @@ class RouteNode(BTNode):
                         if new_path is not None:
                             self.should_trigger_astar = False
                             self.global_current_path = new_path
+                            self.path_index = 1 if len(new_path) > 1 else 0
                             self.last_location_name = game_state.location_name
+                            self._log_route_debug(
+                                f"A* 完成: cost={astar_duration_ms:.1f}ms, "
+                                f"path_len={len(new_path)}, next={self._get_next_path_tile()}"
+                            )
                         elif self.global_current_path:
                             self.should_trigger_astar = False
+                            self._log_route_debug(
+                                f"A* 结果被丢弃，继续沿用旧路径: "
+                                f"cost={astar_duration_ms:.1f}ms, path_index={self.path_index}, "
+                                f"path_len={len(self.global_current_path)}"
+                            )
 
                 if not self.should_trigger_astar:
                     if blackboard.is_opening_door:
@@ -172,27 +245,53 @@ class RouteNode(BTNode):
 
                         return "RUNNING"
 
-                    command, self.global_current_path, _should_trigger_astar = astar_solver.get_next_move_command(
+                    command, self.path_index, is_path_finished = self.move_controller.get_next_move_command(
                         state=game_state,
-                        current_path=self.global_current_path,
+                        tile_path=self.global_current_path,
+                        path_index=self.path_index,
                     )
 
                     blackboard.require_open_door = False
 
-                    if _should_trigger_astar:
-                        self.should_trigger_astar = len(self.global_current_path) < 2
+                    if is_path_finished:
+                        self.should_trigger_astar = True
 
+                    now = time.perf_counter()
+                    if self.last_move_command_at is not None:
+                        self.last_command_interval = now - self.last_move_command_at
+                        if self.last_command_interval > 0.08:
+                            self._log_route_debug(
+                                f"移动命令间隔偏高: "
+                                f"interval={self.last_command_interval * 1000:.1f}ms, "
+                                f"cmd={command.action}, path_index={self.path_index}, "
+                                f"path_len={len(self.global_current_path)}"
+                            )
+                    self.last_move_command_at = now
+
+                    send_start_time = time.perf_counter()
                     context.executor_client.send_command(command)
-                    print(command.action)
+                    self.last_send_duration = time.perf_counter() - send_start_time
+                    if self.last_send_duration > 0.05:
+                        self._log_route_debug(
+                            f"Executor 响应偏慢: " f"send={self.last_send_duration * 1000:.1f}ms, cmd={command.action}"
+                        )
+                    self._log_route_debug(
+                        f"移动命令: cmd={command.action}, "
+                        f"cmdHz={self._format_command_frequency()}, "
+                        f"send={self._format_send_duration()}, "
+                        f"path={self.path_index}/{len(self.global_current_path)}, "
+                        f"player={game_state.player_tile}"
+                    )
 
                     print(
-                        f"\r🏃‍♂️ [RouteNode] 正在前往 【{current_task.target_loc}】 途中... 已奔跑 {current_run_duration:.2f}s",
+                        f"\r🏃‍♂️ [RouteNode] 正在前往 【{current_task.target_loc}】 途中... "
+                        f"已奔跑 {current_run_duration:.2f}s",
                         end="",
                     )
                     if "render_thread" not in locals() or not render_thread.is_alive():  # type: ignore
                         render_thread = threading.Thread(
                             target=async_render,
-                            args=(game_state, self.IMAGE_FILE, 40, self.global_current_path.copy()),
+                            args=(game_state, self.IMAGE_FILE, 40, self._get_remaining_path()),
                             daemon=True,
                         )
                         render_thread.start()
@@ -206,30 +305,50 @@ class RouteNode(BTNode):
             return "RUNNING"
 
     def _is_next_tile_door(self) -> bool:
-        return len(self.global_current_path) >= 2 and self.global_current_path[1].type == "door"
+        next_tile = self._get_next_path_tile()
+        return next_tile is not None and next_tile.type == "door"
 
     def _build_door_command(self, game_state: StardewState) -> tuple[StardewCommand, bool]:
-        anchor_tile = self.global_current_path[0]
-        door_tile = self.global_current_path[1]
+        door_tile = self._get_next_path_tile()
+        if door_tile is None:
+            return StardewCommand(action=StardewAction.IDLE), False
 
-        if game_state.player_tile != anchor_tile:
-            return astar_solver._build_move_command_to_tile(game_state, anchor_tile), False
+        anchor_index = max(0, self.path_index - 1)
+        anchor_tile = self.global_current_path[anchor_index]
+
+        if not self.move_controller.is_player_inside_tile(game_state, anchor_tile):
+            return self.move_controller.build_move_command_to_tile(game_state, anchor_tile), False
 
         print(f"\n🏁 [Door] 已站到门前格，面向门 {door_tile} 并触发开门节点。")
-        return astar_solver._build_face_command(anchor_tile, door_tile), True
+        return self.move_controller.build_face_command(anchor_tile, door_tile), True
 
     def _reset_route_state(self) -> None:
         self.route_start_time = None
         self.routes = []
         self.route_idx = -1
         self.global_current_path = []
+        self.path_index = 1
+        self.move_controller.reset()
         self.is_doing = False
         self.should_trigger_astar = True
         self.toal_tiles = set()
         self.current_task_signature = None
         self.last_location_name = None
+        self.last_move_command_at = None
+        self.last_command_interval = None
+        self.last_send_duration = None
+        self.last_replan_distance = None
+        if self.pending_astar_task is not None and not self.pending_astar_task.done():
+            self.pending_astar_task.cancel()
+        self.pending_astar_task = None
+        self.pending_astar_reason = None
+        self.pending_astar_target_location = None
+        self.pending_astar_started_at = None
+        self.failed_route_signature = None
 
-    def _get_replan_reason(self, game_state: StardewState) -> str | None:
+    def _get_replan_reason(self, game_state: StardewState, blackboard: AgentBlackboard) -> str | None:
+        self.last_replan_distance = None
+
         if not self.global_current_path:
             return "路径为空"
 
@@ -238,32 +357,49 @@ class RouteNode(BTNode):
 
         if self.last_location_name is not None and game_state.location_name != self.last_location_name:
             self.global_current_path = []
+            self.path_index = 1
             self.toal_tiles = set()
             return "场景变化"
 
-        first_path_tile = self.global_current_path[0]
+        anchor_index = max(0, min(self.path_index - 1, len(self.global_current_path) - 1))
+        first_path_tile = self.global_current_path[anchor_index]
         if (
             abs(game_state.player_tile.x - first_path_tile.x) > 2
             or abs(game_state.player_tile.y - first_path_tile.y) > 2
         ):
             return f"玩家偏离路径: player={game_state.player_tile}, path={first_path_tile}"
 
-        blocked_tiles = astar_solver._get_blocked_tiles(game_state)
-        look_ahead_steps = min(5, len(self.global_current_path))
-        for future_tile in self.global_current_path[:look_ahead_steps]:
+        look_ahead_end = min(self.path_index + 5, len(self.global_current_path))
+        for future_index in range(self.path_index, look_ahead_end):
+            previous_tile = self.global_current_path[future_index - 1]
+            future_tile = self.global_current_path[future_index]
+            replan_distance = future_index - self.path_index
+
             if future_tile.type == "door":
+                continue
+            if future_tile in self.toal_tiles:
                 continue
             if future_tile.type in CLEARABLE_ROUTE_TYPES:
                 continue
-            if future_tile in blocked_tiles:
+            if (future_tile.x, future_tile.y) in blackboard.failed_clear_obstacles:
+                self.last_replan_distance = replan_distance
+                return f"未来路径包含已失败清障点: {future_tile}"
+
+            is_passable, _, current_action_type = route_cost_function(previous_tile, future_tile, game_state, 1.0)
+            if not is_passable:
+                self.last_replan_distance = replan_distance
                 return f"未来路径被阻挡: {future_tile}"
+            if current_action_type in CLEARABLE_ROUTE_TYPES and future_tile.type != current_action_type:
+                self.last_replan_distance = replan_distance
+                return f"未来路径出现新清障点: {current_action_type} @ {future_tile}"
 
         return None
 
     def _get_next_reachable_clear_obstacle_tile(
         self, game_state: StardewState, blackboard: AgentBlackboard
     ) -> RouteTile | None:
-        for route_tile in self.global_current_path[1:6]:
+        look_ahead_end = min(self.path_index + 5, len(self.global_current_path))
+        for route_tile in self.global_current_path[self.path_index : look_ahead_end]:
             if route_tile.type not in CLEARABLE_ROUTE_TYPES:
                 continue
             if (route_tile.x, route_tile.y) in blackboard.failed_clear_obstacles:
@@ -273,6 +409,209 @@ class RouteNode(BTNode):
             return None
 
         return None
+
+    def _get_next_path_tile(self) -> RouteTile | None:
+        if self.path_index >= len(self.global_current_path):
+            return None
+        return self.global_current_path[self.path_index]
+
+    def _get_remaining_path(self) -> List[RouteTile]:
+        start_index = max(0, self.path_index - 1)
+        return self.global_current_path[start_index:].copy()
+
+    def _format_command_frequency(self) -> str:
+        if self.last_command_interval is None or self.last_command_interval <= 0:
+            return "--"
+        return f"{1 / self.last_command_interval:.1f}Hz"
+
+    def _format_send_duration(self) -> str:
+        if self.last_send_duration is None:
+            return "--"
+        return f"{self.last_send_duration * 1000:.1f}ms"
+
+    def _log_route_debug(self, message: str) -> None:
+        self.route_debug_logger.log(f"[RouteNode] {message}")
+
+    def _stop_route_on_failure(
+        self,
+        context: PlayerContext,
+        blackboard: AgentBlackboard,
+        failure_signature: tuple[int, Location, Location, Location],
+        reason: str,
+        target_location_name: Location,
+        current_task: "RouteTask",
+    ) -> None:
+        context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+        if self.pending_astar_task is not None and not self.pending_astar_task.done():
+            self.pending_astar_task.cancel()
+        self.pending_astar_task = None
+        self.pending_astar_reason = None
+        self.pending_astar_target_location = None
+        self.pending_astar_started_at = None
+        self.global_current_path = []
+        self.path_index = 1
+        self.should_trigger_astar = False
+        self.toal_tiles = set()
+        self.failed_route_signature = failure_signature
+        blackboard.prompt = (
+            f"RouteNode 寻路失败: {reason}; "
+            f"current_loc={failure_signature[2]}, target_loc={target_location_name}, "
+            f"final_target={current_task.target_loc}, routes={self.routes}"
+        )
+        self._log_route_debug(
+            f"绝路停机: reason={reason}, signature={failure_signature}, "
+            f"routes={self.routes}, route_idx={self.route_idx}, final_target={current_task.target_loc}"
+        )
+
+    def _should_replan_in_background(self) -> bool:
+        if self.last_replan_distance is None:
+            return False
+        return self.last_replan_distance > NEAR_REPLAN_DISTANCE
+
+    def _should_wait_for_pending_replan(self) -> bool:
+        if self.last_replan_distance is None:
+            return False
+        return self.last_replan_distance <= NEAR_REPLAN_DISTANCE
+
+    def _has_pending_astar(self) -> bool:
+        return self.pending_astar_task is not None and not self.pending_astar_task.done()
+
+    def _start_background_astar(
+        self,
+        game_state: StardewState,
+        target_location_name: Location,
+        blackboard: AgentBlackboard,
+        replan_reason: str,
+    ) -> None:
+        if self._has_pending_astar():
+            return
+
+        goal_tiles = astar_solver.get_goal_tiles(game_state, target_location_name)
+        if not goal_tiles:
+            return
+
+        failed_clear_obstacles = blackboard.failed_clear_obstacles.copy()
+        start_tile = RouteTile(*game_state.player_tile, type="walk")
+        self.pending_astar_reason = replan_reason
+        self.pending_astar_target_location = target_location_name
+        self.pending_astar_started_at = time.perf_counter()
+        self.pending_astar_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._calculate_astar_path,
+                game_state,
+                start_tile,
+                goal_tiles,
+                failed_clear_obstacles,
+            )
+        )
+        self._log_route_debug(
+            f"后台 A* 启动: reason={replan_reason}, distance={self.last_replan_distance}, "
+            f"loc={game_state.location_name}, target={target_location_name}, "
+            f"player={game_state.player_tile}, old_path={self.path_index}/{len(self.global_current_path)}"
+        )
+
+    def _consume_pending_astar_result(self, game_state: StardewState, target_location_name: Location) -> None:
+        if self.pending_astar_task is None or not self.pending_astar_task.done():
+            return
+
+        task = self.pending_astar_task
+        started_at = self.pending_astar_started_at
+        pending_target = self.pending_astar_target_location
+        pending_reason = self.pending_astar_reason
+        self.pending_astar_task = None
+        self.pending_astar_started_at = None
+        self.pending_astar_target_location = None
+        self.pending_astar_reason = None
+
+        if pending_target != target_location_name:
+            self._log_route_debug(
+                f"后台 A* 结果丢弃: target_changed old={pending_target}, current={target_location_name}"
+            )
+            return
+
+        try:
+            new_path = task.result()
+        except Exception as exc:
+            self._log_route_debug(f"后台 A* 失败: reason={pending_reason}, error={exc}")
+            return
+
+        duration_ms = (time.perf_counter() - started_at) * 1000 if started_at is not None else 0.0
+        if new_path is None:
+            self._log_route_debug(f"后台 A* 无路: reason={pending_reason}, cost={duration_ms:.1f}ms")
+            return
+        if self._is_backtracking_path(game_state, new_path):
+            self._log_route_debug(f"后台 A* 结果被丢弃: backtracking, cost={duration_ms:.1f}ms")
+            return
+
+        aligned_path = self._align_pending_path_to_current_player(game_state, new_path)
+        if aligned_path is None:
+            self._log_route_debug(
+                f"后台 A* 结果被丢弃: stale_start, cost={duration_ms:.1f}ms, "
+                f"player={game_state.player_tile}, path_start={new_path[0] if new_path else None}"
+            )
+            return
+
+        self.global_current_path = aligned_path
+        self.path_index = 1 if len(aligned_path) > 1 else 0
+        self.should_trigger_astar = False
+        self.last_location_name = game_state.location_name
+        self.toal_tiles = astar_solver.get_goal_tiles(game_state, target_location_name)
+        self._log_route_debug(
+            f"后台 A* 切换成功: reason={pending_reason}, cost={duration_ms:.1f}ms, "
+            f"path_len={len(aligned_path)}, next={self._get_next_path_tile()}"
+        )
+
+    def _align_pending_path_to_current_player(
+        self,
+        game_state: StardewState,
+        new_path: List[RouteTile],
+    ) -> List[RouteTile] | None:
+        if not new_path:
+            return None
+
+        player_tile = game_state.player_tile
+        look_ahead_end = min(8, len(new_path))
+        selected_index: int | None = None
+
+        for index in range(look_ahead_end):
+            route_tile = new_path[index]
+            if route_tile == player_tile:
+                selected_index = index
+                continue
+            if self._is_player_next_to_tile(player_tile, route_tile):
+                selected_index = index
+
+        if selected_index is None:
+            if self._is_player_next_to_tile(player_tile, new_path[0]):
+                return [RouteTile(player_tile.x, player_tile.y, type="walk"), *new_path]
+            return None
+
+        selected_tile = new_path[selected_index]
+        if selected_tile == player_tile:
+            return new_path[selected_index:]
+
+        return [RouteTile(player_tile.x, player_tile.y, type="walk"), *new_path[selected_index:]]
+
+    def _calculate_astar_path(
+        self,
+        game_state: StardewState,
+        start_tile: RouteTile,
+        goal_tiles: Set[RouteTile],
+        failed_clear_obstacles: set[tuple[int, int]],
+    ) -> List[RouteTile] | None:
+        def cost_fn(
+            current: Tile, neighbor: Tile, state: StardewState, base_cost: float
+        ) -> Tuple[bool, float, RouteActionType]:
+            if (neighbor.x, neighbor.y) in failed_clear_obstacles:
+                return False, float("inf"), "blocked"
+            return route_cost_function(current, neighbor, state, base_cost)
+
+        return astar_solver.find_path_to_warp_zone(
+            game_state,
+            start_tile,
+            goal_tiles,
+            cost_fn,
+        )
 
     def _is_player_next_to_tile(self, player_tile: Tile, target_tile: Tile) -> bool:
         distance_x = abs(player_tile.x - target_tile.x)
@@ -304,7 +643,14 @@ def route_cost_function(
 
     # 1. 🛑 提取硬阻挡图层 (死墙、静态不可交互障碍)
     # 这些格子属于“绝对不可逾越”，哪怕满级工具也破坏不了，直接熔断
-    absolute_walls = state.layers.get("Wall", set()).union(state.layers.get("Bush", set()))
+    absolute_walls = state.layers.get("Wall", set()).union(
+        state.layers.get("Bush", set()),
+        state.layers.get("TreeStump", set()),
+    )
+    for growth_stage in range(0, 6):
+        absolute_walls.update(state.layers.get(f"Tree{growth_stage}", set()))
+        absolute_walls.update(state.layers.get(f"FruitTree{growth_stage}", set()))
+
     if neighbor in absolute_walls:
         return False, float("inf"), "blocked"
 
@@ -316,13 +662,8 @@ def route_cost_function(
     #     # 门可以通过，但是需要开门成本 (例如多花费 2.0 秒动作成本)，标记为 "open_door"
     #     return True, base_cost + 2.0, "open_door"
 
-    # 3. 🪓 识别可破坏的硬图层 (树、石头、大树桩)
-    trees = state.layers.get("Tree5", set()).union(
-        state.layers.get("Tree1", set()),
-        state.layers.get("Tree2", set()),
-        state.layers.get("Tree3", set()),
-        state.layers.get("Tree4", set()),
-    )
+    # 3. 🪓 识别可破坏的硬图层。
+    # 当前阶段先不把树、果树和 TreeStump 纳入可清障目标，避免 A* 规划进需要升级工具或长动作的格子。
     stones = state.layers.get("Stone", set())
     weeds = state.layers.get("Weeds", set())
     twigs = state.layers.get("Twig", set())
@@ -332,35 +673,6 @@ def route_cost_function(
 
     if neighbor in twigs:
         return True, base_cost, "twig"
-
-    # if neighbor in trees:
-    #     return True, base_cost + 30.0, "tree"
-
-    # ------------------ 🌳 砍树决策细分 ------------------
-    # if neighbor in trees:
-    #     # 门禁 1：检查工具。手里没斧头，物理上不可能砍开
-    #     if not getattr(state, "player_has_tool", lambda x: False)("AXE"):
-    #         return False, float("inf"), "blocked"
-
-    #     # 门禁 2：检查体力。体力濒临耗尽（比如小于 15 点），拒绝砍树，逼迫算法绕行
-    #     if getattr(state, "player_current_stamina", 100) < 15:
-    #         return False, float("inf"), "blocked"
-
-    #     # 门禁 3：🎒 背包格子与掉落物经济评估
-    #     backpack_full = getattr(state, "is_backpack_full", lambda: False)()
-    #     has_wood_stack = getattr(state, "has_item_stack", lambda x: False)("Wood")  # 包里是否有木头格子可堆叠
-
-    #     # 算经济账：
-    #     if not backpack_full or has_wood_stack:
-    #         # 包没满，或者可以完美吸附堆叠。掉落的木头是有效资源，产生正向收益，抵消部分砍树痛苦
-    #         reward_bonus = 3.0
-    #     else:
-    #         # 包满了且无法堆叠！掉落物掉在地上捡不起来，白白浪费。给予高额痛苦惩罚成本
-    #         reward_bonus = -5.0
-
-    #     # 砍树固定消耗高昂的时间与耐久成本 (比如 8.0)
-    #     destroy_tree_cost = 8.0 - reward_bonus
-    #     return True, base_cost + destroy_tree_cost, "destroy"
 
     # ------------------ 🪨 砸石头决策细分 ------------------
     if neighbor in stones:
@@ -461,7 +773,6 @@ class HardcodedStardewMap:
             "HaleyHouse",
             "ArchaeologyHouse",
             "ElliottHouse",
-            "FishShop",
             "AdventureGuild",
             "Mine",
             "Tent",

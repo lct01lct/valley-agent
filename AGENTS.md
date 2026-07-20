@@ -66,6 +66,34 @@ Selector
 - `AgentBlackboard` 负责保存调度状态和跨节点信号。
 - 各行为树节点通过 blackboard 协作，但不应绕过黑板私自耦合彼此内部状态。
 
+### 移动控制是 Python 决策 + C# 保持方向
+
+当前移动控制分为两层：
+
+- Python `RouteNode` / `MoveController` 根据最新 `context.state` 决定当前 tick 应该保持的移动方向。
+- C# `StardewExecutor` 保存并持续按住最后一次 MOVE 命令对应的方向键。
+
+因此，MOVE 命令的语义不是“只按一帧”，而是“更新 C# 端当前保持的移动方向”。`IDLE` 是显式停止持续移动的控制命令。
+
+实现和修改寻路时必须遵守：
+
+- 移动过程中允许 Python 每 tick 重发当前方向，以便及时覆盖 C# 端保持的方向。
+- 后续若优化为“只在方向变化时发送”，必须保证 `IDLE`、开门、清障、失败、任务切换和连接异常仍能可靠清除 C# 端保持方向。
+- RouteNode 任何 fatal failure、绝路停机、放弃当前路径或交给兜底规划前，都必须先发送 `StardewAction.IDLE`。
+
+### 寻路是路径缓存 + 局部跟随
+
+当前寻路不应每帧重新执行 A*。`RouteNode` 缓存 `tile_path` 和 `path_index`，A* 只在必要时触发，例如初始路径为空、场景变化、路径过期、未来路径阻塞、开门/清障后需要重新规划。
+
+`MoveController` 负责局部移动跟随：
+
+- 根据最新 `State` 和 `player_size` 判断人物身体与目标 tile 的关系。
+- 中间路径点进入后立即推进，不为了回到格子中心而反向修正。
+- 到达路径末端时才允许更严格地验证身体盒是否进入目标 tile。
+- 不在推进 tile 时插入额外 `IDLE` 帧。
+
+未来障碍触发重规划时，优先使用后台 A*：旧路径仍可继续执行，只有障碍已经非常近时才停下等待新路径。后台路径切换前必须对齐当前玩家位置，避免切换到过期路径导致回头。
+
 ## Codex 必须显式读取的项目 Skills
 
 项目内 Skill 位于 `skills/`。项目级 Skill 不一定会被 Codex 自动发现，因此不要依赖自动触发；符合以下条件时，必须显式打开并遵循对应 `SKILL.md`：
@@ -80,7 +108,8 @@ Selector
 - `main.py`：当前入口，加载环境、清理日志、初始化 `ValleyAgent` 并提交任务。
 - `agent/valley_agent.py`：创建行为树、`PlayerContext` 和 `AgentBlackboard`，运行高频 tick 循环。
 - `agent/behavior_tree/`：行为树节点、黑板、玩家上下文、规划兜底和寻路控制。
-- `agent/action/valley_action/AStar.py`：本地 A* 寻路、路线动作标注和移动命令生成。
+- `agent/action/valley_action/AStar.py`：本地 A* 寻路、路线动作标注和障碍代价函数。
+- `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。
 - `server/valley_server.py`：Python 侧 SMAPI Observer/Executor TCP 客户端和状态解析。
 - `StardewMemoryExporter/`：SMAPI Mod，导出结构化状态并执行移动、开门、关闭对话和使用工具等命令。
 - `skills/`：项目内 Codex Skills。若 Codex 无法自动发现，必须通过本文件显式说明。
@@ -95,6 +124,8 @@ Selector
 - 寻路需要区分硬障碍、可绕行障碍、可破坏障碍和交互式门。
 - 清障必须验证工具可用、体力允许、玩家朝向正确，并在动作后从新状态确认障碍已经消失。
 - 不重复实现寻路或动作逻辑；共享行为下沉到 A*、动作层或复用节点。
+- 不让 A* 每帧重算；优先维护 RouteNode 的路径缓存、path_index 推进和 MoveController 局部跟随。
+- 不把 C# Executor 的 MOVE 当成单帧脉冲；它会保持最后方向，失败和交互前必须显式 `IDLE`。
 - Planner 输出和 Action Result 使用结构化数据，避免自由文本协议。
 - 不在异步行为树路径中使用 `time.sleep()`；使用 `await asyncio.sleep()` 或跨帧状态机。
 - 不静默吞掉失败；将失败原因写入黑板、任务结果或协议响应。

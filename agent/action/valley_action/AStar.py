@@ -47,11 +47,13 @@ class AStarParser:
             "Twig",
             "Weeds",
             "TreeStump",
+            "Tree0",
             "Tree5",
             "Tree4",
             "Tree3",
             "Tree2",
             "Tree1",
+            "FruitTree0",
             "FruitTree5",
             "FruitTree4",
             "FruitTree3",
@@ -110,10 +112,11 @@ class AStarParser:
         tile_top = state.player_tile.y * 64
         tile_bottom = tile_top + 64
 
-        person_left = state.position.x - 24
-        person_right = state.position.x + 24
-        person_top = state.position.y - 16
-        person_bottom = state.position.y + 16
+        player_width, player_height = state.player_size
+        person_left = state.position.x - player_width / 2
+        person_right = state.position.x + player_width / 2
+        person_top = state.position.y - player_height / 2
+        person_bottom = state.position.y + player_height / 2
 
         is_x_inside = (person_left >= tile_left) and (person_right <= tile_right)
         is_y_inside = (person_top >= tile_top) and (person_bottom <= tile_bottom)
@@ -303,10 +306,11 @@ class AStarParser:
         tile_top = tile.y * tile_size
         tile_bottom = tile_top + tile_size
 
-        person_left = state.position.x - 24
-        person_right = state.position.x + 24
-        person_top = state.position.y - 16
-        person_bottom = state.position.y + 16
+        player_width, player_height = state.player_size
+        person_left = state.position.x - player_width / 2
+        person_right = state.position.x + player_width / 2
+        person_top = state.position.y - player_height / 2
+        person_bottom = state.position.y + player_height / 2
 
         return (
             person_left >= tile_left
@@ -330,8 +334,9 @@ class AStarParser:
         self, state: StardewState, target_tile: Tile, pixel_dead_zone: float = 4.0
     ) -> StardewCommand:
         tile_size = state.tile_size or 64
-        person_half_width = 24
-        person_half_height = 16
+        player_width, player_height = state.player_size
+        person_half_width = player_width / 2
+        person_half_height = player_height / 2
 
         target_left = target_tile.x * tile_size + person_half_width
         target_right = (target_tile.x + 1) * tile_size - person_half_width

@@ -26,6 +26,7 @@ namespace StardewMemoryExporter
         {
             _observer.PulseGameMemory();
             // _observer.ListenHudMessages(e);
+            _executor.ApplyHeldMove();
             _executor.ListenDialogMessages(e);
         }
 
