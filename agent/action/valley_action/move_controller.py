@@ -146,4 +146,4 @@ class MoveController:
             key = [vertical_key, horizontal_key]
 
         self._last_primary_axis = self._last_primary_axis or "vertical"
-        return StardewCommand(action=action, key=key)
+        return StardewCommand(action=action, key=key)  # type: ignore
