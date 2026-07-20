@@ -37,14 +37,15 @@ Selector
 │   └── Defend_Node
 ├── Sequence("Route")
 │   ├── OpenDoorNode
+│   ├── ClearObstacleNode
 │   └── RouteNode
-└── Sequence("LLM")
+└── Sequence("Think")
     └── LLM_Node
 ```
 
 `ValleyAgent` 在主循环中先刷新 `PlayerContext.state`，再运行行为树。`Selector` 每个 tick 从左到右轮询子节点，遇到 `RUNNING` 或 `SUCCESS` 就停止本轮扫描。
 
-因此，`Guard`、`Route` 和 `LLM` 是顶层 Selector 下的同级候选分支。`LLM` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+因此，`Guard`、`Route` 和 `Think` 是顶层 Selector 下的同级候选分支。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
 
 ### Context 负责状态输入和动作输出
 

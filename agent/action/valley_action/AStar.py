@@ -1,12 +1,12 @@
 import heapq
-import math
 from typing import Callable, List, Literal, Tuple, Set, Dict, Optional
 from agent.action.location.location import Location
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from server.valley_server import StardewState
 from server.type import Tile
 
-type RouteActionType = Literal["walk", "blocked", "weeds", "twig", "stone", "warp"]
+destructible_obstacles = ["weeds", "twig", "warp"]
+type RouteActionType = Literal["walk", "blocked", "weeds", "twig", "stone", "warp", "door"]
 
 
 class RouteTile(Tile):
@@ -35,24 +35,8 @@ class AStarParser:
         self._stuck_counter = 0
         self._last_px = 0.0
         self._last_py = 0.0
-
-    @classmethod
-    def annotate_path_points(
-        cls, path: List[RouteTile], target_warp_passable: bool = True, target_warp_tile: None | Tile = None
-    ):
-        if not path:
-            return []
-
-        annotated_path: List[RouteTile] = []
-        for route_tile in path:
-            tile_coords = Tile(route_tile.x, route_tile.y)
-
-            if not target_warp_passable and target_warp_tile is not None:
-                if target_warp_tile == tile_coords:
-                    route_tile.type = "warp"
-            annotated_path.append(route_tile)
-
-        return annotated_path
+        self._last_move_command: StardewCommand | None = None
+        self._last_primary_axis: Literal["horizontal", "vertical"] | None = None
 
     def _get_blocked_tiles(self, state: StardewState) -> Set[Tile]:
         blocked: Set[Tile] = set()
@@ -113,8 +97,12 @@ class AStarParser:
 
         return False
 
-    def get_goal_tiles(self, state: StardewState, target_location: Location) -> Set[Tile]:
-        return {warp.tile for warp in state.warps if warp.target_location == target_location}
+    def get_goal_tiles(self, state: StardewState, target_location: Location) -> Set[RouteTile]:
+        return {
+            RouteTile(*warp.tile, type="walk" if warp.is_passable else "door")
+            for warp in state.warps
+            if warp.target_location == target_location
+        }
 
     def is_locate_inside_tile(self, state: StardewState) -> bool:
         tile_left = state.player_tile.x * 64
@@ -136,7 +124,7 @@ class AStarParser:
         self,
         state: StardewState,
         start: RouteTile,
-        goal_tiles: Set[Tile],
+        goal_tiles: Set[RouteTile],
         cost_function: Callable[[Tile, Tile, StardewState, float], Tuple[bool, float, RouteActionType]] | None = None,
     ) -> Optional[List[RouteTile]]:
 
@@ -200,9 +188,17 @@ class AStarParser:
             for dx, dy, base_cost in self.directions:
                 neighbor = RouteTile(current.x + dx, current.y + dy, "walk")
 
-                if neighbor in goal_tiles:
+                goal_tile = None
+                for _goal_tile in goal_tiles:
+                    if neighbor == _goal_tile:
+                        goal_tile = _goal_tile
+                        break
+
+                if goal_tile:
                     if dx == 0 or dy == 0:
-                        came_from[neighbor] = RouteTile(current.x, current.y, "walk")  # 进传送阵通常是普通的迈腿
+                        came_from[neighbor] = RouteTile(
+                            current.x, current.y, goal_tile.type
+                        )  # 进传送阵通常是普通的迈腿
 
                         self._last_calculated_rich_path = self._extract_rich_path(came_from, neighbor)
 
@@ -274,129 +270,125 @@ class AStarParser:
         return total_path
 
     def get_next_move_command(
-        self, state: StardewState, current_path: List[RouteTile], target_warp_passable: bool = True
+        self,
+        state: StardewState,
+        current_path: List[RouteTile],
     ) -> Tuple[StardewCommand, List[RouteTile], bool]:
-        if not current_path:
-            return StardewCommand(action=StardewAction.IDLE), [], False
-        tile_size = 64
-        px, py = state.position.x, state.position.y
+        if len(current_path) < 2:
+            self._last_move_command = None
+            return StardewCommand(action=StardewAction.IDLE), current_path, False
 
-        if not hasattr(self, "_current_tile_frame_count"):
-            self._current_tile_frame_count = 0
-            self._last_tracked_tile = None
-            self._last_px = px
-            self._last_py = py
+        next_tile = current_path[1]
 
-        target_tile = current_path[0]
+        if self._is_player_centered_on_tile(state, next_tile):
+            next_path = current_path[1:]
+            if len(next_path) < 2:
+                self._last_move_command = None
+                return StardewCommand(action=StardewAction.IDLE), next_path, True
 
-        is_approaching_blocked_warp = (not target_warp_passable) and (len(current_path) == 2)
+            if self._last_move_command is not None:
+                return self._last_move_command, next_path, True
 
-        current_tile = target_tile
-        last_tracked_tile = self._last_tracked_tile if self._last_tracked_tile is not None else None
-        if current_tile == last_tracked_tile:
-            self._current_tile_frame_count += 1
-        else:
-            self._current_tile_frame_count = 0
-            self._last_tracked_tile = current_tile
+            return self._build_move_command_to_tile(state, next_path[1], pixel_dead_zone=4.0), next_path, True
 
-        delta_x = abs(px - self._last_px)
-        delta_y = abs(py - self._last_py)
-        self._last_px = px
-        self._last_py = py
+        command = self._build_move_command_to_tile(state, next_tile, pixel_dead_zone=4.0)
+        if command.action != StardewAction.IDLE:
+            self._last_move_command = command
+        return command, current_path, False
 
-        block_x = self._current_tile_frame_count > 6 and delta_x < 0.2
-        block_y = self._current_tile_frame_count > 6 and delta_y < 0.2
+    def _is_player_centered_on_tile(self, state: StardewState, tile: Tile) -> bool:
+        tile_size = state.tile_size or 64
+        tile_left = tile.x * tile_size
+        tile_right = tile_left + tile_size
+        tile_top = tile.y * tile_size
+        tile_bottom = tile_top + tile_size
 
-        # 强推超时机制
-        if self._current_tile_frame_count >= 15:
-            if len(current_path) > 1:
-                current_path = current_path[1:]
-            else:
-                current_path = []
-            self._current_tile_frame_count = 0
-            if not current_path:
-                return StardewCommand(action=StardewAction.IDLE), [], False
-            target_tile = current_path[0]
+        person_left = state.position.x - 24
+        person_right = state.position.x + 24
+        person_top = state.position.y - 16
+        person_bottom = state.position.y + 16
 
-        target_x = target_tile.x * tile_size + (tile_size / 2)
-        target_y = target_tile.y * tile_size + (tile_size / 2)
+        return (
+            person_left >= tile_left
+            and person_right <= tile_right
+            and person_top >= tile_top
+            and person_bottom <= tile_bottom
+        )
 
-        dist_to_center = ((px - target_x) ** 2 + (py - target_y) ** 2) ** 0.5
+    def _build_face_command(self, player_tile: Tile, target_tile: Tile) -> StardewCommand:
+        if target_tile.x > player_tile.x:
+            return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
+        if target_tile.x < player_tile.x:
+            return StardewCommand(action=StardewAction.MOVE_LEFT, key=["a"])
+        if target_tile.y > player_tile.y:
+            return StardewCommand(action=StardewAction.MOVE_DOWN, key=["s"])
+        if target_tile.y < player_tile.y:
+            return StardewCommand(action=StardewAction.MOVE_UP, key=["w"])
+        return StardewCommand(action=StardewAction.IDLE)
 
-        player_radius = math.sqrt(((64 - 48) / 2) ** 2 + ((64 - 32) / 2) ** 2)
+    def _build_move_command_to_tile(
+        self, state: StardewState, target_tile: Tile, pixel_dead_zone: float = 4.0
+    ) -> StardewCommand:
+        tile_size = state.tile_size or 64
+        person_half_width = 24
+        person_half_height = 16
 
-        # 如果下一步是不可通行的门，绝对不能消费掉当前的倒数第二格！
-        if dist_to_center <= player_radius and len(current_path) > 1 and not is_approaching_blocked_warp:
-            current_path = current_path[1:]
-            self._current_tile_frame_count = 0
-            if not current_path:
-                return StardewCommand(action=StardewAction.IDLE, key=[]), [], False
-            target_tile = current_path[0]
-            target_x = target_tile.x * tile_size + (tile_size / 2)
-            target_y = target_tile.y * tile_size + (tile_size / 2)
-
-        if is_approaching_blocked_warp:
-            door_tile = current_path[1]  # 这才是不可通行大门的真实坐标
-
-            door_center_x = door_tile.x * tile_size + (tile_size / 2)
-            door_center_y = door_tile.y * tile_size + (tile_size / 2)
-
-            dist_to_door: float = ((px - door_center_x) ** 2 + (py - door_center_y) ** 2) ** 0.5
-
-            if dist_to_door <= 65.5:
-                px_tile, py_tile = state.player_tile.x, state.player_tile.y
-
-                turn_command = StardewCommand(action=StardewAction.IDLE)
-                if door_tile.x > px_tile:
-                    turn_command = StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
-                elif door_tile.x < px_tile:
-                    turn_command = StardewCommand(action=StardewAction.MOVE_LEFT, key=["a"])
-                elif door_tile.y > py_tile:
-                    turn_command = StardewCommand(action=StardewAction.MOVE_DOWN, key=["s"])
-                elif door_tile.y < py_tile:
-                    turn_command = StardewCommand(action=StardewAction.MOVE_UP, key=["w"])
-
-                print(
-                    f"\n🏁 [极致贴近] 已彻底贴死在大门边缘 (到门中心距离: {dist_to_door:.2f}px)。执行单帧面向并清空路径。"
-                )
-                return turn_command, [], True
-
-        diff_x = target_x - px
-        diff_y = target_y - py
+        target_left = target_tile.x * tile_size + person_half_width
+        target_right = (target_tile.x + 1) * tile_size - person_half_width
+        target_top = target_tile.y * tile_size + person_half_height
+        target_bottom = (target_tile.y + 1) * tile_size - person_half_height
 
         pressed_keys = set()
-        pixel_dead_zone = 1.0 if is_approaching_blocked_warp else 4.0
+        edge_dead_zone = 0.5
 
-        if diff_x > pixel_dead_zone and not block_x:
+        if state.position.x < target_left - edge_dead_zone:
             pressed_keys.add("d")
-        elif diff_x < -pixel_dead_zone and not block_x:
+        elif state.position.x > target_right + edge_dead_zone:
             pressed_keys.add("a")
 
-        if diff_y > pixel_dead_zone and not block_y:
+        if state.position.y < target_top - edge_dead_zone:
             pressed_keys.add("s")
-        elif diff_y < -pixel_dead_zone and not block_y:
+        elif state.position.y > target_bottom + edge_dead_zone:
             pressed_keys.add("w")
 
         if "w" in pressed_keys and "d" in pressed_keys:
-            command = StardewCommand(action=StardewAction.MOVE_UP_RIGHT, key=["w", "d"])
+            command = self._build_diagonal_move_command(StardewAction.MOVE_UP_RIGHT, "w", "d")
         elif "w" in pressed_keys and "a" in pressed_keys:
-            command = StardewCommand(action=StardewAction.MOVE_UP_LEFT, key=["w", "a"])
+            command = self._build_diagonal_move_command(StardewAction.MOVE_UP_LEFT, "w", "a")
         elif "s" in pressed_keys and "d" in pressed_keys:
-            command = StardewCommand(action=StardewAction.MOVE_DOWN_RIGHT, key=["s", "d"])
+            command = self._build_diagonal_move_command(StardewAction.MOVE_DOWN_RIGHT, "s", "d")
         elif "s" in pressed_keys and "a" in pressed_keys:
-            command = StardewCommand(action=StardewAction.MOVE_DOWN_LEFT, key=["s", "a"])
+            command = self._build_diagonal_move_command(StardewAction.MOVE_DOWN_LEFT, "s", "a")
         elif "w" in pressed_keys:
+            self._last_primary_axis = "vertical"
             command = StardewCommand(action=StardewAction.MOVE_UP, key=["w"])
         elif "s" in pressed_keys:
+            self._last_primary_axis = "vertical"
             command = StardewCommand(action=StardewAction.MOVE_DOWN, key=["s"])
         elif "a" in pressed_keys:
+            self._last_primary_axis = "horizontal"
             command = StardewCommand(action=StardewAction.MOVE_LEFT, key=["a"])
         elif "d" in pressed_keys:
+            self._last_primary_axis = "horizontal"
             command = StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
         else:
-            command = StardewCommand(action=StardewAction.IDLE)
+            return StardewCommand(action=StardewAction.IDLE)
 
-        return command, current_path, False
+        return command
+
+    def _build_diagonal_move_command(
+        self,
+        action: StardewAction,
+        vertical_key: Literal["w", "s"],
+        horizontal_key: Literal["a", "d"],
+    ) -> StardewCommand:
+        if self._last_primary_axis == "horizontal":
+            key = [horizontal_key, vertical_key]
+        else:
+            key = [vertical_key, horizontal_key]
+
+        self._last_primary_axis = self._last_primary_axis or "vertical"
+        return StardewCommand(action=action, key=key)
 
 
 astar_solver = AStarParser()

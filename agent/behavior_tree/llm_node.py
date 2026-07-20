@@ -42,15 +42,20 @@ class Agent_Model:
     async def run(self, prompt: str, ctx: PlayerContext) -> List[BaseTask]:
         if self.is_mock_data:
             await asyncio.sleep(2.0)
-            if "打烊" in prompt:
-                return [
-                    RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Mountain"),
-                    RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
-                ]
+            # if "打烊" in prompt:
+            #     return [
+            #         RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Mountain"),
+            #         RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
+            #     ]
+            # return [
+            #     RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="SeedShop"),
+            #     # RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Town"),
+            #     RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
+            # ]
             return [
-                RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="SeedShop"),
-                # RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Town"),
-                RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
+                # RouteTask(task_type="ROUTE", desc="前往后山", target_loc="FarmHouse"),
+                RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Blacksmith"),
+                # RouteTask(task_type="ROUTE", desc="前往Town", target_loc="SeedShop"),
             ]
         else:
             return []

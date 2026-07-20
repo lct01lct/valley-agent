@@ -7,6 +7,7 @@ from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.route_node import RouteNode
 from agent.behavior_tree.behavior_tree import Selector, Sequence
 from agent.behavior_tree.defend_node import Defend_Node
+from agent.behavior_tree.clear_obstacle_node import ClearObstacleNode
 from agent.behavior_tree.open_door_node import OpenDoorNode
 from agent.behavior_tree.llm_node import Agent_Model, LLM_Node
 from agent.behavior_tree.player_context import PlayerContext
@@ -36,6 +37,7 @@ class ValleyAgent:
                     node_name="Route",
                     children=[
                         OpenDoorNode(),
+                        ClearObstacleNode(),
                         RouteNode(),
                     ],
                 ),
@@ -53,7 +55,7 @@ class ValleyAgent:
         self.ctx = PlayerContext()
         self.blackboard = AgentBlackboard()
 
-        frame_interval = 1 / 120
+        frame_interval = 1 / 90
         try:
             while True:
                 # 同步游戏的数据

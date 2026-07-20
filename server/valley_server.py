@@ -3,7 +3,7 @@ import json
 import threading
 import time
 import os
-from typing import List, Dict, Set, Optional
+from typing import Any, List, Dict, Set, Optional
 from PIL import Image, ImageDraw
 
 import sys
@@ -236,7 +236,7 @@ def render_live_map(
     state: StardewState,
     output_path: str,
     grid_pixel: int = 40,
-    route_list: Optional[List[dict]] = None,
+    route_list: Optional[List[Any]] = None,
 ):
     all_points: list[Tile] = [state.player_tile]
     for layer in state.layers.values():
@@ -360,7 +360,8 @@ def render_live_map(
         if len(pixel_points) >= 2:
             draw.line(pixel_points, fill="#42A5F5", width=4, joint="curve")
 
-        end_tx, end_ty, route_type = route_list[-1].values()
+        end_tile = route_list[-1]
+        end_tx, end_ty, route_type = end_tile.x, end_tile.y, end_tile.type
         ecx, ecy = end_tx - min_x, end_ty - min_y
         if 0 <= ecx < map_width and 0 <= ecy < map_height:
             ex0, ey0 = ecx * grid_pixel, ecy * grid_pixel
@@ -382,6 +383,7 @@ import threading
 
 
 def async_render(state_copy, file_path, grid, path):
+    # render_live_map(state_copy, file_path, grid, path)
     try:
         render_live_map(state_copy, file_path, grid, path)
     except Exception:
@@ -558,19 +560,15 @@ if __name__ == "__main__":
                                     new_path = None
 
                         if new_path is not None:
-                            global_current_path = astar_solver.annotate_path_points(
-                                new_path,
-                                target_warp_passable=target_warp_passable,
-                                target_warp_tile=target_warp_tile,
-                            )
+                            global_current_path = new_path
 
                 # 如果上面 new_path 成功算出来，它会正常走下面的 get_next_move_command
                 # 如果上面 new_path 是 None 触发了“绝路停机”，因为 global_current_path 被清空，
                 # 下面控制器也会安全返回 IDLE，双重保险保障角色绝对钉在原地不动。
                 # 只有在非绝路停机状态下，才允许让控制器去接管驱动逻辑，防止 command 覆盖冲突
                 if not is_dead_end:
-                    command, global_current_path, require_open_door = astar_solver.get_next_move_command(
-                        state=state, current_path=global_current_path, target_warp_passable=target_warp_passable
+                    command, global_current_path, _should_trigger_astar = astar_solver.get_next_move_command(
+                        state=state, current_path=global_current_path
                     )
 
                 if state.location_name != "Blacksmith":

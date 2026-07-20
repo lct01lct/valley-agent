@@ -35,12 +35,13 @@ Selector
 │   └── Defend_Node
 ├── Sequence("Route")
 │   ├── OpenDoorNode
+│   ├── ClearObstacleNode
 │   └── RouteNode
-└── Sequence("LLM")
+└── Sequence("Think")
     └── LLM_Node
 ```
 
-`Route` 分支和 `LLM` 分支都是顶层 Selector 下的候选分支。`LLM` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
+`Route` 分支和 `Think` 分支都是顶层 Selector 下的候选分支。`Think` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
 
 `AgentBlackboard` 是跨节点通讯和调度状态中心，当前至少保存：
 
@@ -50,6 +51,7 @@ Selector
 - `new_plan_received`
 - `prompt`
 - `require_open_door`
+- `require_clear_obstacle`
 
 ## 当前进度
 
@@ -61,7 +63,7 @@ Selector
 | 局部 A* | 已有基础 | 支持格子路径、硬障碍和目标 Warp |
 | 动态避障与重规划 | 已有基础 | 支持偏航和未来路径阻塞检测，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
-| 破坏障碍物 | 尚未闭环 | 已有障碍类型与路径动作设计，清障节点仍是占位实现 |
+| 破坏障碍物 | 基础接入 | A* 可标记石头、树枝、杂草和普通树等必要清障点，`ClearObstacleNode` 已接入 Route 分支；工具选择和游戏内验证仍需完善 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
 
@@ -71,14 +73,13 @@ Selector
 - `HardcodedStardewMap` 可做跨地图 BFS 路线分解。
 - SMAPI Observer 可导出地点、玩家位置、Warp 和局部障碍物。
 - 本地 A* 支持格子路径、动态路径过期检测、偏航检测和重新计算。
-- Route/OpenDoor 之间已有黑板标志协作。
+- Route/OpenDoor/ClearObstacle 之间已有黑板标志协作。
 - C# Executor 已支持基础移动、开门、关闭对话和使用工具。
 
 ## 当前缺口
 
 - `ValleyAgent.invoke(task)` 保存了原始任务，但尚未稳定注入 Planner Prompt；第一阶段可继续使用 mock 计划。
-- `route_cost_function` 已包含部分障碍类型和动作代价设计，但当前调用 A* 时没有启用该函数。
-- `ClearObstacleNode` 仍为空实现，未接入行为树，也没有工具选择、动作重试和障碍消失验证。
+- `ClearObstacleNode` 当前复用现有 `USE_TOOL` 协议，只能使用当前手持工具；还没有工具选择、体力检查和工具栏状态验证。
 - 树木、石头、树枝、杂草等可破坏物的工具、体力和背包约束尚未形成完整决策。
 - `OpenDoorNode` 仍有异步路径使用 `time.sleep()`、结果验证不足等问题。
 - `StardewExecutorClient.send_command()` 是阻塞式等待响应，缺少可靠超时和结构化 Action Result。
@@ -90,8 +91,8 @@ Selector
 
 1. 保持 `LLM_Node` mock 计划稳定，确保黑板能够连续消费多个 `RouteTask`。
 2. 为 A* 正式接入障碍代价函数，区分不可通行、可绕行和可破坏障碍。
-3. 完成并规范化 `ClearObstacleNode`，接入行为树和黑板协作。
-4. 实现工具选择、玩家朝向、清障动作、超时与障碍消失验证。
+3. 完善 `ClearObstacleNode` 的工具选择、体力检查和更多可安全处理的障碍类型。
+4. 强化玩家朝向、清障动作、超时与障碍消失验证。
 5. 完善 `OpenDoorNode` 的非阻塞状态机和门结果验证。
 6. 增加确定性寻路场景测试与游戏内端到端验收。
 

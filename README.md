@@ -35,19 +35,20 @@ Selector
 │   └── Defend_Node
 ├── Sequence("Route")
 │   ├── OpenDoorNode
+│   ├── ClearObstacleNode
 │   └── RouteNode
-└── Sequence("LLM")
+└── Sequence("Think")
     └── LLM_Node
 ```
 
 行为树每个 tick 从高优先级分支开始扫描：
 
 1. `Defend_Node` 预留给紧急安全行为。
-2. `OpenDoorNode` 和 `RouteNode` 消费当前路线计划并执行确定性动作。
-3. `Sequence("LLM")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
+2. `OpenDoorNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性动作。
+3. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
 4. 新计划到达后，Selector 重新从高优先级节点扫描。
 
-因此，`LLM` 分支和 `Route` 分支在顶层 Selector 视角是同级概念，只是优先级更低、职责更偏规划兜底。
+因此，`Think` 分支和 `Route` 分支在顶层 Selector 视角是同级概念，只是优先级更低、职责更偏规划兜底。
 
 ## AgentBlackboard 的角色
 

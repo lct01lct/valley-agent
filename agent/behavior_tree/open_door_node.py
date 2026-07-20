@@ -1,4 +1,4 @@
-import time
+import asyncio
 
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
@@ -15,6 +15,7 @@ class OpenDoorNode(BTNode):
             blackboard.require_open_door = False
 
             res = context.executor_client.send_command(StardewCommand(action=StardewAction.OPEN_DOOR, key=["x"]))
+            blackboard.is_opening_door = False
             close_door_flag = False
             if res:
                 for tip in closed_door_tip:
@@ -22,13 +23,14 @@ class OpenDoorNode(BTNode):
                         close_door_flag = True
                         print(f"🟡 [OpenDoorNode] 门被锁住了，无法打开！")
 
-                        time.sleep(1.0)
+                        await asyncio.sleep(1.0)
                         close_dialog_res = context.executor_client.send_command(
                             StardewCommand(action=StardewAction.CLOSE_DIALOG, key=["x"])
                         )
                         if close_dialog_res == "SUCCESS":
                             blackboard.prompt = "打烊"
                             blackboard.macro_plan = []
+                            blackboard.should_reset_route = True
                             return "FAILURE"
                         else:
                             raise ValueError("🔴 [OpenDoorNode] 关闭对话框失败，可能需要手动干预！")

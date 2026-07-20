@@ -1,6 +1,7 @@
 from typing import List
 
 from agent.base_task import BaseTask
+from server.type import Tile
 
 
 class AgentBlackboard:
@@ -15,3 +16,11 @@ class AgentBlackboard:
 
         # 开门
         self.require_open_door = False
+        self.is_opening_door = False
+        self.should_reset_route = False
+
+        # 清理可破坏障碍物
+        self.require_clear_obstacle = False
+        self.clear_obstacle_tile: Tile | None = None
+        self.clear_obstacle_type: str | None = None
+        self.failed_clear_obstacles: set[tuple[int, int]] = set()
