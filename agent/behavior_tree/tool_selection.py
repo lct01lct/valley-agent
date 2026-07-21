@@ -1,10 +1,14 @@
-from typing import Sequence
+from typing import Literal, Sequence
 
 from agent.action.valley_action.action_type import KeyType
 from server.valley_server import InventoryItem, StardewState
+from server.type import Tile
+
+type ClearObstacleOwner = Literal["Route", "Farm"]
 
 TOOLBAR_SIZE = 12
 TOOLBAR_KEYS: tuple[KeyType, ...] = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=")
+SCYTHE_TREE_SEED_RISK_LAYERS: tuple[str, ...] = ("Tree1", "FruitTree1")
 
 CLEAR_OBSTACLE_REQUIRED_TOOLS: dict[str, str] = {
     "stone": "Pickaxe",
@@ -33,6 +37,39 @@ def get_required_tool_for_obstacle(obstacle_type: str | None) -> str | None:
     return CLEAR_OBSTACLE_REQUIRED_TOOLS.get(obstacle_type)
 
 
+def select_required_tool_for_obstacle(
+    state: StardewState,
+    obstacle_type: str | None,
+    target_tile: Tile,
+    owner: ClearObstacleOwner,
+) -> str | None:
+    if obstacle_type is None:
+        return None
+
+    normalized_obstacle_type = obstacle_type.lower()
+    if normalized_obstacle_type == "weeds":
+        return _select_tool_for_weeds(state, target_tile, owner)
+
+    if normalized_obstacle_type == "grass":
+        return _select_first_available_tool(state, ("Scythe",))
+
+    if normalized_obstacle_type == "twig":
+        return _select_first_available_tool(state, ("Axe",))
+
+    if normalized_obstacle_type == "stone":
+        return _select_first_available_tool(state, ("Pickaxe",))
+
+    return get_required_tool_for_obstacle(obstacle_type)
+
+
+def has_scythe_tree_seed_risk(state: StardewState, target_tile: Tile) -> bool:
+    risk_tiles = _get_estimated_scythe_range_tiles(state.player_tile, target_tile)
+    for layer_name in SCYTHE_TREE_SEED_RISK_LAYERS:
+        if state.layers.get(layer_name, set()).intersection(risk_tiles):
+            return True
+    return False
+
+
 def find_tool_item(state: StardewState, required_tool: str) -> InventoryItem | None:
     aliases = TOOL_NAME_ALIASES.get(required_tool, (required_tool,))
     for item in state.inventory.items:
@@ -41,6 +78,38 @@ def find_tool_item(state: StardewState, required_tool: str) -> InventoryItem | N
         if _matches_qualified_item_id(item.qualified_item_id, aliases):
             return item
     return None
+
+
+def _select_tool_for_weeds(state: StardewState, target_tile: Tile, owner: ClearObstacleOwner) -> str | None:
+    has_tree_seed_risk = has_scythe_tree_seed_risk(state, target_tile)
+
+    if owner == "Route":
+        if not has_tree_seed_risk and find_tool_item(state, "Scythe") is not None:
+            return "Scythe"
+        return _select_first_available_tool(state, ("Axe", "Pickaxe", "Hoe", "Scythe"))
+
+    if find_tool_item(state, "Hoe") is not None:
+        return "Hoe"
+    if not has_tree_seed_risk and find_tool_item(state, "Scythe") is not None:
+        return "Scythe"
+    return _select_first_available_tool(state, ("Axe", "Pickaxe", "Scythe"))
+
+
+def _select_first_available_tool(state: StardewState, tools: Sequence[str]) -> str | None:
+    for tool_name in tools:
+        if find_tool_item(state, tool_name) is not None:
+            return tool_name
+    return tools[0] if tools else None
+
+
+def _get_estimated_scythe_range_tiles(player_tile: Tile, target_tile: Tile) -> set[Tile]:
+    # 当前没有从 SMAPI 直接导出镰刀实际命中范围；这里用玩家格和目标格周围 1 格做保守估计。
+    range_tiles: set[Tile] = set()
+    for center_tile in (player_tile, target_tile):
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                range_tiles.add(Tile(center_tile.x + dx, center_tile.y + dy))
+    return range_tiles
 
 
 def is_current_tool(state: StardewState, required_tool: str) -> bool:

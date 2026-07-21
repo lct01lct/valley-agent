@@ -65,8 +65,10 @@ class ValleyAgent:
         self.task_original_str = task
         self.ctx = PlayerContext()
         self.blackboard = AgentBlackboard()
+        self.blackboard.prompt = task
 
         frame_interval = 1 / 90
+        last_no_state_log_at = 0.0
         try:
             while True:
                 # 同步游戏的数据
@@ -75,6 +77,13 @@ class ValleyAgent:
                 if self.ctx is None:
                     await asyncio.sleep(0.01)
                     continue
+
+                if self.ctx.state is None and time.time() - last_no_state_log_at > 2.0:
+                    last_no_state_log_at = time.time()
+                    print(
+                        "\n🟡 [ValleyAgent] 尚未收到 SMAPI Observer state，行为树会等待状态后再执行。"
+                        "请确认游戏已进入存档，并且 Observer 端口已监听。"
+                    )
 
                 start_time = time.time()
                 await self.behavior_tree.run(self.blackboard, self.ctx)

@@ -8,7 +8,7 @@ from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.clear_obstacle_debug_logger import ClearObstacleDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_action_tracker import ToolActionTracker
-from agent.behavior_tree.tool_selection import get_required_tool_for_obstacle, is_current_tool
+from agent.behavior_tree.tool_selection import has_scythe_tree_seed_risk, is_current_tool, select_required_tool_for_obstacle
 from server.type import Tile
 
 
@@ -111,7 +111,13 @@ class ClearObstacleNode(BTNode):
 
         self._reset_positioning_stuck_detection()
 
-        required_tool = blackboard.required_tool or get_required_tool_for_obstacle(obstacle_type)
+        clear_owner = "Farm" if self.owner == "Farm" else "Route"
+        required_tool = blackboard.required_tool or select_required_tool_for_obstacle(
+            game_state,
+            obstacle_type,
+            target_tile,
+            clear_owner,
+        )
         if required_tool is None:
             self._fail(blackboard, f"障碍物没有配置可用工具: obstacle_type={obstacle_type}")
             return "SUCCESS"
@@ -124,7 +130,8 @@ class ClearObstacleNode(BTNode):
             print(f"\n🟡 [ClearObstacleNode:{self.owner}] 当前工具不是 {required_tool}，等待切换工具后再清理。")
             self._log(
                 f"等待切换工具: required_tool={required_tool}, current_tool={self._get_current_tool_name(game_state)}, "
-                f"target={target_tile}, obstacle={obstacle_type}"
+                f"target={target_tile}, obstacle={obstacle_type}, "
+                f"scythe_tree_seed_risk={has_scythe_tree_seed_risk(game_state, target_tile)}"
             )
             return "RUNNING"
 

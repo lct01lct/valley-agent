@@ -48,10 +48,11 @@ class Agent_Model:
         if self.is_mock_data:
             await asyncio.sleep(2.0)
             if TEST_MODE == "ROUTE":
-                # if not "打烊" in prompt:
-                #     return TASK_MOCK_DATA["ROUTE_1"]
-                # return TASK_MOCK_DATA["ROUTE_BACKUP"]
-                return TASK_MOCK_DATA["ROUTE_2"]
+                if not "打烊" in prompt:
+                    return TASK_MOCK_DATA["ROUTE_1"]
+                return TASK_MOCK_DATA["ROUTE_BACKUP"]
+                # return TASK_MOCK_DATA["ROUTE_3"]
+                # return TASK_MOCK_DATA["ROUTE_4"]
             elif TEST_MODE == "FARM":
                 # return TASK_MOCK_DATA["FARM_P1_2"]
                 # return TASK_MOCK_DATA["FARM_P0_2"]

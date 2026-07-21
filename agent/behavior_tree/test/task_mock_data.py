@@ -17,6 +17,12 @@ TASK_MOCK_DATA: Dict[str, List[BaseTask]] = {
     "ROUTE_2": [  # ROUTE 测试数据 2：寻路过程中破障
         RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Backwoods"),
     ],
+    "ROUTE_3": [  # ROUTE 测试数据 3：寻路过程中破障
+        RouteTask(task_type="ROUTE", desc="前往森林", target_loc="Forest"),
+    ],
+    "ROUTE_4": [  # ROUTE 测试数据 4：长地图寻路
+        RouteTask(task_type="ROUTE", desc="前往铁匠铺", target_loc="Blacksmith"),
+    ],
     "FARM_P0_1": [  # Farm P0 测试数据 1：自动选择最近的 1 个未浇水作物。
         RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
         FarmTask(

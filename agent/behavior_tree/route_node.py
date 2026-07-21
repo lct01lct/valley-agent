@@ -1,5 +1,4 @@
 import asyncio
-import threading
 import time
 from typing import List, Set, Tuple
 
@@ -11,15 +10,19 @@ from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.route_debug_logger import RouteDebugLogger
-from agent.behavior_tree.tool_selection import get_required_tool_for_obstacle
+from agent.behavior_tree.tool_selection import has_scythe_tree_seed_risk, select_required_tool_for_obstacle
 from agent.base_task import BaseTask, TaskType
 from agent.action.valley_action.move_controller import MoveController
 from agent.action.valley_action.AStar import RouteActionType, RouteTile, astar_solver
-from server.valley_server import StardewState, async_render
+from server.valley_server import StardewState
 from server.type import Tile
 
 CLEARABLE_ROUTE_TYPES: set[RouteActionType] = {"weeds", "twig", "stone"}
 NEAR_REPLAN_DISTANCE = 2
+MOVE_DEBUG_LOG_INTERVAL_SECONDS = 0.5
+ROUTE_PROGRESS_PRINT_INTERVAL_SECONDS = 0.2
+MOVE_INTERVAL_SPIKE_SECONDS = 0.08
+EXECUTOR_SLOW_SEND_SECONDS = 0.05
 
 
 class RouteNode(BTNode):
@@ -39,6 +42,9 @@ class RouteNode(BTNode):
         self.last_move_command_at: float | None = None
         self.last_command_interval: float | None = None
         self.last_send_duration: float | None = None
+        self.last_move_debug_log_at: float | None = None
+        self.last_move_debug_signature: tuple[StardewAction, int, int] | None = None
+        self.last_progress_print_at: float | None = None
         self.route_debug_logger = RouteDebugLogger()
         self.clear_obstacle_debug_logger = RouteDebugLogger("logs/clear_obstacle_debug.log")
         self.last_replan_distance: int | None = None
@@ -49,8 +55,6 @@ class RouteNode(BTNode):
         self.failed_route_signature: tuple[int, Location, Location, Location] | None = None
         self.last_clear_obstacle_debug_signature: tuple | None = None
         self.scene_warp_distance_cache: dict[Location, dict[Location, float]] = {}
-
-        self.IMAGE_FILE = "server/img/stardew_live_map.png"
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
 
@@ -229,7 +233,13 @@ class RouteNode(BTNode):
 
                     clear_obstacle_tile = self._get_next_reachable_clear_obstacle_tile(game_state, blackboard)
                     if clear_obstacle_tile is not None:
-                        required_tool = get_required_tool_for_obstacle(clear_obstacle_tile.type)
+                        target_tile = Tile(clear_obstacle_tile.x, clear_obstacle_tile.y)
+                        required_tool = select_required_tool_for_obstacle(
+                            game_state,
+                            clear_obstacle_tile.type,
+                            target_tile,
+                            "Route",
+                        )
                         context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
                         blackboard.require_switch_tool = required_tool is not None
                         blackboard.is_switching_tool = required_tool is not None
@@ -237,7 +247,7 @@ class RouteNode(BTNode):
                         blackboard.required_tool = required_tool
                         blackboard.require_clear_obstacle = True
                         blackboard.clear_obstacle_owner = "Route"
-                        blackboard.clear_obstacle_tile = Tile(clear_obstacle_tile.x, clear_obstacle_tile.y)
+                        blackboard.clear_obstacle_tile = target_tile
                         blackboard.clear_obstacle_type = clear_obstacle_tile.type
 
                         self.should_trigger_astar = True
@@ -245,6 +255,7 @@ class RouteNode(BTNode):
                         self._log_clear_obstacle_debug(
                             f"触发清障节点: tile={clear_obstacle_tile}, type={clear_obstacle_tile.type}, "
                             f"required_tool={required_tool}, player={game_state.player_tile}, "
+                            f"scythe_tree_seed_risk={has_scythe_tree_seed_risk(game_state, target_tile)}, "
                             f"path_index={self.path_index}, path_len={len(self.global_current_path)}, "
                             f"CurrentToolIndex={game_state.inventory.current_tool_index}, "
                             f"CurrentToolbarIndex={game_state.inventory.current_toolbar_index}"
@@ -281,7 +292,7 @@ class RouteNode(BTNode):
                     now = time.perf_counter()
                     if self.last_move_command_at is not None:
                         self.last_command_interval = now - self.last_move_command_at
-                        if self.last_command_interval > 0.08:
+                        if self.last_command_interval > MOVE_INTERVAL_SPIKE_SECONDS:
                             self._log_route_debug(
                                 f"移动命令间隔偏高: "
                                 f"interval={self.last_command_interval * 1000:.1f}ms, "
@@ -293,32 +304,25 @@ class RouteNode(BTNode):
                     send_start_time = time.perf_counter()
                     context.executor_client.send_command(command)
                     self.last_send_duration = time.perf_counter() - send_start_time
-                    if self.last_send_duration > 0.05:
+                    if self.last_send_duration > EXECUTOR_SLOW_SEND_SECONDS:
                         self._log_route_debug(
                             f"Executor 响应偏慢: " f"send={self.last_send_duration * 1000:.1f}ms, cmd={command.action}"
                         )
-                    self._log_route_debug(
-                        f"移动命令: cmd={command.action}, "
-                        f"cmdHz={self._format_command_frequency()}, "
-                        f"send={self._format_send_duration()}, "
-                        f"path={self.path_index}/{len(self.global_current_path)}, "
-                        f"player={game_state.player_tile}"
-                    )
-
-                    print(
-                        f"\r🏃‍♂️ [RouteNode] 正在前往 【{current_task.target_loc}】 途中... "
-                        f"已奔跑 {current_run_duration:.2f}s",
-                        end="",
-                    )
-
-                    # async_render(game_state, self.IMAGE_FILE, 40, self._get_remaining_path())
-                    if "render_thread" not in locals() or not render_thread.is_alive():  # type: ignore
-                        render_thread = threading.Thread(
-                            target=async_render,
-                            args=(game_state, self.IMAGE_FILE, 40, self._get_remaining_path()),
-                            daemon=True,
+                    if self._should_log_move_debug(command, now):
+                        self._log_route_debug(
+                            f"移动命令: cmd={command.action}, "
+                            f"cmdHz={self._format_command_frequency()}, "
+                            f"send={self._format_send_duration()}, "
+                            f"path={self.path_index}/{len(self.global_current_path)}, "
+                            f"player={game_state.player_tile}"
                         )
-                        render_thread.start()
+
+                    if self._should_print_progress(now):
+                        print(
+                            f"\r🏃‍♂️ [RouteNode] 正在前往 【{current_task.target_loc}】 途中... "
+                            f"已奔跑 {current_run_duration:.2f}s",
+                            end="",
+                        )
 
                 return "RUNNING"
             else:
@@ -354,10 +358,7 @@ class RouteNode(BTNode):
         if not candidate_routes:
             return None
 
-        scored_routes = [
-            self._score_scene_route(game_state, route)
-            for route in candidate_routes
-        ]
+        scored_routes = [self._score_scene_route(game_state, route) for route in candidate_routes]
         selected_route = min(scored_routes, key=lambda scored_route: scored_route["score"])
 
         score_lines = []
@@ -371,9 +372,7 @@ class RouteNode(BTNode):
             )
 
         self._log_route_debug(
-            "候选跨场景路线评分: "
-            + " | ".join(score_lines)
-            + f" | selected={'->'.join(selected_route['route'])}"
+            "候选跨场景路线评分: " + " | ".join(score_lines) + f" | selected={'->'.join(selected_route['route'])}"
         )
         return selected_route["route"]
 
@@ -466,6 +465,9 @@ class RouteNode(BTNode):
         self.last_move_command_at = None
         self.last_command_interval = None
         self.last_send_duration = None
+        self.last_move_debug_log_at = None
+        self.last_move_debug_signature = None
+        self.last_progress_print_at = None
         self.last_replan_distance = None
         if self.pending_astar_task is not None and not self.pending_astar_task.done():
             self.pending_astar_task.cancel()
@@ -592,8 +594,7 @@ class RouteNode(BTNode):
             return
 
         preview = ", ".join(
-            f"{route_tile.type}@({route_tile.x},{route_tile.y})"
-            for route_tile in clear_obstacle_tiles[:8]
+            f"{route_tile.type}@({route_tile.x},{route_tile.y})" for route_tile in clear_obstacle_tiles[:8]
         )
         self._log_clear_obstacle_debug(
             f"路径包含可清障障碍: reason={reason}, loc={game_state.location_name}, "
@@ -609,7 +610,8 @@ class RouteNode(BTNode):
         reason: str,
         is_reachable: bool,
     ) -> None:
-        required_tool = get_required_tool_for_obstacle(route_tile.type)
+        target_tile = Tile(route_tile.x, route_tile.y)
+        required_tool = select_required_tool_for_obstacle(game_state, route_tile.type, target_tile, "Route")
         signature = (
             game_state.location_name,
             game_state.player_tile.x,
@@ -626,6 +628,7 @@ class RouteNode(BTNode):
         self.last_clear_obstacle_debug_signature = signature
         self._log_clear_obstacle_debug(
             f"清障候选: tile={route_tile}, type={route_tile.type}, required_tool={required_tool}, "
+            f"scythe_tree_seed_risk={has_scythe_tree_seed_risk(game_state, target_tile)}, "
             f"is_reachable={is_reachable}, reason={reason}, player={game_state.player_tile}, "
             f"path_index={self.path_index}, lookahead_end={look_ahead_end}, "
             f"path_len={len(self.global_current_path)}, CurrentToolIndex={game_state.inventory.current_tool_index}, "
@@ -650,6 +653,32 @@ class RouteNode(BTNode):
         if self.last_send_duration is None:
             return "--"
         return f"{self.last_send_duration * 1000:.1f}ms"
+
+    def _should_log_move_debug(self, command: StardewCommand, now: float) -> bool:
+        current_signature = (command.action, self.path_index, len(self.global_current_path))
+        is_first_log = self.last_move_debug_log_at is None
+        is_signature_changed = current_signature != self.last_move_debug_signature
+        is_interval_due = (
+            self.last_move_debug_log_at is not None
+            and now - self.last_move_debug_log_at >= MOVE_DEBUG_LOG_INTERVAL_SECONDS
+        )
+
+        if not is_first_log and not is_signature_changed and not is_interval_due:
+            return False
+
+        self.last_move_debug_log_at = now
+        self.last_move_debug_signature = current_signature
+        return True
+
+    def _should_print_progress(self, now: float) -> bool:
+        if self.last_progress_print_at is None:
+            self.last_progress_print_at = now
+            return True
+        if now - self.last_progress_print_at < ROUTE_PROGRESS_PRINT_INTERVAL_SECONDS:
+            return False
+
+        self.last_progress_print_at = now
+        return True
 
     def _log_route_debug(self, message: str) -> None:
         self.route_debug_logger.log(f"[RouteNode] {message}")

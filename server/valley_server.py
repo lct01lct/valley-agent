@@ -1,3 +1,4 @@
+import codecs
 import socket
 import json
 import threading
@@ -77,7 +78,9 @@ class FarmTileState:
         self.raw_has_crop = raw_farm_tile.get("HasCrop")
         self.has_crop: bool = bool(raw_farm_tile.get("HasCrop", False))
         self.can_hoe: bool = bool(raw_farm_tile.get("CanHoe", False))
-        self.can_plant: bool = bool(raw_farm_tile.get("CanPlant", self.terrain_feature_type == "HoeDirt" and not self.has_crop))
+        self.can_plant: bool = bool(
+            raw_farm_tile.get("CanPlant", self.terrain_feature_type == "HoeDirt" and not self.has_crop)
+        )
         self.has_hoe_dirt: bool = bool(raw_farm_tile.get("HasHoeDirt", self.terrain_feature_type == "HoeDirt"))
         self.obstacle_type: str = raw_farm_tile.get("ObstacleType", "")
         self.is_diggable: bool = bool(raw_farm_tile.get("IsDiggable", False))
@@ -143,7 +146,9 @@ class StardewState:
 
         self.farm_tiles: list[FarmTileState] = []
         self.farm_tiles_by_tile: dict[Tile, FarmTileState] = {}
-        for raw_farm_tile in raw_json_data.get("FarmTiles", []):
+        raw_farm_tiles = raw_json_data.get("FarmTiles")
+        self.has_farm_tiles_snapshot = isinstance(raw_farm_tiles, list)
+        for raw_farm_tile in (raw_farm_tiles if self.has_farm_tiles_snapshot else []):
             if not isinstance(raw_farm_tile, dict):
                 continue
             farm_tile = FarmTileState(raw_farm_tile)
@@ -189,7 +194,9 @@ class StardewState:
             "FruitTree5": set(),
         }
 
-        for item in raw_json_data.get("obstacles", []):
+        raw_obstacles = raw_json_data.get("obstacles")
+        self.has_obstacles_snapshot = isinstance(raw_obstacles, list)
+        for item in (raw_obstacles if self.has_obstacles_snapshot else []):
             clean_str: str = item.replace('"', "").strip()
             if ":" in clean_str:
                 prefix, coords = clean_str.split(":", 1)
@@ -232,24 +239,28 @@ class StardewState:
     def merge_known_layers_from(self, previous_state: "StardewState") -> None:
         if previous_state.location_name != self.location_name:
             return
-        if self.state_scope == "global":
-            return
-        if self.scan_range is None:
-            return
 
-        for layer_name, previous_tiles in previous_state.layers.items():
-            current_tiles = self.layers.setdefault(layer_name, set())
-            for tile in previous_tiles:
-                if not self.is_tile_inside_current_scan(tile):
-                    current_tiles.add(tile)
+        if not self.has_obstacles_snapshot:
+            for layer_name, previous_tiles in previous_state.layers.items():
+                self.layers[layer_name] = previous_tiles.copy()
+        elif self.state_scope != "global" and self.scan_range is not None:
+            for layer_name, previous_tiles in previous_state.layers.items():
+                current_tiles = self.layers.setdefault(layer_name, set())
+                for tile in previous_tiles:
+                    if not self.is_tile_inside_current_scan(tile):
+                        current_tiles.add(tile)
 
-        for previous_farm_tile in previous_state.farm_tiles:
-            if previous_farm_tile.tile in self.farm_tiles_by_tile:
-                continue
-            if self.is_tile_inside_current_scan(previous_farm_tile.tile):
-                continue
-            self.farm_tiles.append(previous_farm_tile)
-            self.farm_tiles_by_tile[previous_farm_tile.tile] = previous_farm_tile
+        if not self.has_farm_tiles_snapshot:
+            self.farm_tiles = previous_state.farm_tiles.copy()
+            self.farm_tiles_by_tile = previous_state.farm_tiles_by_tile.copy()
+        elif self.state_scope != "global" and self.scan_range is not None:
+            for previous_farm_tile in previous_state.farm_tiles:
+                if previous_farm_tile.tile in self.farm_tiles_by_tile:
+                    continue
+                if self.is_tile_inside_current_scan(previous_farm_tile.tile):
+                    continue
+                self.farm_tiles.append(previous_farm_tile)
+                self.farm_tiles_by_tile[previous_farm_tile.tile] = previous_farm_tile
 
     def is_tile_inside_current_scan(self, tile: Tile) -> bool:
         if self.state_scope == "global":
@@ -273,6 +284,7 @@ class StardewObserverClient:
         self._lock = threading.Lock()
         self.is_running = False
         self._has_new_data = False
+        self._last_connect_error_log_at = 0.0
 
     def connect(self):
         self.is_running = True
@@ -286,12 +298,14 @@ class StardewObserverClient:
                 client.settimeout(5.0)
                 client.connect((self.host, self.port))
                 client.settimeout(None)
+                decoder = codecs.getincrementaldecoder("utf-8")()
                 data_accumulator = ""
 
                 while self.is_running:
-                    chunk = client.recv(65536).decode("utf-8")
-                    if not chunk:
+                    chunk_bytes = client.recv(65536)
+                    if not chunk_bytes:
                         break
+                    chunk = decoder.decode(chunk_bytes)
                     data_accumulator += chunk
 
                     while "EOF_END" in data_accumulator:
@@ -310,7 +324,14 @@ class StardewObserverClient:
                                 self._has_new_data = True
                         except json.JSONDecodeError:
                             continue
-            except socket.error:
+            except (socket.error, UnicodeDecodeError) as ex:
+                now = time.time()
+                if now - self._last_connect_error_log_at > 5.0:
+                    self._last_connect_error_log_at = now
+                    print(
+                        f"🟡 [StardewObserverClient] Observer 数据流暂时不可用 ({self.host}:{self.port}): {ex}。"
+                        "将继续后台重试。"
+                    )
                 time.sleep(2.0)
             finally:
                 try:

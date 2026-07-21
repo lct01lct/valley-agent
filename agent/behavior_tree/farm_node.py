@@ -11,7 +11,7 @@ from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.farm_debug_logger import FarmDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_action_tracker import ToolActionTracker
-from agent.behavior_tree.tool_selection import is_current_tool
+from agent.behavior_tree.tool_selection import has_scythe_tree_seed_risk, is_current_tool, select_required_tool_for_obstacle
 from server.valley_server import StardewState
 from server.type import Tile
 
@@ -27,7 +27,6 @@ type FarmBatchPhase = Literal[
 ]
 
 HOE_TOOL_NAME = "Hoe"
-SCYTHE_TOOL_NAME = "Scythe"
 WATERING_CAN_TOOL_NAME = "Watering Can"
 WATER_ACTION_TIMEOUT_SECONDS = 12.0
 FARM_ACTION_TIMEOUT_SECONDS = 12.0
@@ -729,7 +728,7 @@ class FarmNode(BTNode):
             self._reset_target()
             return "RUNNING"
 
-        required_tool = self._get_required_tool_for_farm_obstacle(clear_obstacle_type)
+        required_tool = select_required_tool_for_obstacle(game_state, clear_obstacle_type, target_tile, "Farm")
         if required_tool is None:
             self._mark_plant_tile_failed(target_tile, f"没有配置清障工具: obstacle={clear_obstacle_type}")
             self._reset_target()
@@ -746,7 +745,7 @@ class FarmNode(BTNode):
         blackboard.required_tool = required_tool
         self._log(
             f"P1 批量清障请求: target={target_tile}, obstacle={clear_obstacle_type}, "
-            f"required_tool={required_tool}"
+            f"required_tool={required_tool}, scythe_tree_seed_risk={has_scythe_tree_seed_risk(game_state, target_tile)}"
         )
         print(f"\n🟡 [FarmNode] P1 批量清障: {clear_obstacle_type} @ {target_tile}")
         return "RUNNING"
@@ -1130,15 +1129,6 @@ class FarmNode(BTNode):
                 return f"Tree{tree_stage}"
             if target_tile in game_state.layers.get(f"FruitTree{tree_stage}", set()):
                 return f"FruitTree{tree_stage}"
-        return None
-
-    def _get_required_tool_for_farm_obstacle(self, obstacle_type: str) -> str | None:
-        if obstacle_type == "Grass":
-            return SCYTHE_TOOL_NAME
-        if obstacle_type in ("Weeds", "Twig"):
-            return "Axe"
-        if obstacle_type == "Stone":
-            return "Pickaxe"
         return None
 
     def _format_tile_set(self, tiles: set[Tile]) -> str:

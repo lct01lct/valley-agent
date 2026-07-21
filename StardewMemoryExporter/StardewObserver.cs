@@ -33,6 +33,12 @@ namespace StardewMemoryExporter
         private readonly List<object> _cachedWarpDataList = new List<object>();
         private readonly HashSet<string> _cachedWarpCoords = new HashSet<string>();
         private const int ObstacleScanRange = 25;
+        private const int HeavyStateIntervalMs = 150;
+        private long _lastHeavyStateAtMs = 0;
+        private string _lastHeavyStateLocation = "";
+        private Point _lastHeavyStatePlayerTile = new Point(int.MinValue, int.MinValue);
+        private List<string> _cachedObstacleList = new List<string>();
+        private List<object> _cachedFarmTiles = new List<object>();
 
         private List<string> _lastHudMessages = new List<string>();
         // 🛡️ 调试专用变量：记录上一次打印的玩家格子坐标，防止高频刷屏
@@ -191,7 +197,21 @@ namespace StardewMemoryExporter
                 var currentMap = location.Map ?? location.map;
                 int mapWidth = currentMap?.Layers?[0]?.LayerWidth ?? 0;
                 int mapHeight = currentMap?.Layers?[0]?.LayerHeight ?? 0;
-                HashSet<string> obstacles = ScanLocalObstacles(location, player);
+                Point currentPlayerTile = new Point((int)player.TilePoint.X, (int)player.TilePoint.Y);
+                long nowMs = Environment.TickCount64;
+                bool shouldRefreshHeavyState =
+                    locationName != _lastHeavyStateLocation
+                    || currentPlayerTile != _lastHeavyStatePlayerTile
+                    || nowMs - _lastHeavyStateAtMs >= HeavyStateIntervalMs;
+
+                if (shouldRefreshHeavyState)
+                {
+                    _cachedObstacleList = ScanLocalObstacles(location, player).ToList();
+                    _cachedFarmTiles = CreateFarmTilesSnapshot(location, player);
+                    _lastHeavyStateAtMs = nowMs;
+                    _lastHeavyStateLocation = locationName;
+                    _lastHeavyStatePlayerTile = currentPlayerTile;
+                }
 
                 // if (locationName == "Farm")
                 // {
@@ -224,9 +244,10 @@ namespace StardewMemoryExporter
                     CanPlayerMove = Context.CanPlayerMove,
                     Items = CreateItemsSnapshot(player),
                     ToolTarget = CreateToolTargetSnapshot(player),
-                    FarmTiles = CreateFarmTilesSnapshot(location, player),
+                    // 轻量帧不重复发送重扫描数据；Python 端会沿用上一份 obstacles/FarmTiles。
+                    FarmTiles = shouldRefreshHeavyState ? _cachedFarmTiles : null,
                     warps = _cachedWarpDataList,
-                    obstacles = obstacles.ToList(),
+                    obstacles = shouldRefreshHeavyState ? _cachedObstacleList : null,
                 };
 
                 string packet = JsonConvert.SerializeObject(stateSnapshot) + "\nEOF_END\n";
@@ -240,9 +261,13 @@ namespace StardewMemoryExporter
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                CleanUp();
+                _monitor.Log(
+                    $"🔌 [StardewObserver] Python 状态客户端断开或写入失败，保留 Observer 监听等待重连: {ex.Message}",
+                    LogLevel.Trace
+                );
+                CloseClientConnection();
             }
         }
 
