@@ -21,6 +21,7 @@ type PositioningStatus = Literal[
 class PositioningGoal:
     candidate_stand_tiles: set[Tile]
     tool_target_tile: Tile | None = None
+    extra_blocked_tiles: set[Tile] | None = None
 
 
 @dataclass(frozen=True)
@@ -51,8 +52,21 @@ class PositioningController:
         self._goal_key = None
         self.move_controller.reset()
 
+    def get_debug_snapshot(self) -> str:
+        return (
+            f"goal_key={self._goal_key}, "
+            f"path_len={len(self._tile_path)}, "
+            f"path_index={self._path_index}, "
+            f"path_end={self._get_path_end_tile()}"
+        )
+
     def tick(self, state: StardewState, goal: PositioningGoal) -> PositioningResult:
-        candidate_stand_tiles = self._filter_candidate_stand_tiles(state, goal.candidate_stand_tiles)
+        extra_blocked_tiles = goal.extra_blocked_tiles or set()
+        candidate_stand_tiles = self._filter_candidate_stand_tiles(
+            state,
+            goal.candidate_stand_tiles,
+            extra_blocked_tiles,
+        )
         if not candidate_stand_tiles:
             return PositioningResult(status="FAILED", reason="没有可用候选站位")
 
@@ -69,7 +83,7 @@ class PositioningController:
             self.move_controller.reset()
 
         if not self._tile_path or self._path_index >= len(self._tile_path):
-            self._tile_path = self._build_path_to_stand_tiles(state, candidate_stand_tiles)
+            self._tile_path = self._build_path_to_stand_tiles(state, candidate_stand_tiles, extra_blocked_tiles)
             self._path_index = 0
 
             if not self._tile_path:
@@ -104,18 +118,37 @@ class PositioningController:
         command = build_tool_target_face_command(state.player_tile, tool_target_tile)
         return PositioningResult(status="FACING", command=command, stand_tile=stand_tile)
 
-    def _build_path_to_stand_tiles(self, state: StardewState, candidate_stand_tiles: set[Tile]) -> list[RouteTile]:
+    def _build_path_to_stand_tiles(
+        self,
+        state: StardewState,
+        candidate_stand_tiles: set[Tile],
+        extra_blocked_tiles: set[Tile],
+    ) -> list[RouteTile]:
         goal_tiles = {RouteTile(tile.x, tile.y, type="walk") for tile in candidate_stand_tiles}
+        blocked_tiles = astar_solver._get_blocked_tiles(state) | extra_blocked_tiles
+        start = RouteTile(*state.player_tile, type="walk")
+
+        def positioning_cost_func(curr, neigh, st, base_c):
+            if neigh != start and neigh in blocked_tiles:
+                return False, float("inf"), "blocked"
+            return True, base_c, "walk"
+
         path = astar_solver.find_path_to_warp_zone(
             state,
-            RouteTile(*state.player_tile, type="walk"),
+            start,
             goal_tiles,
+            cost_function=positioning_cost_func,
         )
         return path or []
 
-    def _filter_candidate_stand_tiles(self, state: StardewState, candidate_stand_tiles: set[Tile]) -> set[Tile]:
+    def _filter_candidate_stand_tiles(
+        self,
+        state: StardewState,
+        candidate_stand_tiles: set[Tile],
+        extra_blocked_tiles: set[Tile],
+    ) -> set[Tile]:
         map_width, map_height = state.map_size
-        blocked_tiles = astar_solver._get_blocked_tiles(state)
+        blocked_tiles = astar_solver._get_blocked_tiles(state) | extra_blocked_tiles
         result: set[Tile] = set()
 
         for tile in candidate_stand_tiles:

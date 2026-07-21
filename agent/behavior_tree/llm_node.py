@@ -10,8 +10,9 @@ from agent.base_task import BaseTask, TaskType
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.farm_node import FarmTask
-from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.route_node import RouteTask
+from agent.behavior_tree.player_context import PlayerContext
+from agent.behavior_tree.test.task_mock_data import TASK_MOCK_DATA
 
 
 class Agent_Model:
@@ -41,37 +42,20 @@ class Agent_Model:
         )
 
     async def run(self, prompt: str, ctx: PlayerContext) -> List[BaseTask]:
-        TEST_MODE: TaskType = "ROUTE"
+        # TEST_MODE: TaskType = "ROUTE"
         TEST_MODE: TaskType = "FARM"
+
         if self.is_mock_data:
             await asyncio.sleep(2.0)
             if TEST_MODE == "ROUTE":
                 if not "打烊" in prompt:
-                    return [
-                        RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="SeedShop"),
-                    ]
-                return [
-                    RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Mountain"),
-                    RouteTask(task_type="ROUTE", desc="前往农场小屋", target_loc="FarmHouse"),
-                ]
-                # return [
-                #     RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Backwoods"),
-                #     RouteTask(task_type="ROUTE", desc="前往后山", target_loc="Forest"),
-                #     RouteTask(task_type="ROUTE", desc="前往Town", target_loc="Blacksmith"),
-                #     RouteTask(task_type="ROUTE", desc="前往Town", target_loc="SeedShop"),
-                # ]
+                    return TASK_MOCK_DATA["ROUTE_1"]
+                return TASK_MOCK_DATA["ROUTE_BACKUP"]
             elif TEST_MODE == "FARM":
-                return [
-                    RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
-                    FarmTask(
-                        task_type="FARM",
-                        desc="给未浇水的作物浇水",
-                        farm_action="WATER",
-                        target_loc="Farm",
-                        seed_name="Parsnip Seeds",
-                        count=1,
-                    ),
-                ]
+                return TASK_MOCK_DATA["FARM_P0_1"]
+                # return TASK_MOCK_DATA["FARM_P0_2"]
+                # return TASK_MOCK_DATA["FARM_P0_3"]
+                # return TASK_MOCK_DATA["FARM_P0_4"]
             else:
                 return []
         else:
