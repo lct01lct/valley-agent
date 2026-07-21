@@ -23,6 +23,7 @@ namespace StardewMemoryExporter
         private readonly SharedBlackboard _blackboard;
         private readonly object _moveLock = new object();
         private readonly HashSet<SButton> _heldMoveButtons = new HashSet<SButton>();
+        private volatile bool _isStopping = false;
 
         public StardewExecutor(IMonitor monitor, SharedBlackboard blackboard, IModHelper helper, int port = 8888)
         {
@@ -38,14 +39,16 @@ namespace StardewMemoryExporter
             try
             {
                 _cmdServer = new TcpListener(IPAddress.Parse("127.0.0.1"), port);
+                _cmdServer.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 _cmdServer.Start();
                 _monitor.Log($"📡 [DebugServer] TCP 命令接收服务器已在端口 {port} 启动，等待 Python 连接...", LogLevel.Info);
 
-                while (true)
+                while (!_isStopping)
                 {
                     try
                     {
                         TcpClient client = _cmdServer.AcceptTcpClient();
+                        CloseClientConnection();
                         _connectedClient = client;
                         _netStream = client.GetStream();
                         _monitor.Log("⚙️ [DebugServer] Python 控制端已连接！开始监听网络指令...", LogLevel.Info);
@@ -53,7 +56,7 @@ namespace StardewMemoryExporter
                         byte[] buffer = new byte[4096];
                         string partialData = "";
 
-                        while (_netStream != null && client.Connected)
+                        while (!_isStopping && _netStream != null && client.Connected)
                         {
                             int bytesRead = _netStream.Read(buffer, 0, buffer.Length);
                             if (bytesRead == 0) break; // 客户端优雅关闭时会返回 0
@@ -76,12 +79,47 @@ namespace StardewMemoryExporter
                         }
 
                         ClearHeldMoveButtons();
-                        _monitor.Log("🔌 [DebugServer] Python 控制端已优雅断开连接。", LogLevel.Warn);
+                        CloseClientConnection();
+                        if (!_isStopping)
+                        {
+                            _monitor.Log("🔌 [DebugServer] Python 控制端已优雅断开连接。", LogLevel.Warn);
+                        }
+                    }
+                    catch (SocketException clientEx)
+                    {
+                        ClearHeldMoveButtons();
+                        CloseClientConnection();
+                        if (_isStopping)
+                        {
+                            _monitor.Log("🛑 [DebugServer] TCP 命令服务器已停止监听。", LogLevel.Trace);
+                            break;
+                        }
+
+                        _monitor.Log($"🔌 [DebugServer] Python 客户端 Socket 异常断开 ({clientEx.Message})，正在等待下次连入...", LogLevel.Warn);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        ClearHeldMoveButtons();
+                        CloseClientConnection();
+                        if (_isStopping)
+                        {
+                            _monitor.Log("🛑 [DebugServer] TCP 命令服务器资源已释放。", LogLevel.Trace);
+                            break;
+                        }
+
+                        _monitor.Log("🔌 [DebugServer] Python 客户端连接资源被意外释放，正在等待下次连入...", LogLevel.Warn);
                     }
                     catch (Exception clientEx)
                     {
                         ClearHeldMoveButtons();
-                        _monitor.Log($"🔌 [DebugServer] Python 客户端异常断开 ({clientEx.Message})，正在重置服务器以等待下次连入...", LogLevel.Warn);
+                        CloseClientConnection();
+                        if (_isStopping)
+                        {
+                            _monitor.Log("🛑 [DebugServer] TCP 命令服务器已随游戏退出。", LogLevel.Trace);
+                            break;
+                        }
+
+                        _monitor.Log($"🔌 [DebugServer] Python 客户端异常断开 ({clientEx.Message})，正在等待下次连入...", LogLevel.Warn);
                     }
                     // finally
                     // {
@@ -94,6 +132,12 @@ namespace StardewMemoryExporter
             }
             catch (Exception rootEx)
             {
+                if (_isStopping)
+                {
+                    _monitor.Log("🛑 [DebugServer] TCP 命令服务器已随游戏退出。", LogLevel.Trace);
+                    return;
+                }
+
                 // 如果连本地 127.0.0.1 端口都监听失败（比如端口被别的软件抢了），才会执行到这里
                 _monitor.Log($"❌ [DebugServer] 发生致命根级崩溃，服务彻底无法启动: {rootEx.Message}", LogLevel.Error);
                 CleanUp();
@@ -432,9 +476,44 @@ namespace StardewMemoryExporter
 
         public void CleanUp()
         {
+            _isStopping = true;
             ClearHeldMoveButtons();
-            try { _netStream?.Close(); _connectedClient?.Close(); _cmdServer?.Stop(); } catch { }
-            _netStream = null; _connectedClient = null;
+            CloseClientConnection();
+
+            try
+            {
+                _cmdServer?.Stop();
+            }
+            catch (Exception ex)
+            {
+                _monitor.Log($"⚠️ [DebugServer] 停止 TCP 命令监听器时发生异常，已忽略: {ex.Message}", LogLevel.Trace);
+            }
+
+            _cmdServer = null;
+        }
+
+        private void CloseClientConnection()
+        {
+            try
+            {
+                _netStream?.Close();
+            }
+            catch (Exception ex)
+            {
+                _monitor.Log($"⚠️ [DebugServer] 关闭命令数据流时发生异常，已忽略: {ex.Message}", LogLevel.Trace);
+            }
+
+            try
+            {
+                _connectedClient?.Close();
+            }
+            catch (Exception ex)
+            {
+                _monitor.Log($"⚠️ [DebugServer] 关闭命令客户端时发生异常，已忽略: {ex.Message}", LogLevel.Trace);
+            }
+
+            _netStream = null;
+            _connectedClient = null;
         }
     }
 }

@@ -27,6 +27,7 @@ namespace StardewMemoryExporter
         private NetworkStream _netStream;
         private readonly object _streamLock = new object();
         private readonly IMonitor _monitor;
+        private volatile bool _isStopping = false;
 
         private string _lastCachedLocation = "";
         private readonly List<object> _cachedWarpDataList = new List<object>();
@@ -52,21 +53,51 @@ namespace StardewMemoryExporter
             try
             {
                 _server = new TcpListener(IPAddress.Parse("127.0.0.1"), port);
+                _server.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 _server.Start();
-                while (true)
+                while (!_isStopping)
                 {
-                    TcpClient client = _server.AcceptTcpClient();
-                    lock (_streamLock)
+                    try
                     {
-                        CleanUp();
-                        _connectedClient = client;
-                        _netStream = client.GetStream();
+                        TcpClient client = _server.AcceptTcpClient();
+                        lock (_streamLock)
+                        {
+                            CloseClientConnection();
+                            _connectedClient = client;
+                            _netStream = client.GetStream();
+                        }
+                        _monitor.Log("📡 [StardewObserver] Python 大脑已成功连入场景雷达数据流！", LogLevel.Info);
                     }
-                    _monitor.Log("📡 [StardewObserver] Python 大脑已成功连入场景雷达数据流！", LogLevel.Info);
+                    catch (SocketException ex)
+                    {
+                        if (_isStopping)
+                        {
+                            _monitor.Log("🛑 [StardewObserver] 雷达服务器已停止监听。", LogLevel.Trace);
+                            break;
+                        }
+
+                        _monitor.Log($"❌ [StardewObserver] 雷达服务器 Socket 异常: {ex.Message}", LogLevel.Error);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        if (_isStopping)
+                        {
+                            _monitor.Log("🛑 [StardewObserver] 雷达服务器资源已释放。", LogLevel.Trace);
+                            break;
+                        }
+
+                        _monitor.Log("❌ [StardewObserver] 雷达服务器监听器被意外释放。", LogLevel.Error);
+                    }
                 }
             }
             catch (Exception ex)
             {
+                if (_isStopping)
+                {
+                    _monitor.Log("🛑 [StardewObserver] 雷达服务器已随游戏退出。", LogLevel.Trace);
+                    return;
+                }
+
                 _monitor.Log($"❌ [StardewObserver] 雷达服务器崩溃: {ex.Message}", LogLevel.Error);
             }
         }
@@ -763,8 +794,43 @@ namespace StardewMemoryExporter
 
         public void CleanUp()
         {
-            try { _netStream?.Close(); _connectedClient?.Close(); } catch { }
-            _netStream = null; _connectedClient = null;
+            _isStopping = true;
+            CloseClientConnection();
+
+            try
+            {
+                _server?.Stop();
+            }
+            catch (Exception ex)
+            {
+                _monitor.Log($"⚠️ [StardewObserver] 停止雷达监听器时发生异常，已忽略: {ex.Message}", LogLevel.Trace);
+            }
+
+            _server = null;
+        }
+
+        private void CloseClientConnection()
+        {
+            try
+            {
+                _netStream?.Close();
+            }
+            catch (Exception ex)
+            {
+                _monitor.Log($"⚠️ [StardewObserver] 关闭雷达数据流时发生异常，已忽略: {ex.Message}", LogLevel.Trace);
+            }
+
+            try
+            {
+                _connectedClient?.Close();
+            }
+            catch (Exception ex)
+            {
+                _monitor.Log($"⚠️ [StardewObserver] 关闭雷达客户端时发生异常，已忽略: {ex.Message}", LogLevel.Trace);
+            }
+
+            _netStream = null;
+            _connectedClient = null;
         }
     }
 }
