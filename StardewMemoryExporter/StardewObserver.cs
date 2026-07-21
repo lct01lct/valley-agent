@@ -187,9 +187,13 @@ namespace StardewMemoryExporter
                     map_size = new[] { mapWidth, mapHeight },
                     CurrentToolIndex = player.CurrentToolIndex,
                     CurrentToolbarIndex = player.CurrentToolIndex / 12,
+                    UsingTool = player.UsingTool,
+                    CanMove = player.CanMove,
+                    IsPlayerFree = Context.IsPlayerFree,
+                    CanPlayerMove = Context.CanPlayerMove,
                     Items = CreateItemsSnapshot(player),
                     ToolTarget = CreateToolTargetSnapshot(player),
-                    FarmTiles = CreateFarmTilesSnapshot(location),
+                    FarmTiles = CreateFarmTilesSnapshot(location, player),
                     warps = _cachedWarpDataList,
                     obstacles = obstacles.ToList(),
                 };
@@ -373,40 +377,142 @@ namespace StardewMemoryExporter
             };
         }
 
-        private List<object> CreateFarmTilesSnapshot(GameLocation location)
+        private List<object> CreateFarmTilesSnapshot(GameLocation location, Farmer player)
         {
             var farmTiles = new List<object>();
+            int playerTileX = (int)player.TilePoint.X;
+            int playerTileY = (int)player.TilePoint.Y;
+            int mapWidth = location.map.Layers[0].LayerWidth;
+            int mapHeight = location.map.Layers[0].LayerHeight;
 
-            foreach (var pair in location.terrainFeatures.Pairs)
+            int startX = Math.Max(0, playerTileX - ObstacleScanRange);
+            int endX = Math.Min(mapWidth, playerTileX + ObstacleScanRange);
+            int startY = Math.Max(0, playerTileY - ObstacleScanRange);
+            int endY = Math.Min(mapHeight, playerTileY + ObstacleScanRange);
+
+            for (int x = startX; x < endX; x++)
             {
-                Vector2 tile = pair.Key;
-                TerrainFeature feature = pair.Value;
-
-                if (feature is not HoeDirt hoeDirt) continue;
-
-                var crop = hoeDirt.crop;
-                bool hasCrop = crop != null;
-
-                farmTiles.Add(new
+                for (int y = startY; y < endY; y++)
                 {
-                    Tile = new[] { (int)tile.X, (int)tile.Y },
-                    TerrainFeatureType = "HoeDirt",
-                    State = hoeDirt.state.Value,
-                    // HoeDirt.state == 1 表示当前耕地已浇水；这里导出派生字段，方便 Python 端直接验证动作结果。
-                    IsWatered = hoeDirt.state.Value == 1,
-                    HasCrop = hasCrop,
-                    Crop = hasCrop ? new
+                    farmTiles.Add(CreateFarmTileSnapshot(location, x, y));
+                }
+            }
+
+            return farmTiles;
+        }
+
+        private object CreateFarmTileSnapshot(GameLocation location, int x, int y)
+        {
+            Vector2 tile = new Vector2(x, y);
+            string terrainFeatureType = "";
+            int state = 0;
+            bool isWatered = false;
+            bool hasCrop = false;
+            object cropSnapshot = null;
+
+            if (location.terrainFeatures.TryGetValue(tile, out TerrainFeature feature))
+            {
+                terrainFeatureType = feature.GetType().Name;
+
+                if (feature is HoeDirt hoeDirt)
+                {
+                    var crop = hoeDirt.crop;
+                    hasCrop = crop != null;
+                    state = hoeDirt.state.Value;
+                    isWatered = hoeDirt.state.Value == 1;
+                    cropSnapshot = hasCrop ? new
                     {
                         NetSeedIndex = crop.netSeedIndex.Value,
                         IndexOfHarvest = crop.indexOfHarvest.Value,
                         CurrentPhase = crop.currentPhase.Value,
                         Dead = crop.dead.Value,
                         ForageCrop = crop.forageCrop.Value,
-                    } : null,
-                });
+                    } : null;
+                }
             }
 
-            return farmTiles;
+            bool hasHoeDirt = terrainFeatureType == "HoeDirt";
+            string obstacleType = GetFarmTileObstacleType(location, tile);
+            bool isDiggable = location.doesTileHaveProperty(x, y, "Diggable", "Back") != null;
+            bool hasNoSpawn = location.doesTileHaveProperty(x, y, "NoSpawn", "Back") != null;
+            bool isPassable = location.isTilePassable(new xTile.Dimensions.Location(x, y), Game1.viewport);
+            bool hasBlockingObstacle = !string.IsNullOrEmpty(obstacleType);
+
+            return new
+            {
+                Tile = new[] { x, y },
+                TerrainFeatureType = terrainFeatureType,
+                State = state,
+                // HoeDirt.state == 1 表示当前耕地已浇水；这里导出派生字段，方便 Python 端直接验证动作结果。
+                IsWatered = isWatered,
+                HasCrop = hasCrop,
+                Crop = cropSnapshot,
+                // 以下是 Python FarmNode 做 P1 批处理规划所需的派生能力字段。
+                // CanHoe 表示“当前这一帧无需先清障即可直接锄地”；清障后会在新快照中重新计算。
+                CanHoe = isDiggable && !hasNoSpawn && !hasHoeDirt && isPassable && !hasBlockingObstacle,
+                CanPlant = hasHoeDirt && !hasCrop,
+                HasHoeDirt = hasHoeDirt,
+                ObstacleType = obstacleType,
+                IsDiggable = isDiggable,
+                HasNoSpawn = hasNoSpawn,
+                IsPassable = isPassable,
+            };
+        }
+
+        private string GetFarmTileObstacleType(GameLocation location, Vector2 tile)
+        {
+            int x = (int)tile.X;
+            int y = (int)tile.Y;
+
+            if (location is Farm farm)
+            {
+                foreach (var building in farm.buildings)
+                {
+                    if (building != null && IsTileBlockedByBuilding(building, tile))
+                    {
+                        return "Wall";
+                    }
+                }
+            }
+
+            if (!location.isTilePassable(new xTile.Dimensions.Location(x, y), Game1.viewport))
+            {
+                return "Wall";
+            }
+
+            if (location.Objects.TryGetValue(tile, out StardewValley.Object obj) && obj != null)
+            {
+                if (obj.ParentSheetIndex == 590 || (obj.Name != null && obj.Name.Contains("Artifact Spot")))
+                    return "Worm";
+                if (obj.Name != null && obj.Name.Contains("Stone"))
+                    return "Stone";
+                if (obj.Name != null && obj.Name.Contains("Weeds"))
+                    return "Weeds";
+                if (obj.Name != null && obj.Name.Contains("Twig"))
+                    return "Twig";
+                return "Object";
+            }
+
+            if (location.terrainFeatures.TryGetValue(tile, out TerrainFeature feature))
+            {
+                if (feature is HoeDirt)
+                    return "";
+                if (feature is Tree ordinaryTree)
+                    return $"Tree{Math.Min(ordinaryTree.growthStage.Value, 5)}";
+                if (feature is FruitTree fruitTree)
+                    return $"FruitTree{Math.Min(fruitTree.growthStage.Value, 5)}";
+                if (feature is Grass)
+                    return "Grass";
+                return "Object";
+            }
+
+            var furnitureObj = location.GetFurnitureAt(tile);
+            if (furnitureObj != null)
+            {
+                return furnitureObj.Name != null && furnitureObj.Name.Contains("rug") ? "Rug" : "Object";
+            }
+
+            return "";
         }
 
         // private string GetObstacleTypeAtTile(GameLocation location, Farmer player, int x, int y)

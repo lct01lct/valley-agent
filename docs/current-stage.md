@@ -1,12 +1,12 @@
-# 当前阶段：智能寻路 MVP
+# 当前阶段：智能寻路 MVP + Farm P1 基础闭环
 
-更新时间：2026-07-20
+更新时间：2026-07-21
 
 本文记录当前阶段目标、进度、已知缺口、验收标准和开发顺序。这里的内容会比 `AGENTS.md` 更频繁变化；稳定架构约束仍以 `AGENTS.md` 为准。
 
 ## 阶段目标
 
-第一阶段只聚焦完成寻路模块。使用 `LLM_Node` 返回的模拟 `RouteTask` 计划跑通完整闭环，暂不要求真实 LLM 生成可用计划。
+第一阶段主线仍是完成寻路模块。使用 `LLM_Node` 返回的模拟任务计划跑通完整闭环，暂不要求真实 LLM 生成可用计划。
 
 本阶段的“智能寻路”不只是从起点走到终点，而是包括：
 
@@ -18,7 +18,7 @@
 6. 仅在游戏状态确认到达目标地点后完成 `RouteTask`。
 7. 遇到无路、工具缺失、体力不足、动作超时或门无法打开时安全停止，并暴露可恢复的失败原因。
 
-第一阶段完成前，不要把主要精力扩展到购买、种田或完整日程规划。可以为后续能力保留结构，但当前开发和测试应优先服务寻路闭环。
+在寻路闭环基础上，当前已经开始 Farm P1 基础能力：规划一片区域，按批处理阶段完成清障、锄地、播种和浇水。Farm 仍服务于“确定性技能执行”这条主线，不应扩展成完整农场日程规划。
 
 ## 当前运行模型
 
@@ -57,6 +57,10 @@ Selector
 - `require_switch_tool`
 - `require_clear_obstacle`
 - `required_tool`
+- `required_tool_owner`
+- `clear_obstacle_owner`
+- `clear_obstacle_tile`
+- `clear_obstacle_type`
 
 ## 当前寻路与移动模型
 
@@ -93,6 +97,47 @@ Selector
 
 FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并把作物上下左右相邻格作为 `candidate_stand_tiles`、作物地块作为 `tool_target_tile`。后续箱子、树、NPC、商店柜台、门和清障都应优先复用这套模型，而不是在节点内部重复维护路径缓存和转向逻辑。
 
+## 当前工具动作等待模型
+
+使用工具是跨帧动作，必须区别三种状态：
+
+1. C# Executor 接受命令：例如 `USE_TOOL` 返回 `SUCCESS`，只表示命令被发出。
+2. 游戏动画进行中：SMAPI state 中 `UsingTool=True` 或 `CanMove=False`。
+3. 工具动作已收招：上一轮动作观察到 `UsingTool=True` 后，又看到 `UsingTool=False` 且 `CanMove=True`。
+
+当前 C# Observer 已同步 `UsingTool`、`CanMove`、`IsPlayerFree` 和 `CanPlayerMove`。C# Executor 在玩家忙碌时会对移动、转向、切工具、使用工具/物品返回 `BUSY`，避免 Python 在动画期间叠加输入。
+
+Python 端原则：
+
+- `ClearObstacleNode` 和 `FarmNode` 使用 `ToolActionTracker` 等待工具动作从开始到收招。
+- C# 返回 `BUSY` 时，不增加尝试次数，不启动工具等待，保持节点 `RUNNING`。
+- 工具收招后必须用最新 state 验证结果，例如障碍是否消失、地块是否成为 HoeDirt、作物是否 `IsWatered=True`。
+- Farm P1 的 `WATER_TILES` 阶段把临时失败地块放入浇水重试队列。只要地块仍然 `HasCrop=True` 且 `IsWatered=False`，就不应因为一次站位卡顿或动作未命中直接永久跳过。
+- 锄地、播种和清障阶段仍需要有限重试与明确失败原因，避免无限循环。
+
+## 当前 Farm P1 模型
+
+`FarmNode` 当前支持：
+
+- `WATER`：自动选择未浇水作物，或按 `target_tiles` 给指定地块浇水。
+- `PLANT`：规划区域后批量清障、锄地、播种。
+- `PLANT_AND_WATER`：规划区域后批量清障、锄地、播种，最后批量浇水。
+
+批处理阶段顺序：
+
+```text
+CLEAR_OBSTACLES -> HOE_TILES -> PLANT_SEEDS -> WATER_TILES -> DONE
+```
+
+当前障碍策略：
+
+- `Tree`、`FruitTree`、`TreeStump`：跳过该格，不纳入种植。
+- `Grass`：使用 `Scythe`。
+- `Weeds` / `Twig`：使用 `Axe`。
+- `Stone`：使用 `Pickaxe`。
+
+Farm 分支复用黑板中的工具切换和清障信号，通过 `required_tool_owner="Farm"` 和 `clear_obstacle_owner="Farm"` 区分调用来源。浇水阶段会维护 `_failed_water_tiles`、重试次数和重试时间，避免临时失败导致提前结束。
+
 ## 当前进度
 
 | 能力 | 状态 | 当前说明 |
@@ -103,11 +148,13 @@ FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并�
 | 局部 A* | 已有基础 | 支持格子路径、硬障碍、目标 Warp 和可破坏障碍代价；已限制斜向清障路径 |
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
+| 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
 | 破坏障碍物 | 基础接入 | A* 可标记 Stone、Twig、Weeds；RouteNode 触发清障，SwitchToolNode 切工具，ClearObstacleNode 使用工具并验证障碍消失 |
-| Farm 浇水 | 基础接入 | FarmNode 可选择未浇水作物，复用 PositioningController 站到相邻格、对准 ToolTarget 后使用水壶 |
+| Farm 浇水 | 基础接入 | FarmNode 可选择未浇水作物，复用 PositioningController 站到相邻格、对准 ToolTarget 后使用水壶；P1 浇水阶段已有临时失败重试队列 |
+| Farm P1 批处理 | 开发中 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线，仍需更多游戏内测试和失败恢复 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
@@ -120,16 +167,19 @@ FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并�
 - 本地 A* 支持格子路径、动态路径过期检测、偏航检测和重新计算。
 - RouteNode 已缓存 `tile_path` 和 `path_index`，并通过 MoveController 做局部跟随。
 - PositioningController 已抽象交互站位，FarmNode 已接入候选站位和工具目标地块模型。
+- ToolActionTracker 已接入 ClearObstacleNode 和 FarmNode，用于等待工具动作收招。
 - C# Executor 已支持保持最后移动方向，改善低频命令下的蠕动问题。
 - RouteNode 失败路径已开始显式发送 `IDLE`，避免绝路后继续沿旧方向移动。
 - Route/OpenDoor/SwitchTool/ClearObstacle 之间已有黑板标志协作。
 - C# Executor 已支持基础移动、开门、关闭对话、切换工具和使用工具。
+- C# Observer 已同步 `UsingTool`、`CanMove`、`IsPlayerFree` 和 `CanPlayerMove`，用于判断工具动画与玩家控制权。
 
 ## 当前缺口
 
 - `ValleyAgent.invoke(task)` 保存了原始任务，但尚未稳定注入 Planner Prompt；第一阶段可继续使用 mock 计划。
 - `SwitchToolNode` 已有基础切工具流程，但仍需要更多游戏内验证和异常恢复策略。
 - `ClearObstacleNode` 已能验证当前工具并使用工具，但体力检查、工具等级、背包掉落容量和失败恢复仍需完善。
+- 工具动作等待已经接入，但仍需要更多真实场景验证：不同工具、不同动画长度、体力耗尽、命中失败和背包拾取等状态都可能影响结果判断。
 - `PositioningController` 目前已接入 FarmNode；清障、箱子、NPC、商店柜台等交互还需要逐步迁移到同一模型。
 - 树木、TreeStump 等需要工具等级或长动作的障碍暂不纳入可清障目标。
 - `OpenDoorNode` 仍有异步路径使用 `time.sleep()`、结果验证不足等问题。
@@ -137,6 +187,7 @@ FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并�
 - Python 端当前仍会每 tick 重发当前移动方向；未来可优化为仅在方向变化、IDLE 或交互动作时发送，但必须保证安全停机语义不变。
 - 高层场景连通图仍是硬编码数据，建筑入口和特殊路线需要持续校验；错误边会导致在当前场景查找不存在的目标 warp。
 - SMAPI 快照仍缺少完成自主游玩需要的时间、金钱、体力、工具栏、背包、菜单、天气、NPC 和动作结果等状态。
+- Farm P1 目前还是基础闭环，缺少区域选择策略、种子数量/水壶水量/体力检查、作物阶段识别、失败后的二次规划和完整验收测试。
 - Python 动作枚举比 C# Executor 实际支持的动作更多，两侧能力尚未完全对齐。
 - `server/valley_server.py` 仍含旧 demo 逻辑，不要继续在 demo 路径上扩展正式能力。
 
@@ -146,10 +197,12 @@ FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并�
 2. 继续校验硬编码场景连通图和 warp 目标名称，避免错误跨场景边导致目标 warp 不存在。
 3. 继续验证 A* 障碍代价函数，区分不可通行、可绕行和可破坏障碍，并保持“不允许斜向清障”的路径约束。
 4. 完善 `SwitchToolNode` 和 `ClearObstacleNode` 的游戏内验证、体力检查、工具等级和失败恢复。
-5. 将清障、开门和后续箱子/NPC/商店柜台等交互逐步迁移到 `PositioningController` 的候选站位 + 工具目标地块模型。
-6. 强化玩家朝向、清障动作、超时与障碍消失验证。
-7. 完善 `OpenDoorNode` 的非阻塞状态机和门结果验证。
-8. 增加确定性寻路场景测试与游戏内端到端验收。
+5. 继续验证工具动作等待机制，确保 `UsingTool` / `CanMove` 和 state 结果验证足以覆盖清障、锄地、浇水。
+6. 将清障、开门和后续箱子/NPC/商店柜台等交互逐步迁移到 `PositioningController` 的候选站位 + 工具目标地块模型。
+7. 强化玩家朝向、清障动作、超时与障碍消失验证。
+8. 完善 Farm P1 的区域选择、资源检查和失败恢复。
+9. 完善 `OpenDoorNode` 的非阻塞状态机和门结果验证。
+10. 增加确定性寻路/Farm 场景测试与游戏内端到端验收。
 
 ## 第一阶段验收标准
 
@@ -157,6 +210,8 @@ FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并�
 - Agent 能跨至少两个地图完成导航。
 - 固定障碍场景中，Agent 能绕开硬障碍并在动态阻塞后重新计算路径。
 - 可破坏障碍挡住必要路径时，Agent 能完成“识别障碍 -> 切换正确工具 -> 执行动作 -> 验证障碍消失 -> 继续移动”。
+- 工具动作必须通过 state 确认收招和结果变化，不能仅凭 Executor 返回 `SUCCESS` 判定完成。
+- Farm P1 测试中，规划区域内可种植地块能完成“清障 -> 锄地 -> 播种 -> 浇水”，树和 TreeStump 等不可处理地块会被明确跳过。
 - 关闭但可进入的门能被打开；打烊或上锁能产生明确失败或恢复信号。
 - 任务成功由最新 SMAPI 状态验证，不能仅以命令已发送或路径列表为空作为成功依据。
 - 绝路、目标 warp 不存在或需要兜底恢复时，必须先发送 `IDLE`，人物不能继续保持旧方向移动。
@@ -167,6 +222,8 @@ FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并�
 - 无障碍跨地图导航。
 - 路径中临时出现硬障碍，Agent 能重新规划绕行。
 - 必经路径被石头、树枝或杂草挡住，Agent 能清除后继续。
+- 规划一片 Farm 区域，包含 Grass、Weeds、Twig、Stone 和树/树桩，Agent 能跳过不可处理地块、清理可处理障碍、锄地、播种并浇水。
+- 工具动作期间连续 tick 验证：Executor 返回 `BUSY` 时 Python 不叠加新动作，动作收招后再验证结果。
 - 建筑门关闭但可进入，Agent 能开门并完成 Warp。
 - 门打烊或上锁，Agent 能停止并提供明确失败原因。
 - 完成连续多个 `RouteTask`，并由最终地点状态确认成功。

@@ -233,8 +233,10 @@ class RouteNode(BTNode):
                         context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
                         blackboard.require_switch_tool = required_tool is not None
                         blackboard.is_switching_tool = required_tool is not None
+                        blackboard.required_tool_owner = "Route" if required_tool is not None else None
                         blackboard.required_tool = required_tool
                         blackboard.require_clear_obstacle = True
+                        blackboard.clear_obstacle_owner = "Route"
                         blackboard.clear_obstacle_tile = Tile(clear_obstacle_tile.x, clear_obstacle_tile.y)
                         blackboard.clear_obstacle_type = clear_obstacle_tile.type
 

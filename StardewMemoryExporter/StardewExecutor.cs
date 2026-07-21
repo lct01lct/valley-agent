@@ -148,6 +148,10 @@ namespace StardewMemoryExporter
                 {
                     HandleUseTool(pressedKeys);
                 }
+                else if (actionType.Equals("USE_ITEM", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
+                {
+                    HandleUseItem(pressedKeys);
+                }
                 else if (actionType.Equals("SWITCH_TOOL", StringComparison.OrdinalIgnoreCase))
                 {
                     HandleSwitchTool(pressedKeys);
@@ -185,6 +189,13 @@ namespace StardewMemoryExporter
 
         private void HandleMove(List<string> pressedKeys)
         {
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                ClearHeldMoveButtons();
+                SendResponseToPython("BUSY");
+                return;
+            }
+
             string directionSummary = "";
             if (pressedKeys.Contains("w")) directionSummary += "[上(W)] ";
             if (pressedKeys.Contains("s")) directionSummary += "[下(S)] ";
@@ -215,6 +226,11 @@ namespace StardewMemoryExporter
         private void HandleFaceDirection(List<string> pressedKeys)
         {
             ClearHeldMoveButtons();
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                SendResponseToPython("BUSY");
+                return;
+            }
 
             int? facingDirection = GetFacingDirection(pressedKeys);
             if (facingDirection is null)
@@ -258,7 +274,27 @@ namespace StardewMemoryExporter
         private void HandleUseTool(List<string> pressedKeys)
         {
             ClearHeldMoveButtons();
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                SendResponseToPython("BUSY");
+                return;
+            }
+
             _helper.Input.Press(SButton.C);
+            SendResponseToPython("SUCCESS");
+            return;
+        }
+
+        private void HandleUseItem(List<string> pressedKeys)
+        {
+            ClearHeldMoveButtons();
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                SendResponseToPython("BUSY");
+                return;
+            }
+
+            _helper.Input.Press(SButton.X);
             SendResponseToPython("SUCCESS");
             return;
         }
@@ -266,6 +302,11 @@ namespace StardewMemoryExporter
         private void HandleSwitchTool(List<string> pressedKeys)
         {
             ClearHeldMoveButtons();
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                SendResponseToPython("BUSY");
+                return;
+            }
 
             bool hasValidKey = false;
             foreach (string keyStr in pressedKeys)
@@ -279,6 +320,13 @@ namespace StardewMemoryExporter
 
             SendResponseToPython(hasValidKey ? "SUCCESS" : "FAILURE");
             return;
+        }
+
+        private bool IsPlayerBusyForImmediateCommand()
+        {
+            Farmer player = Game1.player;
+            if (player == null) return true;
+            return player.UsingTool || !player.CanMove;
         }
 
         private SButton? GetMoveButton(string direction)

@@ -15,6 +15,8 @@ from server.type import Position, Tile
 sys.path.append("agent")
 from agent.action.location.location import Location
 
+COMMAND_RESPONSE_TIMEOUT_SECONDS = 1.5
+
 
 class WarpZone:
     def __init__(
@@ -74,6 +76,13 @@ class FarmTileState:
         self.is_watered: bool = bool(raw_farm_tile.get("IsWatered", False))
         self.raw_has_crop = raw_farm_tile.get("HasCrop")
         self.has_crop: bool = bool(raw_farm_tile.get("HasCrop", False))
+        self.can_hoe: bool = bool(raw_farm_tile.get("CanHoe", False))
+        self.can_plant: bool = bool(raw_farm_tile.get("CanPlant", self.terrain_feature_type == "HoeDirt" and not self.has_crop))
+        self.has_hoe_dirt: bool = bool(raw_farm_tile.get("HasHoeDirt", self.terrain_feature_type == "HoeDirt"))
+        self.obstacle_type: str = raw_farm_tile.get("ObstacleType", "")
+        self.is_diggable: bool = bool(raw_farm_tile.get("IsDiggable", False))
+        self.has_no_spawn: bool = bool(raw_farm_tile.get("HasNoSpawn", False))
+        self.is_passable: bool = bool(raw_farm_tile.get("IsPassable", False))
 
         raw_crop = raw_farm_tile.get("Crop")
         self.has_crop_payload: bool = isinstance(raw_crop, dict)
@@ -118,6 +127,11 @@ class StardewState:
         tile_coord = raw_json_data.get("tile_coordinate", [0, 0])
         self.player_tile = Tile(tile_coord[0], tile_coord[1])
         self.player_size = (48, 32)
+        # 以下字段名直接来自 SMAPI / Stardew Valley 状态协议，读取时必须保持原始大小写。
+        self.using_tool: bool = bool(raw_json_data.get("UsingTool", False))
+        self.can_move: bool = bool(raw_json_data.get("CanMove", True))
+        self.is_player_free: bool = bool(raw_json_data.get("IsPlayerFree", True))
+        self.can_player_move: bool = bool(raw_json_data.get("CanPlayerMove", self.can_move))
         self.inventory = InventoryState(
             {
                 "CurrentToolIndex": raw_json_data.get("CurrentToolIndex", -1),
@@ -338,6 +352,7 @@ class StardewExecutorClient:
 
         try:
             raw_packet = command.model_dump_json() + "\n"
+            self.client_socket.settimeout(COMMAND_RESPONSE_TIMEOUT_SECONDS)
             self.client_socket.sendall(raw_packet.encode("utf-8"))
 
             response_buffer = ""
@@ -348,6 +363,15 @@ class StardewExecutorClient:
                 response_buffer += chunk
 
             return response_buffer.strip()
+
+        except socket.timeout:
+            print(f"❌ [StardewExecutorClient] 等待 C# 动作响应超时: action={command.action}")
+            try:
+                self.client_socket.close()
+            except socket.error:
+                pass
+            self.client_socket = None
+            return "TIMEOUT"
 
         except (socket.error, BrokenPipeError):
             print("❌ [StardewExecutorClient] 与游戏的动作控制连接断开！正在尝试重新恢复链路...")

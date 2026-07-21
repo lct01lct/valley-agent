@@ -21,11 +21,13 @@ class AgentBlackboard:
 
         # 清理可破坏障碍物
         self.require_clear_obstacle = False
+        self.clear_obstacle_owner: str | None = None
         self.clear_obstacle_tile: Tile | None = None
         self.clear_obstacle_type: str | None = None
         self.failed_clear_obstacles: set[tuple[int, int]] = set()
 
         # 切换工具
         self.require_switch_tool = False
+        self.required_tool_owner: str | None = None
         self.is_switching_tool = False
         self.required_tool: str | None = None

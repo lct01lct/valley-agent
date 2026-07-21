@@ -17,7 +17,7 @@
 - 行为树负责实时控制、安全检查、节点轮询、执行顺序、超时、重试和状态验证。
 - AI 模型负责高层意图理解、宏观计划生成和失败后的恢复建议。
 - SMAPI 提供结构化游戏状态和动作执行能力。
-- A*、交互节点和后续技能负责确定性执行；不要让 LLM 直接参与每帧按键控制。
+- A\*、交互节点和后续技能负责确定性执行；不要让 LLM 直接参与每帧按键控制。
 
 ## 稳定架构约定
 
@@ -55,7 +55,7 @@ Selector
 - `OpenDoorNode`：处理 RouteNode 发现的不可直接通行门，发送开门/关闭对话命令并暴露失败原因。
 - `SwitchToolNode`：根据 `context.state` 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items` 切换到清障所需工具。
 - `ClearObstacleNode`：在玩家位于障碍物上下左右相邻格时使用当前工具清理 Stone、Twig、Weeds，并验证障碍消失。
-- `RouteNode`：选择跨场景路线、缓存 tile path、触发 A*、驱动 MoveController、发现门/清障需求并写入 blackboard。
+- `RouteNode`：选择跨场景路线、缓存 tile path、触发 A\*、驱动 MoveController、发现门/清障需求并写入 blackboard。
 
 `Farm` 分支内部当前由 `FarmNode` 消费农业任务。FarmNode 不直接实现底层路径推进，而是求解农业交互所需的候选站位和工具目标地块，再交给动作层的 `PositioningController` 完成站位和转向。
 
@@ -104,7 +104,7 @@ Selector
 - 到达路径末端时才允许更严格地验证身体盒是否进入目标 tile。
 - 不在推进 tile 时插入额外 `IDLE` 帧。
 
-未来障碍触发重规划时，优先使用后台 A*：旧路径仍可继续执行，只有障碍已经非常近时才停下等待新路径。后台路径切换前必须对齐当前玩家位置，避免切换到过期路径导致回头。
+未来障碍触发重规划时，优先使用后台 A\*：旧路径仍可继续执行，只有障碍已经非常近时才停下等待新路径。后台路径切换前必须对齐当前玩家位置，避免切换到过期路径导致回头。
 
 ### 交互站位是候选站位 + 工具目标
 
@@ -116,6 +116,25 @@ Selector
 动作层 `PositioningController` 负责从候选站位中选择可达站位、缓存站位路径、调用 `MoveController` 连续移动，并在到达后发送 `FACE_DIRECTION` 原地转向，直到 `state.tool_target.tile` 等于 `tool_target_tile`。业务节点只负责根据自身目标求解这两个输入，不应重复维护 `_tile_path`、`path_index` 或自行用 MOVE 命令模拟转向。
 
 `MOVE_*` 表示 C# 端持续移动方向；转向必须使用 `FACE_DIRECTION`，不要用 `MOVE_*` 当作单帧转向脉冲。
+
+### 工具动作必须等待收招并验证结果
+
+使用工具是跨帧动作，不是单帧命令。`USE_TOOL` 或 `USE_ITEM` 返回 `SUCCESS` 只表示 C# Executor 接受并发出了命令，不代表游戏内结果已经发生。
+
+SMAPI Observer 需要持续导出并同步以下状态：
+
+- `UsingTool`：玩家当前是否正在使用工具。
+- `CanMove`：玩家当前是否可以移动。
+- `IsPlayerFree` / `CanPlayerMove`：SMAPI 上下文中的玩家自由状态，可作为辅助判断。
+
+行为树节点应遵守：
+
+- 发出挥斧、挥镐、锄地、浇水等 `USE_TOOL` 后，使用 `ToolActionTracker` 或等价跨帧状态机等待 `UsingTool=True` 被观察到，随后等待 `UsingTool=False` 且 `CanMove=True`。
+- 只有工具动作收招后，才根据最新 `context.state` 验证结果，例如障碍消失、HoeDirt 出现、作物已浇水。
+- C# Executor 返回 `BUSY` 时，Python 端不得增加动作尝试次数，也不得开启工具动作等待；应保持当前节点 `RUNNING` 并等待下一帧。
+- 当 `UsingTool=True` 或 `CanMove=False` 且本节点没有正在追踪的动作时，节点应暂停推进，避免在上一轮动作未释放控制权时叠加新命令。
+- 动作失败应区分永久失败和临时失败。Farm P1 浇水阶段的站位卡顿、动作未命中或短暂时序问题应进入浇水重试队列；锄地、播种、清障等阶段只有在明确不可执行或重试耗尽时才标记地块失败。
+- 不要使用 `time.sleep()` 等待工具动画；应通过每 tick 的状态变化判断或使用非阻塞状态机。
 
 ## Codex 必须显式读取的项目 Skills
 
@@ -132,10 +151,11 @@ Selector
 - `agent/valley_agent.py`：创建行为树、`PlayerContext` 和 `AgentBlackboard`，运行高频 tick 循环。
 - `agent/behavior_tree/`：行为树节点、黑板、玩家上下文、规划兜底和寻路控制。
 - `agent/action/map/map.py`：`HardcodedStardewMap`，维护硬编码场景连通图和最少场景跳数候选路线枚举。
-- `agent/action/valley_action/AStar.py`：本地 A* 寻路、路线动作标注和障碍代价函数。
+- `agent/action/valley_action/AStar.py`：本地 A\* 寻路、路线动作标注和障碍代价函数。
 - `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。
 - `agent/action/valley_action/positioning_controller.py`：通用交互站位控制，输入候选站位和工具目标地块，输出移动、转向或 READY 状态。
 - `agent/action/valley_action/tool_targeting.py`：工具目标判断、`FACE_DIRECTION` 转向命令和 ToolTarget 日志格式化。
+- `agent/behavior_tree/tool_action_tracker.py`：跨帧跟踪工具动作开始、收招和超时，供清障、锄地、浇水等节点复用。
 - `server/valley_server.py`：Python 侧 SMAPI Observer/Executor TCP 客户端和状态解析。
 - `StardewMemoryExporter/`：SMAPI Mod，导出结构化状态并执行移动、开门、关闭对话和使用工具等命令。
 - `skills/`：项目内 Codex Skills。若 Codex 无法自动发现，必须通过本文件显式说明。
@@ -150,9 +170,10 @@ Selector
 - 寻路需要区分硬障碍、可绕行障碍、可破坏障碍和交互式门。
 - 清障必须验证工具可用、玩家位于上下左右相邻格、朝向正确，并在动作后从新状态确认障碍已经消失；当前不允许斜向破坏障碍物。
 - 工具切换应优先读取 SMAPI state 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items`，不要在 Python 端硬猜当前工具。
-- 不重复实现寻路或动作逻辑；共享行为下沉到 A*、动作层或复用节点。
+- 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
+- 不重复实现寻路或动作逻辑；共享行为下沉到 A\*、动作层或复用节点。
 - 交互类节点应优先复用 `PositioningController` 做站位与转向；节点只求解候选站位和工具目标地块，不在节点内部重复维护路径缓存。
-- 不让 A* 每帧重算；优先维护 RouteNode 的路径缓存、path_index 推进和 MoveController 局部跟随。
+- 不让 A\* 每帧重算；优先维护 RouteNode 的路径缓存、path_index 推进和 MoveController 局部跟随。
 - 不把 C# Executor 的 MOVE 当成单帧脉冲；它会保持最后方向，失败和交互前必须显式 `IDLE`。
 - 需要原地转向时使用 `StardewAction.FACE_DIRECTION`，不要发送 `MOVE_*` 伪装转向。
 - Planner 输出和 Action Result 使用结构化数据，避免自由文本协议。
@@ -186,7 +207,7 @@ rg "class |def |async def" agent server StardewMemoryExporter
 当前尚无成熟自动化测试体系。根据改动范围选择最强可用验证：
 
 - 纯 Python 逻辑：编译检查和聚焦单元测试。
-- A*、代价函数和跨地图规划：使用小型确定性地图与固定障碍布局测试。
+- A\*、代价函数和跨地图规划：使用小型确定性地图与固定障碍布局测试。
 - 行为树节点：用可控黑板、状态快照和假 Executor 验证状态转换。
 - SMAPI 协议：同时验证 C# 序列化/响应和 Python 解析/超时。
 - 游戏内行为：检查 `logs/`，确认移动、清障、开门和最终地点状态真实发生。

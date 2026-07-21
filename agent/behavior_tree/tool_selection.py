@@ -8,14 +8,22 @@ TOOLBAR_KEYS: tuple[KeyType, ...] = ("1", "2", "3", "4", "5", "6", "7", "8", "9"
 
 CLEAR_OBSTACLE_REQUIRED_TOOLS: dict[str, str] = {
     "stone": "Pickaxe",
+    "Stone": "Pickaxe",
     "weeds": "Axe",
+    "Weeds": "Axe",
     "twig": "Axe",
+    "Twig": "Axe",
+    "grass": "Scythe",
+    "Grass": "Scythe",
 }
 
 TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "Axe": ("Axe",),
+    "Hoe": ("Hoe",),
     "Pickaxe": ("Pickaxe",),
+    "Scythe": ("Scythe",),
     "Watering Can": ("Watering Can",),
+    "Parsnip Seeds": ("Parsnip Seeds", "Parsnip Seed"),
 }
 
 
@@ -28,8 +36,6 @@ def get_required_tool_for_obstacle(obstacle_type: str | None) -> str | None:
 def find_tool_item(state: StardewState, required_tool: str) -> InventoryItem | None:
     aliases = TOOL_NAME_ALIASES.get(required_tool, (required_tool,))
     for item in state.inventory.items:
-        if not item.is_tool:
-            continue
         if _matches_tool_name(item.name, aliases) or _matches_tool_name(item.display_name, aliases):
             return item
         if _matches_qualified_item_id(item.qualified_item_id, aliases):

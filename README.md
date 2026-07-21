@@ -12,7 +12,7 @@ Valley Agent 是一个让 AI 自主游玩《星露谷物语》的实验项目。
 
 ## 当前阶段
 
-当前第一阶段目标是完成智能寻路 MVP，并使用 `LLM_Node` 返回的模拟 `RouteTask` 验证完整执行闭环。这里的“智能寻路”包括避障、动态重规划、破坏障碍物、开门，以及从最新游戏状态验证到达结果。
+当前第一阶段主线仍是完成智能寻路 MVP，并使用 `LLM_Node` 返回的模拟任务验证完整执行闭环。这里的“智能寻路”包括避障、动态重规划、破坏障碍物、开门，以及从最新游戏状态验证到达结果。
 
 阶段进度、已知缺口、验收标准和开发顺序见：
 
@@ -48,7 +48,7 @@ Selector
 
 1. `Defend_Node` 预留给紧急安全行为。
 2. `OpenDoorNode`、`SwitchToolNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性移动、开门和清障动作。
-3. `FarmNode` 消费农业任务，例如给未浇水作物浇水。
+3. `FarmNode` 消费农业任务，例如给未浇水作物浇水，或按批处理阶段完成清障、锄地、播种和浇水。
 4. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
 5. 新计划到达后，Selector 重新从高优先级节点扫描。
 
@@ -58,10 +58,22 @@ Selector
 
 项目将移动控制拆成两个尺度：
 
-- 长距离移动由 `RouteNode` 管理跨场景路线、A* 路径缓存和 `MoveController` 局部跟随。
+- 长距离移动由 `RouteNode` 管理跨场景路线、A\* 路径缓存和 `MoveController` 局部跟随。
 - 交互前站位由 `PositioningController` 管理。调用方输入 `candidate_stand_tiles` 和可选 `tool_target_tile`，控制器负责移动到最近可达站位，并在站好后用 `FACE_DIRECTION` 原地转向，直到 `ToolTarget` 对准目标。
 
-这个接口用于 Farm 浇水，也适合后续复用到箱子、树、NPC、商店柜台、门和清障等交互。业务节点只负责求解“可以站哪些格”和“工具目标应该是哪一格”，不重复实现 A*、路径推进或转向控制。
+这个接口用于 Farm 浇水，也适合后续复用到箱子、树、NPC、商店柜台、门和清障等交互。业务节点只负责求解“可以站哪些格”和“工具目标应该是哪一格”，不重复实现 A\*、路径推进或转向控制。
+
+## 工具动作等待机制
+
+使用工具不是瞬时动作。挥斧、挥镐、锄地和浇水都会让玩家进入工具动画，期间游戏会锁住移动。当前 SMAPI Observer 会导出 `UsingTool`、`CanMove`、`IsPlayerFree` 和 `CanPlayerMove` 等状态；Python 端节点不能只因为 `USE_TOOL` 命令返回 `SUCCESS` 就判定动作完成。
+
+当前约定是：
+
+- C# Executor 在玩家 `UsingTool=True` 或 `CanMove=False` 时会拒绝新的移动、转向、切工具、使用工具/物品等动作，并返回 `BUSY`。
+- Python 端通过 `ToolActionTracker` 观察“上一轮工具动作开始使用 -> `UsingTool` 回到 `False` 且 `CanMove=True`”的状态变化，确认工具动画已经收招。
+- `ClearObstacleNode` 和 `FarmNode` 都应在工具动作收招后，再用下一帧 state 验证结果，例如障碍是否消失、地块是否变成 HoeDirt、作物是否已浇水。
+- 如果动作结果暂时没有达成，节点进入有限重试；Farm P1 的浇水阶段会把临时失败地块放入浇水重试队列，避免因为一次站位或动画时序问题就提前结束批处理。
+- 任何交互或失败路径需要停止持续移动时，必须显式发送 `IDLE`。
 
 ## AgentBlackboard 的角色
 
@@ -149,5 +161,5 @@ GOOGLE_API_KEY=<Your_Google_API_Key>
 2. 用类型化 Plan Schema 替换模拟计划。
 3. 接入真实 LLM 进行宏观任务生成和失败恢复。
 4. 扩展时间、金钱、体力、背包、菜单、作物、天气和 NPC 状态。
-5. 实现购买、种植、浇水、收获、采集、战斗和日程管理技能。
+5. 完善种植、浇水、收获、采集、购买、战斗和日程管理技能。
 6. 建立离线回放、半实时场景和游戏内端到端 Benchmark。

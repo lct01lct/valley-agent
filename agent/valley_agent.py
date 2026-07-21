@@ -39,14 +39,16 @@ class ValleyAgent:
                     node_name="Route",
                     children=[
                         OpenDoorNode(),
-                        SwitchToolNode(),
-                        ClearObstacleNode(),
+                        SwitchToolNode(owner="Route"),
+                        ClearObstacleNode(owner="Route"),
                         RouteNode(),
                     ],
                 ),
                 Sequence(
                     node_name="Farm",
                     children=[
+                        SwitchToolNode(owner="Farm"),
+                        ClearObstacleNode(owner="Farm"),
                         FarmNode(),
                     ],
                 ),
