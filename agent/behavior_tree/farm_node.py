@@ -2,15 +2,14 @@ import time
 from typing import Literal
 
 from agent.action.location.location import Location
-from agent.action.valley_action.AStar import RouteTile, astar_solver
+from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
-from agent.action.valley_action.move_controller import MoveController
+from agent.action.valley_action.tool_targeting import format_tool_target
 from agent.base_task import BaseTask, TaskType
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.farm_debug_logger import FarmDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
-from agent.behavior_tree.tool_targeting import build_tool_target_face_command, format_tool_target, is_tool_targeting
 from agent.behavior_tree.tool_selection import is_current_tool
 from server.valley_server import StardewState
 from server.type import Tile
@@ -52,10 +51,8 @@ class FarmNode(BTNode):
     """
 
     def __init__(self) -> None:
-        self.move_controller = MoveController()
+        self.positioning_controller = PositioningController()
         self._target_tile: Tile | None = None
-        self._tile_path: list[RouteTile] = []
-        self._path_index = 0
         self._started_at: float | None = None
         self._attempt_count = 0
         self._wait_ticks = 0
@@ -146,8 +143,14 @@ class FarmNode(BTNode):
             self._fail(context, blackboard, f"指定地块浇水超时: target={self._target_tile}")
             return "FAILURE"
 
-        if not self._is_player_cardinally_next_to_tile(game_state.player_tile, self._target_tile):
-            return self._move_next_to_target(game_state, context, blackboard)
+        positioning_result = self._tick_watering_positioning(game_state, context)
+        if positioning_result.status == "FAILED":
+            self._fail(context, blackboard, f"无法移动并面向浇水目标: target={self._target_tile}, reason={positioning_result.reason}")
+            return "FAILURE"
+
+        if positioning_result.status in ("MOVING", "FACING"):
+            self._wait_ticks = 0
+            return "RUNNING"
 
         self._log(
             "已处于浇水站位: "
@@ -164,19 +167,6 @@ class FarmNode(BTNode):
                 f"等待切换水壶: target={self._target_tile}, "
                 f"CurrentToolIndex={game_state.inventory.current_tool_index}, "
                 f"CurrentToolbarIndex={game_state.inventory.current_toolbar_index}"
-            )
-            return "RUNNING"
-
-        if not is_tool_targeting(game_state, self._target_tile):
-            command = build_tool_target_face_command(game_state.player_tile, self._target_tile)
-            context.executor_client.send_command(command)
-            self._has_faced_target = True
-            self._wait_ticks = 0
-            print(f"\n🧭 [FarmNode] 面向目标地块: player={game_state.player_tile}, target={self._target_tile}")
-            self._log(
-                f"发送面向命令: command={command.action}, key={command.key}, "
-                f"{self._format_watering_stance(game_state.player_tile, self._target_tile)}, "
-                f"tool_target={format_tool_target(game_state.tool_target)}"
             )
             return "RUNNING"
 
@@ -227,85 +217,55 @@ class FarmNode(BTNode):
 
         return None
 
-    def _move_next_to_target(
+    def _tick_watering_positioning(
         self,
         game_state: StardewState,
         context: PlayerContext,
-        blackboard: AgentBlackboard,
-    ) -> NodeStatus:
+    ) -> PositioningResult:
         if self._target_tile is None:
-            return "RUNNING"
+            return PositioningResult(status="FAILED", reason="缺少浇水目标")
 
-        if not self._tile_path or self._path_index >= len(self._tile_path):
-            self._tile_path = self._build_path_to_target_neighbor(game_state, self._target_tile)
-            self._path_index = 0
+        candidate_stand_tiles = self._get_cardinal_neighbor_tiles(self._target_tile)
+        result = self.positioning_controller.tick(
+            game_state,
+            PositioningGoal(candidate_stand_tiles=candidate_stand_tiles, tool_target_tile=self._target_tile),
+        )
 
-            if not self._tile_path:
-                self._fail(context, blackboard, f"无法移动到目标地块相邻格: target={self._target_tile}")
-                return "FAILURE"
+        if result.command is not None:
+            context.executor_client.send_command(result.command)
 
-            print(f"\n🧭 [FarmNode] 已规划到浇水站位路径: target={self._target_tile}, path_len={len(self._tile_path)}")
-            stand_tile = self._tile_path[-1] if self._tile_path else None
+        if result.status == "MOVING":
             self._log(
-                f"规划到浇水站位路径: target={self._target_tile}, stand_tile={stand_tile}, "
-                f"stand_is_target={stand_tile == self._target_tile if stand_tile is not None else None}, path={self._tile_path}"
+                f"发送站位移动命令: command={result.command.action if result.command else None}, "
+                f"key={result.command.key if result.command else None}, target={self._target_tile}, "
+                f"stand_tile={result.stand_tile}, player={game_state.player_tile}, reason={result.reason}"
+            )
+        elif result.status == "FACING":
+            self._has_faced_target = True
+            print(f"\n🧭 [FarmNode] 面向目标地块: player={game_state.player_tile}, target={self._target_tile}")
+            self._log(
+                f"发送工具目标转向命令: command={result.command.action if result.command else None}, "
+                f"key={result.command.key if result.command else None}, "
+                f"{self._format_watering_stance(game_state.player_tile, self._target_tile)}, "
+                f"tool_target={format_tool_target(game_state.tool_target)}"
             )
 
-        command, next_path_index, is_done = self.move_controller.get_next_move_command(
-            game_state,
-            self._tile_path,
-            self._path_index,
-        )
-        self._path_index = next_path_index
+        return result
 
-        if is_done:
-            self._tile_path = []
-            self._log(f"已到达浇水站位附近，等待下一帧确认相邻: target={self._target_tile}, player={game_state.player_tile}")
-            return "RUNNING"
-
-        context.executor_client.send_command(command)
-        self._log(
-            f"发送移动命令: command={command.action}, key={command.key}, "
-            f"target={self._target_tile}, player={game_state.player_tile}, path_index={self._path_index}/{len(self._tile_path)}"
-        )
-        return "RUNNING"
-
-    def _build_path_to_target_neighbor(self, game_state: StardewState, target_tile: Tile) -> list[RouteTile]:
-        goal_tiles = self._get_cardinal_neighbor_tiles(game_state, target_tile)
-        if not goal_tiles:
-            return []
-
-        path = astar_solver.find_path_to_warp_zone(
-            game_state,
-            RouteTile(*game_state.player_tile, type="walk"),
-            goal_tiles,
-        )
-        return path or []
-
-    def _get_cardinal_neighbor_tiles(self, game_state: StardewState, target_tile: Tile) -> set[RouteTile]:
-        map_width, map_height = game_state.map_size
-        blocked_tiles = astar_solver._get_blocked_tiles(game_state)
-        neighbor_tiles: set[RouteTile] = set()
+    def _get_cardinal_neighbor_tiles(self, target_tile: Tile) -> set[Tile]:
+        neighbor_tiles: set[Tile] = set()
 
         for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-            tile = RouteTile(target_tile.x + dx, target_tile.y + dy, type="walk")
-            if tile.x < 0 or tile.y < 0 or tile.x >= map_width or tile.y >= map_height:
-                continue
-            if tile in blocked_tiles:
-                continue
-            neighbor_tiles.add(tile)
-
+            neighbor_tiles.add(Tile(target_tile.x + dx, target_tile.y + dy))
         return neighbor_tiles
 
     def _start(self, target_tile: Tile) -> None:
         self._target_tile = target_tile
-        self._tile_path = []
-        self._path_index = 0
         self._started_at = time.time()
         self._attempt_count = 0
         self._wait_ticks = 0
         self._has_faced_target = False
-        self.move_controller.reset()
+        self.positioning_controller.reset()
         print(f"\n🟡 [FarmNode] 准备给指定地块浇水: target={target_tile}")
         self._log(f"开始处理浇水目标: target={target_tile}")
 
@@ -330,13 +290,11 @@ class FarmNode(BTNode):
 
     def _reset_target(self) -> None:
         self._target_tile = None
-        self._tile_path = []
-        self._path_index = 0
         self._started_at = None
         self._attempt_count = 0
         self._wait_ticks = 0
         self._has_faced_target = False
-        self.move_controller.reset()
+        self.positioning_controller.reset()
 
     def _reset(self) -> None:
         self._reset_target()

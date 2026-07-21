@@ -38,11 +38,13 @@ Selector
 │   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   └── RouteNode
+├── Sequence("Farm")
+│   └── FarmNode
 └── Sequence("Think")
     └── LLM_Node
 ```
 
-`Route` 分支和 `Think` 分支都是顶层 Selector 下的候选分支。`Think` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
+`Route`、`Farm` 和 `Think` 分支都是顶层 Selector 下的候选分支。`Think` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
 
 `AgentBlackboard` 是跨节点通讯和调度状态中心，当前至少保存：
 
@@ -66,12 +68,30 @@ Selector
 - A* 只在必要时执行：初始路径为空、场景变化、路径过期、未来路径阻塞、清障/开门后重规划等。
 - `MoveController` 每 tick 根据最新 `State`、玩家位置、`player_size=(48, 32)` 和目标 tile 输出当前移动方向。
 - C# `StardewExecutor` 会持续按住最后一次 MOVE 命令对应的方向；Python 发送新 MOVE 用于更新方向，发送 `IDLE` 用于停止移动。
+- 原地转向使用 `FACE_DIRECTION`，不要用 `MOVE_*` 充当转向脉冲；否则 C# 会持续移动并可能导致站位抖动。
 - 中间路径点进入后立即推进，不强制回到格子中心；路径末端才做更严格的身体盒进入判断。
 - Town 等大场景未来路径被阻挡时，优先启动后台 A*；旧路径继续执行，只有障碍已经接近才停下等待。
 - 后台 A* 结果切换前需要对齐当前玩家位置，避免使用过期起点导致人物回头。
 - 绝路、目标 warp 不存在、路径放弃或交给兜底规划前，RouteNode 必须先发送 `IDLE`，否则 C# 会继续保持旧方向。
 - 可破坏障碍当前仅包括 `Stone`、`Twig`、`Weeds`；普通树和 `TreeStump` 暂视为不可破坏障碍。
 - 不允许斜向破坏障碍物。A* 不应斜向进入可破坏障碍格；RouteNode 和 ClearObstacleNode 只有在玩家位于目标上下左右相邻格时才触发/执行清障。
+
+## 当前交互站位模型
+
+交互前的短距离站位已从 FarmNode 中抽到动作层 `PositioningController`。统一输入是：
+
+- `candidate_stand_tiles`：业务节点求解出的候选站位集合。
+- `tool_target_tile`：需要工具目标或交互目标对准的地块，可为空。
+
+`PositioningController` 负责：
+
+1. 过滤地图外和阻挡格。
+2. 从候选站位中规划最近可达路径。
+3. 使用 `MoveController` 输出连续移动命令。
+4. 到达候选站位后发送 `FACE_DIRECTION` 原地转向。
+5. 只有当 `state.tool_target.tile == tool_target_tile` 时返回 `READY`。
+
+FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并把作物上下左右相邻格作为 `candidate_stand_tiles`、作物地块作为 `tool_target_tile`。后续箱子、树、NPC、商店柜台、门和清障都应优先复用这套模型，而不是在节点内部重复维护路径缓存和转向逻辑。
 
 ## 当前进度
 
@@ -82,10 +102,12 @@ Selector
 | SMAPI 结构化感知 | 已有基础 | 导出地点、位置、Warp、局部障碍物、`CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items` |
 | 局部 A* | 已有基础 | 支持格子路径、硬障碍、目标 Warp 和可破坏障碍代价；已限制斜向清障路径 |
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
+| 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
 | 破坏障碍物 | 基础接入 | A* 可标记 Stone、Twig、Weeds；RouteNode 触发清障，SwitchToolNode 切工具，ClearObstacleNode 使用工具并验证障碍消失 |
+| Farm 浇水 | 基础接入 | FarmNode 可选择未浇水作物，复用 PositioningController 站到相邻格、对准 ToolTarget 后使用水壶 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
@@ -97,6 +119,7 @@ Selector
 - SMAPI Observer 可导出地点、玩家位置、Warp、局部障碍物和基础背包/工具栏状态。
 - 本地 A* 支持格子路径、动态路径过期检测、偏航检测和重新计算。
 - RouteNode 已缓存 `tile_path` 和 `path_index`，并通过 MoveController 做局部跟随。
+- PositioningController 已抽象交互站位，FarmNode 已接入候选站位和工具目标地块模型。
 - C# Executor 已支持保持最后移动方向，改善低频命令下的蠕动问题。
 - RouteNode 失败路径已开始显式发送 `IDLE`，避免绝路后继续沿旧方向移动。
 - Route/OpenDoor/SwitchTool/ClearObstacle 之间已有黑板标志协作。
@@ -107,6 +130,7 @@ Selector
 - `ValleyAgent.invoke(task)` 保存了原始任务，但尚未稳定注入 Planner Prompt；第一阶段可继续使用 mock 计划。
 - `SwitchToolNode` 已有基础切工具流程，但仍需要更多游戏内验证和异常恢复策略。
 - `ClearObstacleNode` 已能验证当前工具并使用工具，但体力检查、工具等级、背包掉落容量和失败恢复仍需完善。
+- `PositioningController` 目前已接入 FarmNode；清障、箱子、NPC、商店柜台等交互还需要逐步迁移到同一模型。
 - 树木、TreeStump 等需要工具等级或长动作的障碍暂不纳入可清障目标。
 - `OpenDoorNode` 仍有异步路径使用 `time.sleep()`、结果验证不足等问题。
 - `StardewExecutorClient.send_command()` 是阻塞式等待响应，缺少可靠超时和结构化 Action Result。
@@ -122,9 +146,10 @@ Selector
 2. 继续校验硬编码场景连通图和 warp 目标名称，避免错误跨场景边导致目标 warp 不存在。
 3. 继续验证 A* 障碍代价函数，区分不可通行、可绕行和可破坏障碍，并保持“不允许斜向清障”的路径约束。
 4. 完善 `SwitchToolNode` 和 `ClearObstacleNode` 的游戏内验证、体力检查、工具等级和失败恢复。
-5. 强化玩家朝向、清障动作、超时与障碍消失验证。
-6. 完善 `OpenDoorNode` 的非阻塞状态机和门结果验证。
-7. 增加确定性寻路场景测试与游戏内端到端验收。
+5. 将清障、开门和后续箱子/NPC/商店柜台等交互逐步迁移到 `PositioningController` 的候选站位 + 工具目标地块模型。
+6. 强化玩家朝向、清障动作、超时与障碍消失验证。
+7. 完善 `OpenDoorNode` 的非阻塞状态机和门结果验证。
+8. 增加确定性寻路场景测试与游戏内端到端验收。
 
 ## 第一阶段验收标准
 

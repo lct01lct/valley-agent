@@ -38,6 +38,8 @@ Selector
 │   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   └── RouteNode
+├── Sequence("Farm")
+│   └── FarmNode
 └── Sequence("Think")
     └── LLM_Node
 ```
@@ -45,11 +47,21 @@ Selector
 行为树每个 tick 从高优先级分支开始扫描：
 
 1. `Defend_Node` 预留给紧急安全行为。
-2. `OpenDoorNode`、`SwitchToolNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性动作。
-3. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
-4. 新计划到达后，Selector 重新从高优先级节点扫描。
+2. `OpenDoorNode`、`SwitchToolNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性移动、开门和清障动作。
+3. `FarmNode` 消费农业任务，例如给未浇水作物浇水。
+4. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
+5. 新计划到达后，Selector 重新从高优先级节点扫描。
 
-因此，`Think` 分支和 `Route` 分支在顶层 Selector 视角是同级概念，只是优先级更低、职责更偏规划兜底。
+因此，`Route`、`Farm` 和 `Think` 分支在顶层 Selector 视角是同级概念；`Think` 优先级最低，职责更偏规划兜底。
+
+## 移动与交互站位
+
+项目将移动控制拆成两个尺度：
+
+- 长距离移动由 `RouteNode` 管理跨场景路线、A* 路径缓存和 `MoveController` 局部跟随。
+- 交互前站位由 `PositioningController` 管理。调用方输入 `candidate_stand_tiles` 和可选 `tool_target_tile`，控制器负责移动到最近可达站位，并在站好后用 `FACE_DIRECTION` 原地转向，直到 `ToolTarget` 对准目标。
+
+这个接口用于 Farm 浇水，也适合后续复用到箱子、树、NPC、商店柜台、门和清障等交互。业务节点只负责求解“可以站哪些格”和“工具目标应该是哪一格”，不重复实现 A*、路径推进或转向控制。
 
 ## AgentBlackboard 的角色
 
@@ -67,7 +79,7 @@ valley-agent/
 │   ├── base_task.py                # 基础任务类型
 │   ├── behavior_tree/              # 节点、黑板和玩家上下文
 │   ├── action/map/                 # 硬编码场景连通图和跨场景候选路线
-│   ├── action/valley_action/       # 动作模型、A* 和局部移动控制器
+│   ├── action/valley_action/       # 动作模型、A*、局部移动、交互站位和工具目标控制
 │   └── prompt/                     # Planner 提示词
 ├── server/
 │   └── valley_server.py            # Python TCP 客户端与状态解析

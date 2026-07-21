@@ -6,6 +6,7 @@ from typing import List, Set, Tuple
 from agent.action.location.location import Location
 from agent.action.map.map import HardcodedStardewMap
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
+from agent.action.valley_action.tool_targeting import build_tool_target_face_command
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
@@ -341,7 +342,7 @@ class RouteNode(BTNode):
             return self.move_controller.build_move_command_to_tile(game_state, anchor_tile), False
 
         print(f"\n🏁 [Door] 已站到门前格，面向门 {door_tile} 并触发开门节点。")
-        return self.move_controller.build_face_command(anchor_tile, door_tile), True
+        return build_tool_target_face_command(anchor_tile, door_tile), True
 
     def _select_best_scene_route(self, game_state: StardewState, target_location: Location) -> List[Location] | None:
         candidate_routes = self.stardew_map.find_candidate_routes(
