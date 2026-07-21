@@ -106,6 +106,7 @@ class RouteNode(BTNode):
                     self.route_idx += 1
 
                     if self.route_idx == len(self.routes):
+                        context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
                         blackboard.current_step_index += 1
                         self._reset_route_state()
 
@@ -928,4 +929,3 @@ def route_cost_function(
     # 4. 🟢 顺畅空地放行
     # 没有任何硬图层阻挡，完全是康庄大道，保持原本的 A* 基础位移时间代价 (base_cost 是 1.0 或 1.414)
     return True, base_cost, "walk"
-

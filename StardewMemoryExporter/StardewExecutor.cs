@@ -127,6 +127,10 @@ namespace StardewMemoryExporter
                     HandleMove(pressedKeys);
 
                 }
+                else if (actionType.Equals("FACE_DIRECTION", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleFaceDirection(pressedKeys);
+                }
                 else if (actionType.Equals("IDLE", StringComparison.OrdinalIgnoreCase))
                 {
                     ClearHeldMoveButtons();
@@ -208,6 +212,22 @@ namespace StardewMemoryExporter
             return;
         }
 
+        private void HandleFaceDirection(List<string> pressedKeys)
+        {
+            ClearHeldMoveButtons();
+
+            int? facingDirection = GetFacingDirection(pressedKeys);
+            if (facingDirection is null)
+            {
+                SendResponseToPython("FAILURE");
+                return;
+            }
+
+            Game1.player.faceDirection(facingDirection.Value);
+            SendResponseToPython("SUCCESS");
+            return;
+        }
+
         private void HandleCloseDialog(List<string> pressedKeys)
         {
             ClearHeldMoveButtons();
@@ -272,6 +292,15 @@ namespace StardewMemoryExporter
                 "d" => options.moveRightButton.Length > 0 ? options.moveRightButton[0].ToSButton() : SButton.D,
                 _ => null
             };
+        }
+
+        private int? GetFacingDirection(List<string> pressedKeys)
+        {
+            if (pressedKeys.Contains("w")) return 0;
+            if (pressedKeys.Contains("d")) return 1;
+            if (pressedKeys.Contains("s")) return 2;
+            if (pressedKeys.Contains("a")) return 3;
+            return null;
         }
 
         private SButton? GetToolSwitchButton(string key)

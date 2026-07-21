@@ -4,6 +4,7 @@ from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
+from agent.behavior_tree.tool_targeting import build_tool_target_face_command, format_tool_target, is_tool_targeting
 from agent.behavior_tree.tool_selection import get_required_tool_for_obstacle, is_current_tool
 from server.type import Tile
 
@@ -64,10 +65,15 @@ class ClearObstacleNode(BTNode):
             self._fail(blackboard, f"清障超时: {obstacle_type} @ {target_tile}")
             return "SUCCESS"
 
-        if not self._has_faced_target:
-            command = self._build_face_command(game_state.player_tile, target_tile)
+        if not is_tool_targeting(game_state, target_tile):
+            command = build_tool_target_face_command(game_state.player_tile, target_tile)
             context.executor_client.send_command(command)
             self._has_faced_target = True
+            self._wait_ticks = 0
+            print(
+                f"\n🧭 [ClearObstacleNode] 面向清障目标: player={game_state.player_tile}, "
+                f"target={target_tile}, tool_target={format_tool_target(game_state.tool_target)}"
+            )
             return "RUNNING"
 
         self._wait_ticks += 1
@@ -138,14 +144,3 @@ class ClearObstacleNode(BTNode):
         distance_x = abs(player_tile.x - target_tile.x)
         distance_y = abs(player_tile.y - target_tile.y)
         return distance_x + distance_y == 1
-
-    def _build_face_command(self, player_tile: Tile, target_tile: Tile) -> StardewCommand:
-        if target_tile.x > player_tile.x:
-            return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
-        if target_tile.x < player_tile.x:
-            return StardewCommand(action=StardewAction.MOVE_LEFT, key=["a"])
-        if target_tile.y > player_tile.y:
-            return StardewCommand(action=StardewAction.MOVE_DOWN, key=["s"])
-        if target_tile.y < player_tile.y:
-            return StardewCommand(action=StardewAction.MOVE_UP, key=["w"])
-        return StardewCommand(action=StardewAction.IDLE)

@@ -17,6 +17,7 @@ class StardewAction(Enum):
     MOVE_UP_LEFT = "MOVE_UP_LEFT"  # 朝左上角斜向移动 (同时触发 W + A 键)
     MOVE_DOWN_RIGHT = "MOVE_DOWN_RIGHT"  # 朝右下角斜向移动 (同时触发 S + D 键)
     MOVE_DOWN_LEFT = "MOVE_DOWN_LEFT"  # 朝左下角斜向移动 (同时触发 S + A 键)
+    FACE_DIRECTION = "FACE_DIRECTION"  # 原地调整朝向，不持续按住移动键
 
     CLOSE_DIALOG = "CLOSE_DIALOG"  # 关闭对话框：按下 X 键，关闭当前弹出的对话框或提示框
 

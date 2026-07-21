@@ -4,7 +4,7 @@ from typing import Literal, cast
 from agent.action.valley_action.action_type import StardewCommand
 from server.valley_server import StardewExecutorClient, StardewObserverClient, StardewState
 
-type Player_Mode = Literal["Guard", "Route", "Think"]
+type Player_Mode = Literal["Guard", "Route", "Farm", "Think"]
 
 
 class PlayerContext:

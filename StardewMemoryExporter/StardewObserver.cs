@@ -188,6 +188,8 @@ namespace StardewMemoryExporter
                     CurrentToolIndex = player.CurrentToolIndex,
                     CurrentToolbarIndex = player.CurrentToolIndex / 12,
                     Items = CreateItemsSnapshot(player),
+                    ToolTarget = CreateToolTargetSnapshot(player),
+                    FarmTiles = CreateFarmTilesSnapshot(location),
                     warps = _cachedWarpDataList,
                     obstacles = obstacles.ToList(),
                 };
@@ -339,6 +341,72 @@ namespace StardewMemoryExporter
             }
 
             return items;
+        }
+
+        private object CreateToolTargetSnapshot(Farmer player)
+        {
+            Point playerTile = player.TilePoint;
+            int facingDirection = player.FacingDirection;
+            Point targetTile = GetFacingTargetTile(playerTile, facingDirection);
+
+            return new
+            {
+                Source = "FacingDirection",
+                Tile = new[] { targetTile.X, targetTile.Y },
+                PlayerTile = new[] { playerTile.X, playerTile.Y },
+                FacingDirection = facingDirection,
+                SelectedItemName = player.CurrentItem?.Name ?? "",
+                IsStandingOnTarget = targetTile.X == playerTile.X && targetTile.Y == playerTile.Y,
+                IsCardinalNeighbor = Math.Abs(targetTile.X - playerTile.X) + Math.Abs(targetTile.Y - playerTile.Y) == 1,
+            };
+        }
+
+        private Point GetFacingTargetTile(Point playerTile, int facingDirection)
+        {
+            return facingDirection switch
+            {
+                0 => new Point(playerTile.X, playerTile.Y - 1),
+                1 => new Point(playerTile.X + 1, playerTile.Y),
+                2 => new Point(playerTile.X, playerTile.Y + 1),
+                3 => new Point(playerTile.X - 1, playerTile.Y),
+                _ => playerTile,
+            };
+        }
+
+        private List<object> CreateFarmTilesSnapshot(GameLocation location)
+        {
+            var farmTiles = new List<object>();
+
+            foreach (var pair in location.terrainFeatures.Pairs)
+            {
+                Vector2 tile = pair.Key;
+                TerrainFeature feature = pair.Value;
+
+                if (feature is not HoeDirt hoeDirt) continue;
+
+                var crop = hoeDirt.crop;
+                bool hasCrop = crop != null;
+
+                farmTiles.Add(new
+                {
+                    Tile = new[] { (int)tile.X, (int)tile.Y },
+                    TerrainFeatureType = "HoeDirt",
+                    State = hoeDirt.state.Value,
+                    // HoeDirt.state == 1 表示当前耕地已浇水；这里导出派生字段，方便 Python 端直接验证动作结果。
+                    IsWatered = hoeDirt.state.Value == 1,
+                    HasCrop = hasCrop,
+                    Crop = hasCrop ? new
+                    {
+                        NetSeedIndex = crop.netSeedIndex.Value,
+                        IndexOfHarvest = crop.indexOfHarvest.Value,
+                        CurrentPhase = crop.currentPhase.Value,
+                        Dead = crop.dead.Value,
+                        ForageCrop = crop.forageCrop.Value,
+                    } : null,
+                });
+            }
+
+            return farmTiles;
         }
 
         // private string GetObstacleTypeAtTile(GameLocation location, Farmer player, int x, int y)

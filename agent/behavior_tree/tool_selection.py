@@ -1,10 +1,10 @@
 from typing import Sequence
 
+from agent.action.valley_action.action_type import KeyType
 from server.valley_server import InventoryItem, StardewState
 
-
 TOOLBAR_SIZE = 12
-TOOLBAR_KEYS: tuple[str, ...] = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=")
+TOOLBAR_KEYS: tuple[KeyType, ...] = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=")
 
 CLEAR_OBSTACLE_REQUIRED_TOOLS: dict[str, str] = {
     "stone": "Pickaxe",
@@ -15,6 +15,7 @@ CLEAR_OBSTACLE_REQUIRED_TOOLS: dict[str, str] = {
 TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "Axe": ("Axe",),
     "Pickaxe": ("Pickaxe",),
+    "Watering Can": ("Watering Can",),
 }
 
 
@@ -54,7 +55,7 @@ def get_toolbar_index(slot_index: int) -> int:
     return slot_index // TOOLBAR_SIZE
 
 
-def get_toolbar_key(slot_index: int) -> str | None:
+def get_toolbar_key(slot_index: int) -> KeyType | None:
     key_index = slot_index % TOOLBAR_SIZE
     if key_index < 0 or key_index >= len(TOOLBAR_KEYS):
         return None

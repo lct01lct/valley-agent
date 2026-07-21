@@ -22,6 +22,7 @@
 - 对 state 数据，先核对 C# 实际读取的 SMAPI／Stardew Valley API 成员。若生产端直接传输原生属性 `Stamina`，Python 应读取 `obj["Stamina"]`，再赋给 `stamina`；不要在接收端另造 `player_stamina` 等线上字段名。
 - 为新增公共函数、异步函数、构造参数和返回值添加类型标注。
 - 使用 `X | None` 和内置泛型，例如 `list[BaseTask]`；如果待修改文件仍统一使用 `List`、`Optional`，局部保持一致即可，不为格式统一扩大改动。
+- 枚举类型需要补充可读语义：无论使用 `type Xxx = Literal[...]` 还是 `class Xxx(Enum)`，只要枚举值不是像 `KeyType` 这种能从字面值直接猜到含义的简单集合，就应为每个枚举值添加简洁中文注释。注释说明业务含义、触发条件或动作效果，不重复翻译变量名。
 - 外部输入、Planner 输出和命令载荷使用结构化模型，不使用依赖字符串拼接的隐式协议。
 
 使用 Pydantic 映射协议字段时，通过别名同时保留线上的 C# 字段名和 Python 属性命名：

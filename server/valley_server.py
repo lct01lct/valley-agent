@@ -52,6 +52,57 @@ class InventoryState:
                 self.items.append(InventoryItem(raw_item))
 
 
+class CropState:
+    def __init__(self, raw_crop: dict | None):
+        self.has_crop: bool = raw_crop is not None
+        raw_crop = raw_crop or {}
+        # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
+        self.net_seed_index: str = str(raw_crop.get("NetSeedIndex", ""))
+        self.index_of_harvest: str = str(raw_crop.get("IndexOfHarvest", ""))
+        self.current_phase: int = int(raw_crop.get("CurrentPhase", -1))
+        self.dead: bool = bool(raw_crop.get("Dead", False))
+        self.forage_crop: bool = bool(raw_crop.get("ForageCrop", False))
+
+
+class FarmTileState:
+    def __init__(self, raw_farm_tile: dict):
+        # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
+        raw_tile = raw_farm_tile.get("Tile", [0, 0])
+        self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
+        self.terrain_feature_type: str = raw_farm_tile.get("TerrainFeatureType", "")
+        self.state: int = int(raw_farm_tile.get("State", 0))
+        self.is_watered: bool = bool(raw_farm_tile.get("IsWatered", False))
+        self.raw_has_crop = raw_farm_tile.get("HasCrop")
+        self.has_crop: bool = bool(raw_farm_tile.get("HasCrop", False))
+
+        raw_crop = raw_farm_tile.get("Crop")
+        self.has_crop_payload: bool = isinstance(raw_crop, dict)
+        self.crop: CropState | None = CropState(raw_crop) if isinstance(raw_crop, dict) else None
+        if self.crop is not None and self.crop.dead:
+            self.has_crop = False
+
+
+class ToolTargetState:
+    def __init__(self, raw_tool_target: dict | None):
+        raw_tool_target = raw_tool_target or {}
+        # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
+        self.source: str = raw_tool_target.get("Source", "")
+
+        raw_tile = raw_tool_target.get("Tile", [0, 0])
+        self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
+
+        raw_player_tile = raw_tool_target.get("PlayerTile", [0, 0])
+        self.player_tile = Tile(int(raw_player_tile[0]), int(raw_player_tile[1]))
+
+        self.facing_direction: int = int(raw_tool_target.get("FacingDirection", -1))
+        self.selected_item_name: str = raw_tool_target.get("SelectedItemName", "")
+        self.is_standing_on_target: bool = bool(raw_tool_target.get("IsStandingOnTarget", False))
+        self.is_cardinal_neighbor: bool = bool(raw_tool_target.get("IsCardinalNeighbor", False))
+
+    def is_targeting(self, target_tile: Tile) -> bool:
+        return self.tile == target_tile
+
+
 class StardewState:
     def __init__(self, raw_json_data: dict):
         self.location_name: Location = raw_json_data.get("location_name", "UnknownScene")
@@ -74,6 +125,16 @@ class StardewState:
                 "Items": raw_json_data.get("Items", []),
             }
         )
+        self.tool_target = ToolTargetState(raw_json_data.get("ToolTarget"))
+
+        self.farm_tiles: list[FarmTileState] = []
+        self.farm_tiles_by_tile: dict[Tile, FarmTileState] = {}
+        for raw_farm_tile in raw_json_data.get("FarmTiles", []):
+            if not isinstance(raw_farm_tile, dict):
+                continue
+            farm_tile = FarmTileState(raw_farm_tile)
+            self.farm_tiles.append(farm_tile)
+            self.farm_tiles_by_tile[farm_tile.tile] = farm_tile
 
         self.warps: List[WarpZone] = []
         for w_dict in raw_json_data.get("warps", []):
@@ -167,6 +228,14 @@ class StardewState:
             for tile in previous_tiles:
                 if not self.is_tile_inside_current_scan(tile):
                     current_tiles.add(tile)
+
+        for previous_farm_tile in previous_state.farm_tiles:
+            if previous_farm_tile.tile in self.farm_tiles_by_tile:
+                continue
+            if self.is_tile_inside_current_scan(previous_farm_tile.tile):
+                continue
+            self.farm_tiles.append(previous_farm_tile)
+            self.farm_tiles_by_tile[previous_farm_tile.tile] = previous_farm_tile
 
     def is_tile_inside_current_scan(self, tile: Tile) -> bool:
         if self.state_scope == "global":

@@ -8,6 +8,7 @@ from agent.behavior_tree.route_node import RouteNode
 from agent.behavior_tree.behavior_tree import Selector, Sequence
 from agent.behavior_tree.defend_node import Defend_Node
 from agent.behavior_tree.clear_obstacle_node import ClearObstacleNode
+from agent.behavior_tree.farm_node import FarmNode
 from agent.behavior_tree.open_door_node import OpenDoorNode
 from agent.behavior_tree.switch_tool_node import SwitchToolNode
 from agent.behavior_tree.llm_node import Agent_Model, LLM_Node
@@ -41,6 +42,12 @@ class ValleyAgent:
                         SwitchToolNode(),
                         ClearObstacleNode(),
                         RouteNode(),
+                    ],
+                ),
+                Sequence(
+                    node_name="Farm",
+                    children=[
+                        FarmNode(),
                     ],
                 ),
                 Sequence(
