@@ -5,8 +5,8 @@ from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from server.valley_server import StardewState
 from server.type import Tile
 
-destructible_obstacles = ["weeds", "twig", "stone"]
-type RouteActionType = Literal["walk", "blocked", "weeds", "twig", "stone", "warp", "door"]
+destructible_obstacles = ["weeds", "twig", "stone", "tree"]
+type RouteActionType = Literal["walk", "blocked", "weeds", "twig", "stone", "tree", "warp", "door"]
 
 
 class RouteTile(Tile):

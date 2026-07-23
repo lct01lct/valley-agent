@@ -1,6 +1,7 @@
 import time
 
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
+from agent.action.valley_action.clearance_policy import ORDINARY_TREE_LAYERS, normalize_obstacle_type
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
 from agent.action.valley_action.tool_targeting import build_tool_target_face_command, format_tool_target, is_tool_targeting
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
@@ -21,10 +22,14 @@ CLEARABLE_OBSTACLE_LAYERS: dict[str, tuple[str, ...]] = {
     "Weeds": ("Weeds",),
     "grass": ("Grass",),
     "Grass": ("Grass",),
+    "tree": ORDINARY_TREE_LAYERS,
+    "Tree": ORDINARY_TREE_LAYERS,
 }
 CLEAR_OBSTACLE_TIMEOUT_SECONDS = 8.0
+TREE_CLEAR_OBSTACLE_TIMEOUT_SECONDS = 18.0
 STATE_SETTLE_TICKS = 8
 MAX_CLEAR_ATTEMPTS = 6
+MAX_TREE_CLEAR_ATTEMPTS = 24
 POSITIONING_STUCK_TIMEOUT_SECONDS = 0.45
 CLEAR_TOOL_START_GRACE_SECONDS = 0.35
 CLEAR_TOOL_FINISH_TIMEOUT_SECONDS = 2.5
@@ -77,7 +82,7 @@ class ClearObstacleNode(BTNode):
             self._finish(blackboard)
             return "SUCCESS"
 
-        if self._started_at is not None and time.time() - self._started_at > CLEAR_OBSTACLE_TIMEOUT_SECONDS:
+        if self._started_at is not None and time.time() - self._started_at > self._get_clear_timeout_seconds(obstacle_type):
             context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             self._fail(blackboard, f"清障超时: {obstacle_type} @ {target_tile}")
             return "SUCCESS"
@@ -187,7 +192,7 @@ class ClearObstacleNode(BTNode):
 
         self._wait_ticks = 0
         self._attempt_count += 1
-        if self._attempt_count > MAX_CLEAR_ATTEMPTS:
+        if self._attempt_count > self._get_max_clear_attempts(obstacle_type):
             self._fail(blackboard, f"清障重试次数耗尽: {obstacle_type} @ {target_tile}")
             return "SUCCESS"
 
@@ -312,10 +317,21 @@ class ClearObstacleNode(BTNode):
         self.positioning_controller.reset()
 
     def _obstacle_exists(self, layers: dict[str, set[Tile]], target_tile: Tile, obstacle_type: str) -> bool:
-        for layer_name in CLEARABLE_OBSTACLE_LAYERS.get(obstacle_type, ()):
+        normalized_obstacle_type = normalize_obstacle_type(obstacle_type) or obstacle_type
+        for layer_name in CLEARABLE_OBSTACLE_LAYERS.get(normalized_obstacle_type, CLEARABLE_OBSTACLE_LAYERS.get(obstacle_type, ())):
             if target_tile in layers.get(layer_name, set()):
                 return True
         return False
+
+    def _get_max_clear_attempts(self, obstacle_type: str) -> int:
+        if normalize_obstacle_type(obstacle_type) == "tree":
+            return MAX_TREE_CLEAR_ATTEMPTS
+        return MAX_CLEAR_ATTEMPTS
+
+    def _get_clear_timeout_seconds(self, obstacle_type: str) -> float:
+        if normalize_obstacle_type(obstacle_type) == "tree":
+            return TREE_CLEAR_OBSTACLE_TIMEOUT_SECONDS
+        return CLEAR_OBSTACLE_TIMEOUT_SECONDS
 
     def _is_next_to_target(self, player_tile: Tile, target_tile: Tile) -> bool:
         distance_x = abs(player_tile.x - target_tile.x)
@@ -418,7 +434,7 @@ class ClearObstacleNode(BTNode):
             f"can_clear_from_current={self._is_next_to_target(game_state.player_tile, target_tile)}, "
             f"current_tool={self._get_current_tool_name(game_state)}, "
             f"tool_target={format_tool_target(game_state.tool_target)}, "
-            f"attempt={self._attempt_count}/{MAX_CLEAR_ATTEMPTS}, wait_ticks={self._wait_ticks}, "
+            f"attempt={self._attempt_count}/{self._get_max_clear_attempts(obstacle_type)}, wait_ticks={self._wait_ticks}, "
             f"UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
             f"tool_action={self.tool_action_tracker.get_debug_snapshot()}, "
             f"target_state={self._format_farm_tile_state(game_state, target_tile)}, "

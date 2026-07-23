@@ -2,6 +2,12 @@ import time
 from typing import Literal
 
 from agent.action.location.location import Location
+from agent.action.valley_action.clearance_policy import (
+    FRUIT_TREE_LAYERS,
+    decide_clear_obstacle,
+    get_obstacle_type_at_tile,
+    normalize_obstacle_type,
+)
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.tool_targeting import format_tool_target
@@ -960,12 +966,15 @@ class FarmNode(BTNode):
         return False
 
     def _get_obstacle_tool_group_order(self, obstacle_type: str) -> int:
-        if obstacle_type == "Grass":
+        normalized_obstacle_type = normalize_obstacle_type(obstacle_type)
+        if normalized_obstacle_type == "grass":
             return 0
-        if obstacle_type in ("Weeds", "Twig"):
+        if normalized_obstacle_type in ("weeds", "twig"):
             return 1
-        if obstacle_type == "Stone":
+        if normalized_obstacle_type == "stone":
             return 2
+        if normalized_obstacle_type == "tree":
+            return 3
         return 9
 
     def _select_next_plant_target(self, game_state: StardewState, current_task: FarmTask) -> Tile | None:
@@ -1134,12 +1143,15 @@ class FarmNode(BTNode):
 
     def _get_clearable_obstacle_type(self, game_state: StardewState, target_tile: Tile) -> str | None:
         farm_tile_state = game_state.farm_tiles_by_tile.get(target_tile)
-        if farm_tile_state is not None and farm_tile_state.obstacle_type in ("Grass", "Weeds", "Twig", "Stone"):
-            return farm_tile_state.obstacle_type
+        if farm_tile_state is not None:
+            decision = decide_clear_obstacle(game_state, target_tile, farm_tile_state.obstacle_type, "Farm")
+            if decision.can_clear:
+                return decision.obstacle_type
 
-        for obstacle_type in ("Grass", "Weeds", "Twig", "Stone"):
-            if target_tile in game_state.layers.get(obstacle_type, set()):
-                return obstacle_type
+        obstacle_type = get_obstacle_type_at_tile(game_state, target_tile)
+        decision = decide_clear_obstacle(game_state, target_tile, obstacle_type, "Farm")
+        if decision.can_clear:
+            return decision.obstacle_type
         return None
 
     def _get_ignored_obstacle_type(self, game_state: StardewState, target_tile: Tile) -> str | None:
@@ -1148,18 +1160,16 @@ class FarmNode(BTNode):
             obstacle_type = farm_tile_state.obstacle_type
             if obstacle_type == "TreeStump":
                 return "TreeStump"
-            if obstacle_type.startswith("Tree") or obstacle_type.startswith("FruitTree"):
+            if normalize_obstacle_type(obstacle_type) == "fruit_tree":
                 return obstacle_type
             if obstacle_type in ("Wall", "Worm", "Object", "Rug"):
                 return obstacle_type
 
         if target_tile in game_state.layers.get("TreeStump", set()):
             return "TreeStump"
-        for tree_stage in range(6):
-            if target_tile in game_state.layers.get(f"Tree{tree_stage}", set()):
-                return f"Tree{tree_stage}"
-            if target_tile in game_state.layers.get(f"FruitTree{tree_stage}", set()):
-                return f"FruitTree{tree_stage}"
+        for layer_name in FRUIT_TREE_LAYERS:
+            if target_tile in game_state.layers.get(layer_name, set()):
+                return layer_name
         return None
 
     def _format_tile_set(self, tiles: set[Tile]) -> str:

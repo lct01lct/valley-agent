@@ -94,7 +94,7 @@ Selector
 - Town 等大场景未来路径被阻挡时，优先启动后台 A*；旧路径继续执行，只有障碍已经接近才停下等待。
 - 后台 A* 结果切换前需要对齐当前玩家位置，避免使用过期起点导致人物回头。
 - 绝路、目标 warp 不存在、路径放弃或交给兜底规划前，RouteNode 必须先发送 `IDLE`，否则 C# 会继续保持旧方向。
-- 可破坏障碍当前仅包括 `Stone`、`Twig`、`Weeds`；普通树和 `TreeStump` 暂视为不可破坏障碍。
+- 可破坏障碍当前包括 `Stone`、`Twig`、`Weeds` 和策略允许后的普通树 `Tree0` ~ `Tree5`。普通树清理成本较高，需要通过清障策略层确认；`FruitTree0` ~ `FruitTree5` 和 `TreeStump` 暂视为不可自动清理障碍。
 - 不允许斜向破坏障碍物。A* 不应斜向进入可破坏障碍格；RouteNode 和 ClearObstacleNode 只有在玩家位于目标上下左右相邻格时才触发/执行清障。
 
 ## 当前交互站位模型
@@ -148,7 +148,8 @@ CLEAR_OBSTACLES -> HOE_TILES -> PLANT_SEEDS -> WATER_TILES -> DONE
 
 当前障碍策略：
 
-- `Tree`、`FruitTree`、`TreeStump`：跳过该格，不纳入种植。
+- 普通树 `Tree0` ~ `Tree5`：Farm 规划区域默认视为 Agent 已授权，可使用 Axe 清理，并在清理后继续锄地、播种、浇水。
+- `FruitTree0` ~ `FruitTree5`、`TreeStump`：跳过该格，不纳入种植。
 - `Grass`：使用 `Scythe`。
 - `Weeds` / `Twig`：使用 `Axe`。
 - `Stone`：使用 `Pickaxe`。
@@ -170,7 +171,7 @@ Farm 水壶补水闭环：
 | 模拟宏观计划 | 已有基础 | `LLM_Node` 异步返回硬编码 `RouteTask` |
 | 跨地图规划 | 已有基础 | `HardcodedStardewMap` 已迁移到 `agent/action/map/map.py`，可枚举候选路线；RouteNode 按传送门距离缓存做路线评分 |
 | SMAPI 结构化感知 | 已有基础 | 导出地点、位置、Warp、局部障碍物、`CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items` |
-| 局部 A* | 已有基础 | 支持格子路径、硬障碍、目标 Warp 和可破坏障碍代价；已限制斜向清障路径 |
+| 局部 A* | 已有基础 | 支持格子路径、硬障碍、目标 Warp 和可破坏障碍代价；普通树按高成本清障候选处理；已限制斜向清障路径 |
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
 | 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
@@ -211,7 +212,7 @@ Farm 水壶补水闭环：
 - `ClearObstacleNode` 已能验证当前工具并使用工具，但体力检查、工具等级、背包掉落容量和失败恢复仍需完善。
 - 工具动作等待已经接入，但仍需要更多真实场景验证：不同工具、不同动画长度、体力耗尽、命中失败和背包拾取等状态都可能影响结果判断。
 - `PositioningController` 目前已接入 FarmNode；清障、箱子、NPC、商店柜台等交互还需要逐步迁移到同一模型。
-- 树木、TreeStump 等需要工具等级或长动作的障碍暂不纳入可清障目标。
+- 普通树已纳入策略允许后的可清障目标；`FruitTree` 和 `TreeStump` 暂不纳入自动清障目标。
 - `OpenDoorNode` 仍有异步路径使用 `time.sleep()`、结果验证不足等问题。
 - `StardewExecutorClient.send_command()` 是阻塞式等待响应，缺少可靠超时和结构化 Action Result。
 - Python 端当前仍会每 tick 重发当前移动方向；未来可优化为仅在方向变化、IDLE 或交互动作时发送，但必须保证安全停机语义不变。
@@ -241,7 +242,7 @@ Farm 水壶补水闭环：
 - 固定障碍场景中，Agent 能绕开硬障碍并在动态阻塞后重新计算路径。
 - 可破坏障碍挡住必要路径时，Agent 能完成“识别障碍 -> 切换正确工具 -> 执行动作 -> 验证障碍消失 -> 继续移动”。
 - 工具动作必须通过 state 确认收招和结果变化，不能仅凭 Executor 返回 `SUCCESS` 判定完成。
-- Farm P1 测试中，规划区域内可种植地块能完成“清障 -> 锄地 -> 播种 -> 浇水”，树和 TreeStump 等不可处理地块会被明确跳过。
+- Farm P1 测试中，规划区域内可种植地块能完成“清障 -> 锄地 -> 播种 -> 浇水”；普通树会被清理，果树和 TreeStump 等不可处理地块会被明确跳过。
 - 关闭但可进入的门能被打开；打烊或上锁能产生明确失败或恢复信号。
 - 任务成功由最新 SMAPI 状态验证，不能仅以命令已发送或路径列表为空作为成功依据。
 - 绝路、目标 warp 不存在或需要兜底恢复时，必须先发送 `IDLE`，人物不能继续保持旧方向移动。
@@ -252,7 +253,7 @@ Farm 水壶补水闭环：
 - 无障碍跨地图导航。
 - 路径中临时出现硬障碍，Agent 能重新规划绕行。
 - 必经路径被石头、树枝或杂草挡住，Agent 能清除后继续。
-- 规划一片 Farm 区域，包含 Grass、Weeds、Twig、Stone 和树/树桩，Agent 能跳过不可处理地块、清理可处理障碍、锄地、播种并浇水。
+- 规划一片 Farm 区域，包含 Grass、Weeds、Twig、Stone、普通树、果树和树桩，Agent 能清理可处理障碍、跳过果树/TreeStump、锄地、播种并浇水。
 - 工具动作期间连续 tick 验证：Executor 返回 `BUSY` 时 Python 不叠加新动作，动作收招后再验证结果。
 - 建筑门关闭但可进入，Agent 能开门并完成 Warp。
 - 门打烊或上锁，Agent 能停止并提供明确失败原因。

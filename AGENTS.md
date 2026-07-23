@@ -186,6 +186,7 @@ SMAPI Observer 需要持续导出并同步以下状态：
 - `agent/memory/`：运行期地图知识缓存和长期记忆预留接口。
 - `agent/action/map/map.py`：`HardcodedStardewMap`，维护硬编码场景连通图和最少场景跳数候选路线枚举。
 - `agent/action/valley_action/AStar.py`：本地 A\* 寻路、路线动作标注和障碍代价函数。
+- `agent/action/valley_action/clearance_policy.py`：清障策略层，判断障碍是否允许清理、所需工具和清障代价；未来可接入 Agent Skill/Planner 对普通树等高价值资源的保护策略。
 - `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。
 - `agent/action/valley_action/positioning_controller.py`：通用交互站位控制，输入候选站位和工具目标地块，输出移动、转向或 READY 状态。
 - `agent/action/valley_action/tool_targeting.py`：工具目标判断、`FACE_DIRECTION` 转向命令和 ToolTarget 日志格式化。
@@ -203,6 +204,8 @@ SMAPI Observer 需要持续导出并同步以下状态：
 - `LLM_Node` 只做最后兜底的宏观计划生成、补计划或恢复建议，不参与每帧移动控制。
 - 每个任务和节点都应有前置条件、执行逻辑、成功判定、超时和恢复策略。
 - 寻路需要区分硬障碍、可绕行障碍、可破坏障碍和交互式门。
+- 普通树 `Tree0` ~ `Tree5` 属于“策略允许后可清理”的高成本障碍；当前 Route 和 Farm 规划区域默认允许砍普通树。`FruitTree0` ~ `FruitTree5` 和 `TreeStump` 暂不自动清理。
+- 涉及普通树、未来高价值资源或长期收益的清障判断应通过 `clearance_policy` 一类策略层完成；执行节点只负责站位、切工具、使用工具和验证结果，不负责判断资源是否值得破坏。
 - 清障必须验证工具可用、玩家位于上下左右相邻格、朝向正确，并在动作后从新状态确认障碍已经消失；当前不允许斜向破坏障碍物。
 - 工具切换应优先读取 SMAPI state 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items`，不要在 Python 端硬猜当前工具。
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。

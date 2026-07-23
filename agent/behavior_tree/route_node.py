@@ -5,6 +5,7 @@ from typing import List, Set, Tuple
 from agent.action.location.location import Location
 from agent.action.map.map import HardcodedStardewMap
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
+from agent.action.valley_action.clearance_policy import ORDINARY_TREE_LAYERS, decide_clear_obstacle
 from agent.action.valley_action.tool_targeting import build_tool_target_face_command
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
@@ -17,7 +18,7 @@ from agent.action.valley_action.AStar import RouteActionType, RouteTile, astar_s
 from server.valley_server import StardewState
 from server.type import Tile
 
-CLEARABLE_ROUTE_TYPES: set[RouteActionType] = {"weeds", "twig", "stone"}
+CLEARABLE_ROUTE_TYPES: set[RouteActionType] = {"weeds", "twig", "stone", "tree"}
 NEAR_REPLAN_DISTANCE = 2
 MOVE_DEBUG_LOG_INTERVAL_SECONDS = 0.5
 ROUTE_PROGRESS_PRINT_INTERVAL_SECONDS = 0.2
@@ -908,7 +909,6 @@ def route_cost_function(
         state.layers.get("TreeStump", set()),
     )
     for growth_stage in range(0, 6):
-        absolute_walls.update(state.layers.get(f"Tree{growth_stage}", set()))
         absolute_walls.update(state.layers.get(f"FruitTree{growth_stage}", set()))
 
     if neighbor in absolute_walls:
@@ -923,16 +923,24 @@ def route_cost_function(
     #     return True, base_cost + 2.0, "open_door"
 
     # 3. 🪓 识别可破坏的硬图层。
-    # 当前阶段先不把树、果树和 TreeStump 纳入可清障目标，避免 A* 规划进需要升级工具或长动作的格子。
     stones = state.layers.get("Stone", set())
     weeds = state.layers.get("Weeds", set())
     twigs = state.layers.get("Twig", set())
+    trees = set()
+    for layer_name in ORDINARY_TREE_LAYERS:
+        trees.update(state.layers.get(layer_name, set()))
 
     if neighbor in weeds:
         return True, base_cost + 4.0, "weeds"
 
     if neighbor in twigs:
         return True, base_cost + 6.0, "twig"
+
+    if neighbor in trees:
+        decision = decide_clear_obstacle(state, neighbor, "tree", "Route")
+        if decision.can_clear:
+            return True, base_cost + decision.cost, "tree"
+        return False, float("inf"), "blocked"
 
     # ------------------ 🪨 砸石头决策细分 ------------------
     if neighbor in stones:

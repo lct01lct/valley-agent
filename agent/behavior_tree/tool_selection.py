@@ -1,6 +1,7 @@
 from typing import Literal, Sequence
 
 from agent.action.valley_action.action_type import KeyType
+from agent.action.valley_action.clearance_policy import normalize_obstacle_type
 from server.valley_server import InventoryItem, StardewState
 from server.type import Tile
 
@@ -19,6 +20,8 @@ CLEAR_OBSTACLE_REQUIRED_TOOLS: dict[str, str] = {
     "Twig": "Axe",
     "grass": "Scythe",
     "Grass": "Scythe",
+    "tree": "Axe",
+    "Tree": "Axe",
 }
 
 TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
@@ -46,7 +49,7 @@ def select_required_tool_for_obstacle(
     if obstacle_type is None:
         return None
 
-    normalized_obstacle_type = obstacle_type.lower()
+    normalized_obstacle_type = normalize_obstacle_type(obstacle_type)
     if normalized_obstacle_type == "weeds":
         return _select_tool_for_weeds(state, target_tile, owner)
 
@@ -58,6 +61,9 @@ def select_required_tool_for_obstacle(
 
     if normalized_obstacle_type == "stone":
         return _select_first_available_tool(state, ("Pickaxe",))
+
+    if normalized_obstacle_type == "tree":
+        return _select_first_available_tool(state, ("Axe",))
 
     return get_required_tool_for_obstacle(obstacle_type)
 
@@ -138,14 +144,54 @@ def get_toolbar_key(slot_index: int) -> KeyType | None:
 
 
 def _matches_tool_name(tool_name: str, aliases: Sequence[str]) -> bool:
-    normalized_name = tool_name.strip().lower()
+    normalized_name = _normalize_tool_text(tool_name)
     if not normalized_name:
         return False
-    return any(normalized_name.endswith(alias.lower()) for alias in aliases)
+
+    compact_name = _compact_tool_text(normalized_name)
+    for alias in aliases:
+        normalized_alias = _normalize_tool_text(alias)
+        if not normalized_alias:
+            continue
+
+        compact_alias = _compact_tool_text(normalized_alias)
+        if normalized_name == normalized_alias or compact_name == compact_alias:
+            return True
+
+        # 支持 Copper Axe / Steel Axe 这类升级工具名，但避免 Pickaxe 被误判成 Axe。
+        if normalized_name.endswith(f" {normalized_alias}"):
+            return True
+
+    return False
 
 
 def _matches_qualified_item_id(qualified_item_id: str, aliases: Sequence[str]) -> bool:
-    normalized_item_id = qualified_item_id.strip().lower()
+    normalized_item_id = _normalize_qualified_item_id(qualified_item_id)
     if not normalized_item_id:
         return False
-    return any(alias.lower() in normalized_item_id for alias in aliases)
+
+    compact_item_id = _compact_tool_text(normalized_item_id)
+    for alias in aliases:
+        normalized_alias = _normalize_tool_text(alias)
+        if not normalized_alias:
+            continue
+
+        if compact_item_id == _compact_tool_text(normalized_alias):
+            return True
+
+    return False
+
+
+def _normalize_qualified_item_id(qualified_item_id: str) -> str:
+    normalized_item_id = _normalize_tool_text(qualified_item_id)
+    if ")" in normalized_item_id:
+        normalized_item_id = normalized_item_id.rsplit(")", 1)[1].strip()
+    return normalized_item_id
+
+
+def _normalize_tool_text(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _compact_tool_text(value: str) -> str:
+    return value.replace(" ", "")
