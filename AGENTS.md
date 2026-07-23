@@ -41,6 +41,7 @@ Selector
 │   ├── ClearObstacleNode
 │   └── RouteNode
 ├── Sequence("Farm")
+│   ├── FarmResourceCheckNode
 │   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   ├── RefillWateringCanNode
@@ -62,10 +63,13 @@ Selector
 
 `Farm` 分支内部的职责边界：
 
+- `FarmResourceCheckNode`：在 FarmTask 开始前检查背包/工具栏中的必要工具、种子数量和水壶 state；缺资源时安全停止并把恢复上下文写入 blackboard。
 - `SwitchToolNode`：根据 Farm 当前阶段切换 Hoe、种子、Watering Can 或清障工具。
 - `ClearObstacleNode`：处理 FarmNode 规划区域中的 Grass、Weeds、Twig、Stone 等可清障碍。
 - `RefillWateringCanNode`：当 FarmNode 发现水壶 `WaterLeft <= 0` 时，查询/读取地图知识缓存中的水源，移动到水源旁，面向水源并使用水壶补水。
 - `FarmNode`：消费农业任务，求解农业交互所需的候选站位和工具目标地块，再交给动作层的 `PositioningController` 完成站位和转向。
+
+Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。若必要工具或种子不在背包/工具栏中，节点只能判定“当前背包缺失”，并把缺口写入 `farm_missing_resources` / `farm_resource_recovery_hint`；不要在该节点中猜测或直接操作箱子。未来箱子取物应由独立 Chest 节点读取箱子状态、移动到箱子旁并取回资源后，再恢复 FarmTask。
 
 ### Context 负责状态输入和动作输出
 

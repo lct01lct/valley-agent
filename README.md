@@ -51,6 +51,7 @@ Selector
 │   ├── ClearObstacleNode
 │   └── RouteNode
 ├── Sequence("Farm")
+│   ├── FarmResourceCheckNode
 │   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   ├── RefillWateringCanNode
@@ -63,7 +64,7 @@ Selector
 
 1. `Defend_Node` 预留给紧急安全行为。
 2. `OpenDoorNode`、`SwitchToolNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性移动、开门和清障动作。
-3. `Farm` 分支通过 `SwitchToolNode`、`ClearObstacleNode`、`RefillWateringCanNode` 和 `FarmNode` 协作完成农业任务，例如浇水、清障、锄地、播种，以及水壶没水时去农场水源补水。
+3. `Farm` 分支通过 `FarmResourceCheckNode`、`SwitchToolNode`、`ClearObstacleNode`、`RefillWateringCanNode` 和 `FarmNode` 协作完成农业任务，例如资源前置检查、浇水、清障、锄地、播种，以及水壶没水时去农场水源补水。
 4. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
 5. 新计划到达后，Selector 重新从高优先级节点扫描。
 

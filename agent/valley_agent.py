@@ -8,6 +8,7 @@ from agent.behavior_tree.route_node import RouteNode
 from agent.behavior_tree.behavior_tree import Selector, Sequence
 from agent.behavior_tree.defend_node import Defend_Node
 from agent.behavior_tree.clear_obstacle_node import ClearObstacleNode
+from agent.behavior_tree.farm_resource_check_node import FarmResourceCheckNode
 from agent.behavior_tree.farm_node import FarmNode
 from agent.behavior_tree.open_door_node import OpenDoorNode
 from agent.behavior_tree.refill_watering_can_node import RefillWateringCanNode
@@ -48,6 +49,7 @@ class ValleyAgent:
                 Sequence(
                     node_name="Farm",
                     children=[
+                        FarmResourceCheckNode(),
                         SwitchToolNode(owner="Farm"),
                         ClearObstacleNode(owner="Farm"),
                         RefillWateringCanNode(owner="Farm"),

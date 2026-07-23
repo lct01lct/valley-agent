@@ -79,11 +79,26 @@ def has_scythe_tree_seed_risk(state: StardewState, target_tile: Tile) -> bool:
 def find_tool_item(state: StardewState, required_tool: str) -> InventoryItem | None:
     aliases = TOOL_NAME_ALIASES.get(required_tool, (required_tool,))
     for item in state.inventory.items:
-        if _matches_tool_name(item.name, aliases) or _matches_tool_name(item.display_name, aliases):
-            return item
-        if _matches_qualified_item_id(item.qualified_item_id, aliases):
+        if matches_inventory_item(item, aliases):
             return item
     return None
+
+
+def count_inventory_items(state: StardewState, item_name: str) -> int:
+    aliases = TOOL_NAME_ALIASES.get(item_name, (item_name,))
+    total_count = 0
+    for item in state.inventory.items:
+        if matches_inventory_item(item, aliases):
+            total_count += max(item.stack, 1)
+    return total_count
+
+
+def matches_inventory_item(item: InventoryItem, aliases: Sequence[str]) -> bool:
+    return (
+        _matches_tool_name(item.name, aliases)
+        or _matches_tool_name(item.display_name, aliases)
+        or _matches_qualified_item_id(item.qualified_item_id, aliases)
+    )
 
 
 def _select_tool_for_weeds(state: StardewState, target_tile: Tile, owner: ClearObstacleOwner) -> str | None:

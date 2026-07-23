@@ -39,6 +39,7 @@ Selector
 │   ├── ClearObstacleNode
 │   └── RouteNode
 ├── Sequence("Farm")
+│   ├── FarmResourceCheckNode
 │   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   ├── RefillWateringCanNode
@@ -67,6 +68,9 @@ Selector
 - `require_refill_watering_can`
 - `refill_watering_can_owner`
 - `refill_water_source_tile`
+- `farm_resource_check_failed`
+- `farm_missing_resources`
+- `farm_resource_recovery_hint`
 
 ## 当前记忆与缓存模型
 
@@ -156,6 +160,15 @@ CLEAR_OBSTACLES -> HOE_TILES -> PLANT_SEEDS -> WATER_TILES -> DONE
 
 Farm 分支复用黑板中的工具切换和清障信号，通过 `required_tool_owner="Farm"` 和 `clear_obstacle_owner="Farm"` 区分调用来源。浇水阶段会维护 `_failed_water_tiles`、重试次数和重试时间，避免临时失败导致提前结束。
 
+Farm 资源检查闭环：
+
+1. `FarmResourceCheckNode` 在 FarmTask 执行前检查当前背包/工具栏 state。
+2. `WATER` 至少要求 Watering Can，并验证水壶存在时有 `WaterLeft` / `WaterCapacity` state。
+3. `PLANT` 至少要求 Hoe、目标种子，以及规划区域内清障所需工具。
+4. `PLANT_AND_WATER` 同时要求 Hoe、Watering Can、目标种子和清障工具。
+5. 若工具或种子不在背包/工具栏里，节点只判定“当前背包缺失”，不会直接猜测或操作箱子；它会安全 `IDLE`，把 `farm_missing_resources` 和 `farm_resource_recovery_hint` 写入 blackboard，并清空当前计划以触发恢复规划。
+6. 未来箱子取物应由独立 Chest 节点根据这些缺口去查询箱子、移动到箱子旁并取回资源。
+
 Farm 水壶补水闭环：
 
 1. C# Observer 在 `Items` 中为 Watering Can 导出 `WaterLeft` 和 `WaterCapacity`。
@@ -180,6 +193,7 @@ Farm 水壶补水闭环：
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
 | 破坏障碍物 | 基础接入 | A* 可标记 Stone、Twig、Weeds；RouteNode 触发清障，SwitchToolNode 切工具，ClearObstacleNode 使用工具并验证障碍消失 |
 | Farm 浇水 | 基础接入 | FarmNode 可选择未浇水作物，复用 PositioningController 站到相邻格、对准 ToolTarget 后使用水壶；P1 浇水阶段已有临时失败重试队列 |
+| Farm 资源检查 | 基础接入 | FarmResourceCheckNode 在 FarmTask 前检查背包/工具栏中的工具、种子和水壶 state；缺资源时写入恢复上下文，不直接操作箱子 |
 | Farm 水壶补水 | 基础接入 | 水壶没水时触发 RefillWateringCanNode，按需查询并缓存 Farm 水源，站到水源旁接水后继续浇水 |
 | 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源，采集物/箱子等机会记忆后续接入 |
 | Farm P1 批处理 | 开发中 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线，仍需更多游戏内测试和失败恢复 |
@@ -218,7 +232,7 @@ Farm 水壶补水闭环：
 - Python 端当前仍会每 tick 重发当前移动方向；未来可优化为仅在方向变化、IDLE 或交互动作时发送，但必须保证安全停机语义不变。
 - 高层场景连通图仍是硬编码数据，建筑入口和特殊路线需要持续校验；错误边会导致在当前场景查找不存在的目标 warp。
 - SMAPI 快照仍缺少完成自主游玩需要的时间、金钱、体力、工具栏、背包、菜单、天气、NPC 和动作结果等状态。
-- Farm P1 目前还是基础闭环，缺少区域选择策略、种子数量/水壶水量/体力检查、作物阶段识别、失败后的二次规划和完整验收测试。
+- Farm P1 目前还是基础闭环，已加入基础资源检查，但仍缺少体力检查、背包容量检查、区域选择策略、作物阶段识别、失败后的二次规划和完整验收测试。
 - Python 动作枚举比 C# Executor 实际支持的动作更多，两侧能力尚未完全对齐。
 - `server/valley_server.py` 仍含旧 demo 逻辑，不要继续在 demo 路径上扩展正式能力。
 
@@ -231,7 +245,7 @@ Farm 水壶补水闭环：
 5. 继续验证工具动作等待机制，确保 `UsingTool` / `CanMove` 和 state 结果验证足以覆盖清障、锄地、浇水。
 6. 将清障、开门和后续箱子/NPC/商店柜台等交互逐步迁移到 `PositioningController` 的候选站位 + 工具目标地块模型。
 7. 强化玩家朝向、清障动作、超时与障碍消失验证。
-8. 完善 Farm P1 的区域选择、资源检查和失败恢复。
+8. 完善 Farm P1 的体力/背包容量检查、区域选择和失败恢复。
 9. 完善 `OpenDoorNode` 的非阻塞状态机和门结果验证。
 10. 增加确定性寻路/Farm 场景测试与游戏内端到端验收。
 

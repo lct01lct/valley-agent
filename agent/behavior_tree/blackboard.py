@@ -36,3 +36,8 @@ class AgentBlackboard:
         self.require_refill_watering_can = False
         self.refill_watering_can_owner: str | None = None
         self.refill_water_source_tile: Tile | None = None
+
+        # Farm 资源检查
+        self.farm_resource_check_failed = False
+        self.farm_missing_resources: list[str] = []
+        self.farm_resource_recovery_hint: str | None = None
