@@ -41,6 +41,14 @@ class InventoryItem:
         self.category: int = int(raw_item.get("Category", 0))
         self.stack: int = int(raw_item.get("Stack", 0))
         self.is_tool: bool = bool(raw_item.get("IsTool", False))
+        self.water_left: int | None = self._read_optional_int(raw_item, "WaterLeft")
+        self.water_capacity: int | None = self._read_optional_int(raw_item, "WaterCapacity")
+
+    def _read_optional_int(self, raw_item: dict, key: str) -> int | None:
+        value = raw_item.get(key)
+        if value is None:
+            return None
+        return int(value)
 
 
 class InventoryState:

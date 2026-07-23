@@ -10,6 +10,7 @@ from agent.behavior_tree.defend_node import Defend_Node
 from agent.behavior_tree.clear_obstacle_node import ClearObstacleNode
 from agent.behavior_tree.farm_node import FarmNode
 from agent.behavior_tree.open_door_node import OpenDoorNode
+from agent.behavior_tree.refill_watering_can_node import RefillWateringCanNode
 from agent.behavior_tree.switch_tool_node import SwitchToolNode
 from agent.behavior_tree.llm_node import Agent_Model, LLM_Node
 from agent.behavior_tree.player_context import PlayerContext
@@ -49,6 +50,7 @@ class ValleyAgent:
                     children=[
                         SwitchToolNode(owner="Farm"),
                         ClearObstacleNode(owner="Farm"),
+                        RefillWateringCanNode(owner="Farm"),
                         FarmNode(),
                     ],
                 ),

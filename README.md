@@ -26,6 +26,18 @@ Valley Agent 是一个让 AI 自主游玩《星露谷物语》的实验项目。
 - `PlayerContext` 是上下文模块，提供 `observer client`、`Executor client`、最新 `State` 和待执行 `Command` 的通道。
 - `observer server -> observer client -> State -> BT` 是状态输入链路；`BT -> Command -> Executor client -> Executor` 是动作输出链路。
 - `AgentBlackboard` 在 BT 外侧承担计划、进度和跨节点信号协作；BT 每个 tick 读取 state 与 blackboard 后决定当前节点行为。
+- `PlayerContext` 额外持有运行期 `MapKnowledgeCache`，用于保存水源、未来采集物等低频地图知识；它不同于每帧 state，也不同于 blackboard 的调度信号。
+
+## 记忆与缓存分层
+
+项目当前把“缓存/记忆”分成四层，避免把实时状态、性能缓存和 Agent 记忆混在一起：
+
+1. `Realtime State`：每帧游戏事实，例如玩家位置、当前工具、`UsingTool`、`CanMove`。
+2. `State Snapshot Cache`：性能缓存，例如 `obstacles`、`FarmTiles` 低频刷新；C# 没刷新时发 `null`，Python 复用上一份。
+3. `MapKnowledgeCache`：当前运行期地图知识，例如按需查询并缓存 Farm 水源；后续可记录路上见过但暂不采集的觅食物。
+4. `PersistentMemoryStore`：长期记忆预留接口，当前不实现、不调用；未来用于跨运行保存稳定线索，例如常用箱子、水源和商店柜台位置。
+
+好处是：水源这类低变化资源不需要塞进每帧 state；采集物这类机会记忆也不会污染实时状态。行为节点需要时先查地图知识缓存，缓存没有再发低频查询。
 
 ## 当前行为树
 
@@ -39,6 +51,9 @@ Selector
 │   ├── ClearObstacleNode
 │   └── RouteNode
 ├── Sequence("Farm")
+│   ├── SwitchToolNode
+│   ├── ClearObstacleNode
+│   ├── RefillWateringCanNode
 │   └── FarmNode
 └── Sequence("Think")
     └── LLM_Node
@@ -48,7 +63,7 @@ Selector
 
 1. `Defend_Node` 预留给紧急安全行为。
 2. `OpenDoorNode`、`SwitchToolNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性移动、开门和清障动作。
-3. `FarmNode` 消费农业任务，例如给未浇水作物浇水，或按批处理阶段完成清障、锄地、播种和浇水。
+3. `Farm` 分支通过 `SwitchToolNode`、`ClearObstacleNode`、`RefillWateringCanNode` 和 `FarmNode` 协作完成农业任务，例如浇水、清障、锄地、播种，以及水壶没水时去农场水源补水。
 4. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
 5. 新计划到达后，Selector 重新从高优先级节点扫描。
 
@@ -92,6 +107,7 @@ valley-agent/
 │   ├── behavior_tree/              # 节点、黑板和玩家上下文
 │   ├── action/map/                 # 硬编码场景连通图和跨场景候选路线
 │   ├── action/valley_action/       # 动作模型、A*、局部移动、交互站位和工具目标控制
+│   ├── memory/                     # 运行期地图知识缓存和长期记忆预留接口
 │   └── prompt/                     # Planner 提示词
 ├── server/
 │   └── valley_server.py            # Python TCP 客户端与状态解析

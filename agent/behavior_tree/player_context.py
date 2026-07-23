@@ -2,6 +2,7 @@ import os
 from typing import Literal, cast
 
 from agent.action.valley_action.action_type import StardewCommand
+from agent.memory.map_knowledge_cache import MapKnowledgeCache
 from server.valley_server import StardewExecutorClient, StardewObserverClient, StardewState
 
 type Player_Mode = Literal["Guard", "Route", "Farm", "Think"]
@@ -10,6 +11,7 @@ type Player_Mode = Literal["Guard", "Route", "Farm", "Think"]
 class PlayerContext:
     def __init__(self):
         self.state: None | StardewState = None
+        self.map_knowledge_cache = MapKnowledgeCache()
         self.observer_client = StardewObserverClient(
             cast(str, os.getenv("SMAPI_SEVER_HOST")),
             int(cast(str, os.getenv("SMAPI_OBSERVER_SERVER_PORT"))),

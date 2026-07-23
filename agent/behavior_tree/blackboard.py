@@ -31,3 +31,8 @@ class AgentBlackboard:
         self.required_tool_owner: str | None = None
         self.is_switching_tool = False
         self.required_tool: str | None = None
+
+        # 水壶补水
+        self.require_refill_watering_can = False
+        self.refill_watering_can_owner: str | None = None
+        self.refill_water_source_tile: Tile | None = None

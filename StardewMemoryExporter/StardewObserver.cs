@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Net;
 using System.Net.Sockets;
@@ -397,10 +398,60 @@ namespace StardewMemoryExporter
                     Category = item.Category,
                     Stack = item.Stack,
                     IsTool = item is Tool,
+                    WaterLeft = item is WateringCan wateringCan ? ReadOptionalIntMember(wateringCan, "WaterLeft") : null,
+                    WaterCapacity = item is WateringCan wateringCanCapacity ? ReadOptionalIntMember(wateringCanCapacity, "waterCanMax") : null,
                 });
             }
 
             return items;
+        }
+
+        private int? ReadOptionalIntMember(object source, string memberName)
+        {
+            if (source == null) return null;
+
+            BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            Type sourceType = source.GetType();
+            PropertyInfo propertyInfo = sourceType.GetProperty(memberName, flags);
+            if (propertyInfo != null)
+            {
+                return ConvertOptionalIntValue(propertyInfo.GetValue(source));
+            }
+
+            FieldInfo fieldInfo = sourceType.GetField(memberName, flags);
+            if (fieldInfo != null)
+            {
+                return ConvertOptionalIntValue(fieldInfo.GetValue(source));
+            }
+
+            return null;
+        }
+
+        private int? ConvertOptionalIntValue(object value)
+        {
+            if (value == null) return null;
+            if (value is int intValue) return intValue;
+
+            PropertyInfo valueProperty = value.GetType().GetProperty("Value");
+            if (valueProperty != null)
+            {
+                object innerValue = valueProperty.GetValue(value);
+                if (innerValue is int innerIntValue) return innerIntValue;
+            }
+
+            if (value is IConvertible convertible)
+            {
+                try
+                {
+                    return convertible.ToInt32(null);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            return null;
         }
 
         private object CreateToolTargetSnapshot(Farmer player)

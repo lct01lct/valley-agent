@@ -200,6 +200,11 @@ namespace StardewMemoryExporter
                 {
                     HandleSwitchTool(pressedKeys);
                 }
+                else if (actionType.Equals("QUERY_WATER_SOURCES", StringComparison.OrdinalIgnoreCase))
+                {
+                    string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "Farm";
+                    HandleQueryWaterSources(locationName);
+                }
 
                 else
                 {
@@ -364,6 +369,52 @@ namespace StardewMemoryExporter
 
             SendResponseToPython(hasValidKey ? "SUCCESS" : "FAILURE");
             return;
+        }
+
+        private void HandleQueryWaterSources(string locationName)
+        {
+            ClearHeldMoveButtons();
+
+            GameLocation location = Game1.getLocationFromName(locationName);
+            if (location == null)
+            {
+                SendResponseToPython(new JObject
+                {
+                    ["status"] = "FAILURE",
+                    ["reason"] = "LOCATION_NOT_FOUND",
+                    ["location_name"] = locationName,
+                    ["water_sources"] = new JArray(),
+                }.ToString(Newtonsoft.Json.Formatting.None));
+                return;
+            }
+
+            JArray waterSources = new JArray();
+            int mapWidth = location.map.Layers[0].LayerWidth;
+            int mapHeight = location.map.Layers[0].LayerHeight;
+
+            for (int x = 0; x < mapWidth; x++)
+            {
+                for (int y = 0; y < mapHeight; y++)
+                {
+                    if (location.doesTileHaveProperty(x, y, "Water", "Back") == null)
+                    {
+                        continue;
+                    }
+
+                    waterSources.Add(new JObject
+                    {
+                        ["Tile"] = new JArray(x, y),
+                        ["Source"] = "BackLayerWater",
+                    });
+                }
+            }
+
+            SendResponseToPython(new JObject
+            {
+                ["status"] = "SUCCESS",
+                ["location_name"] = locationName,
+                ["water_sources"] = waterSources,
+            }.ToString(Newtonsoft.Json.Formatting.None));
         }
 
         private bool IsPlayerBusyForImmediateCommand()

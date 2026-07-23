@@ -12,7 +12,7 @@ from agent.behavior_tree.farm_debug_logger import FarmDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_action_tracker import ToolActionTracker
 from agent.behavior_tree.tool_selection import has_scythe_tree_seed_risk, is_current_tool, select_required_tool_for_obstacle
-from server.valley_server import StardewState
+from server.valley_server import InventoryItem, StardewState
 from server.type import Tile
 
 
@@ -32,16 +32,19 @@ WATER_ACTION_TIMEOUT_SECONDS = 12.0
 FARM_ACTION_TIMEOUT_SECONDS = 12.0
 MAX_WATER_ATTEMPTS = 3
 MAX_FARM_ACTION_ATTEMPTS = 3
-STATE_SETTLE_TICKS = 8
+STATE_SETTLE_TICKS = 3
 WATER_TOOL_VERIFY_DELAY_SECONDS = 0.75
 HOE_TOOL_VERIFY_DELAY_SECONDS = 1.2
 PLANT_ITEM_VERIFY_DELAY_SECONDS = 0.9
 FARM_TOOL_START_GRACE_SECONDS = 0.35
 FARM_TOOL_FINISH_TIMEOUT_SECONDS = 3.0
-WATER_SUCCESS_SETTLE_SECONDS = 0.9
+WATER_SUCCESS_SETTLE_SECONDS = 0.2
+WATER_RESULT_GRACE_SECONDS = 0.25
 FARM_ACTION_FAILURE_SETTLE_SECONDS = 0.45
 FARM_POSITIONING_STUCK_SETTLE_SECONDS = 0.45
-POSITIONING_STUCK_TIMEOUT_SECONDS = 0.45
+POSITIONING_SOFT_RECOVER_SETTLE_SECONDS = 0.08
+POSITIONING_STUCK_TIMEOUT_SECONDS = 1.2
+MAX_POSITIONING_SOFT_RECOVERIES = 2
 FAILED_WATER_RETRY_DELAY_SECONDS = 1.0
 MAX_FAILED_WATER_RETRY_COUNT = 3
 
@@ -100,10 +103,12 @@ class FarmNode(BTNode):
         self._planned_plant_tiles: list[Tile] = []
         self._plant_task_signature: tuple[int, str, int, int, int, int, int, int] | None = None
         self._last_use_tool_at: float | None = None
+        self._last_water_attempt_at: float | None = None
         self._last_debug_heartbeat_at = 0.0
         self._debug_tick_count = 0
         self._last_positioning_position: tuple[float, float] | None = None
         self._positioning_stuck_started_at: float | None = None
+        self._positioning_recovery_count = 0
         self._next_action_available_at = 0.0
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=FARM_TOOL_START_GRACE_SECONDS,
@@ -172,6 +177,7 @@ class FarmNode(BTNode):
             if farm_tile_state is not None and farm_tile_state.is_watered:
                 print(f"\n💧 [FarmNode] 目标地块已浇水: {self._target_tile}")
                 self._log(f"目标地块已浇水，跳过: {self._format_farm_tile_state(farm_tile_state)}")
+                self._last_water_attempt_at = None
                 self._mark_watered(self._target_tile, current_task)
                 if self._has_reached_water_count(current_task):
                     print(f"\n🟢 [FarmNode] 已完成本次浇水数量: {len(self._watered_tiles)}/{current_task.count}")
@@ -270,6 +276,12 @@ class FarmNode(BTNode):
         if self._is_waiting_for_tool_action_completion(game_state, "WATER", self._target_tile):
             return "RUNNING"
 
+        if self._is_watering_can_empty(game_state):
+            if self._should_wait_for_recent_water_result(game_state, self._target_tile):
+                return "RUNNING"
+            self._request_refill_watering_can(context, blackboard, game_state, self._target_tile)
+            return "RUNNING"
+
         if self._attempt_count >= MAX_WATER_ATTEMPTS:
             return self._skip_or_fail_current_target(
                 context,
@@ -280,6 +292,7 @@ class FarmNode(BTNode):
 
         self._wait_ticks = 0
         self._attempt_count += 1
+        self._last_water_attempt_at = time.time()
         print(f"\n💧 [FarmNode] 使用水壶浇水: target={self._target_tile}, attempt={self._attempt_count}")
         self._log(
             f"发送 USE_TOOL 浇水: target={self._target_tile}, attempt={self._attempt_count}, "
@@ -297,6 +310,7 @@ class FarmNode(BTNode):
         )
         if response == "BUSY":
             self._attempt_count -= 1
+            self._last_water_attempt_at = None
             self._log(f"C# Executor 忙碌，浇水 USE_TOOL 未执行，等待下一帧: target={self._target_tile}")
             return "RUNNING"
 
@@ -388,6 +402,9 @@ class FarmNode(BTNode):
 
         if positioning_result.status in ("MOVING", "FACING"):
             if positioning_result.status == "MOVING" and self._is_positioning_stuck(game_state, positioning_result):
+                if self._soft_recover_positioning_stuck(context, game_state, target_tile, positioning_result):
+                    return "RUNNING"
+
                 self._pause_after_farm_action(
                     context,
                     game_state,
@@ -397,7 +414,7 @@ class FarmNode(BTNode):
                 )
                 self._mark_batch_action_failed(
                     target_tile,
-                    f"农业站位移动疑似卡住: phase={self._target_phase}, reason={positioning_result.reason}",
+                    f"农业站位移动确认卡住: phase={self._target_phase}, reason={positioning_result.reason}",
                 )
                 self._reset_target()
             return "RUNNING"
@@ -427,6 +444,12 @@ class FarmNode(BTNode):
         elif self._is_waiting_for_tool_action_completion(game_state, self._target_phase, target_tile):
             return "RUNNING"
 
+        if self._target_phase == "WATER" and self._is_watering_can_empty(game_state):
+            if self._should_wait_for_recent_water_result(game_state, target_tile):
+                return "RUNNING"
+            self._request_refill_watering_can(context, blackboard, game_state, target_tile)
+            return "RUNNING"
+
         max_attempts = self._get_max_attempts_for_phase(self._target_phase)
         if self._attempt_count >= max_attempts:
             self._pause_after_farm_action(
@@ -447,6 +470,8 @@ class FarmNode(BTNode):
         self._attempt_count += 1
         if self._target_phase == "PLANT":
             self._last_use_tool_at = time.time()
+        if self._target_phase == "WATER":
+            self._last_water_attempt_at = time.time()
         print(
             f"\n🌱 [FarmNode] 执行农业动作: phase={self._target_phase}, "
             f"target={self._target_tile}, tool={required_tool}, attempt={self._attempt_count}"
@@ -462,6 +487,8 @@ class FarmNode(BTNode):
         if response == "BUSY":
             self._attempt_count -= 1
             self._last_use_tool_at = None
+            if self._target_phase == "WATER":
+                self._last_water_attempt_at = None
             self._log(
                 f"C# Executor 忙碌，农业动作未执行，等待下一帧: phase={self._target_phase}, "
                 f"target={self._target_tile}"
@@ -1081,6 +1108,8 @@ class FarmNode(BTNode):
         self._wait_ticks = 0
         self._has_faced_target = False
         self._last_use_tool_at = None
+        self._last_water_attempt_at = None
+        self._positioning_recovery_count = 0
         self.tool_action_tracker.reset()
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
@@ -1096,6 +1125,8 @@ class FarmNode(BTNode):
         self._attempt_count = 0
         self._wait_ticks = 0
         self._last_use_tool_at = None
+        self._last_water_attempt_at = None
+        self._positioning_recovery_count = 0
         self.tool_action_tracker.reset()
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
@@ -1449,6 +1480,8 @@ class FarmNode(BTNode):
         self._wait_ticks = 0
         self._has_faced_target = False
         self._last_use_tool_at = None
+        self._last_water_attempt_at = None
+        self._positioning_recovery_count = 0
         self.tool_action_tracker.reset()
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
@@ -1523,6 +1556,8 @@ class FarmNode(BTNode):
         self._wait_ticks = 0
         self._has_faced_target = False
         self._last_use_tool_at = None
+        self._last_water_attempt_at = None
+        self._positioning_recovery_count = 0
         self.tool_action_tracker.reset()
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
@@ -1614,6 +1649,40 @@ class FarmNode(BTNode):
         self._last_positioning_position = None
         self._positioning_stuck_started_at = None
 
+    def _soft_recover_positioning_stuck(
+        self,
+        context: PlayerContext,
+        game_state: StardewState,
+        target_tile: Tile,
+        positioning_result: PositioningResult,
+    ) -> bool:
+        if self._positioning_recovery_count >= MAX_POSITIONING_SOFT_RECOVERIES:
+            self._log(
+                f"站位软恢复次数耗尽，升级为确认卡住: target={target_tile}, "
+                f"phase={self._target_phase}, recoveries={self._positioning_recovery_count}/"
+                f"{MAX_POSITIONING_SOFT_RECOVERIES}, positioning={self.positioning_controller.get_debug_snapshot()}"
+            )
+            return False
+
+        self._positioning_recovery_count += 1
+        self._next_action_available_at = time.time() + POSITIONING_SOFT_RECOVER_SETTLE_SECONDS
+        self._send_command(
+            context,
+            StardewCommand(action=StardewAction.IDLE),
+            game_state,
+            f"positioning_soft_recover target={target_tile}",
+        )
+        self.positioning_controller.reset()
+        self._reset_positioning_stuck_detection()
+        self._log(
+            f"站位疑似卡住，执行软恢复并重新规划站位: target={target_tile}, "
+            f"phase={self._target_phase}, recoveries={self._positioning_recovery_count}/"
+            f"{MAX_POSITIONING_SOFT_RECOVERIES}, stand_tile={positioning_result.stand_tile}, "
+            f"player_tile={game_state.player_tile}, player_position={game_state.position}, "
+            f"next_wait={POSITIONING_SOFT_RECOVER_SETTLE_SECONDS:.2f}s"
+        )
+        return True
+
     def _pause_after_water_success(self, context: PlayerContext, game_state: StardewState, target_tile: Tile) -> None:
         self._pause_after_farm_action(
             context,
@@ -1675,6 +1744,66 @@ class FarmNode(BTNode):
         )
         return response
 
+    def _is_watering_can_empty(self, game_state: StardewState) -> bool:
+        watering_can_item = self._get_watering_can_item(game_state)
+        if watering_can_item is None or watering_can_item.water_left is None:
+            return False
+
+        return watering_can_item.water_left <= 0
+
+    def _should_wait_for_recent_water_result(self, game_state: StardewState, target_tile: Tile | None) -> bool:
+        if target_tile is None or self._attempt_count <= 0 or self._last_water_attempt_at is None:
+            return False
+
+        farm_tile_state = game_state.farm_tiles_by_tile.get(target_tile)
+        if farm_tile_state is not None and farm_tile_state.is_watered:
+            return False
+
+        elapsed_since_last_attempt = time.time() - self._last_water_attempt_at
+        if elapsed_since_last_attempt > WATER_RESULT_GRACE_SECONDS:
+            return False
+
+        self._log(
+            f"水壶已空但刚执行过浇水，等待目标结果刷新: target={target_tile}, "
+            f"elapsed={elapsed_since_last_attempt:.2f}s, "
+            f"state={self._format_farm_tile_state(farm_tile_state)}"
+        )
+        return True
+
+    def _get_watering_can_item(self, game_state: StardewState) -> InventoryItem | None:
+        for item in game_state.inventory.items:
+            if item.name == WATERING_CAN_TOOL_NAME:
+                return item
+        return None
+
+    def _request_refill_watering_can(
+        self,
+        context: PlayerContext,
+        blackboard: AgentBlackboard,
+        game_state: StardewState,
+        target_tile: Tile | None,
+    ) -> None:
+        context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+        blackboard.require_refill_watering_can = True
+        blackboard.refill_watering_can_owner = "Farm"
+        watering_can_item = self._get_watering_can_item(game_state)
+        self.tool_action_tracker.reset()
+        self.positioning_controller.reset()
+        print(f"\n💧 [FarmNode] 水壶没水，暂停当前浇水目标并请求补水: target={target_tile}")
+        self._log(
+            f"请求补水: target={target_tile}, watering_can={self._format_watering_can_item(watering_can_item)}, "
+            f"location={game_state.location_name}, player={game_state.player_tile}, "
+            f"blackboard={self._format_blackboard_state(blackboard)}"
+        )
+
+    def _format_watering_can_item(self, watering_can_item: InventoryItem | None) -> str:
+        if watering_can_item is None:
+            return "None"
+        return (
+            f"index={watering_can_item.index}, name={watering_can_item.name}, "
+            f"WaterLeft={watering_can_item.water_left}, WaterCapacity={watering_can_item.water_capacity}"
+        )
+
     def _log_debug_heartbeat(
         self,
         game_state: StardewState,
@@ -1717,6 +1846,9 @@ class FarmNode(BTNode):
             f"is_switching_tool={blackboard.is_switching_tool}, "
             f"required_tool_owner={blackboard.required_tool_owner}, "
             f"required_tool={blackboard.required_tool}, "
+            f"require_refill_watering_can={blackboard.require_refill_watering_can}, "
+            f"refill_watering_can_owner={blackboard.refill_watering_can_owner}, "
+            f"refill_water_source_tile={blackboard.refill_water_source_tile}, "
             f"clear_obstacle_owner={blackboard.clear_obstacle_owner}, "
             f"clear_obstacle_tile={blackboard.clear_obstacle_tile}, "
             f"clear_obstacle_type={blackboard.clear_obstacle_type}, "

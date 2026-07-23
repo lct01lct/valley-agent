@@ -1,6 +1,6 @@
 # 当前阶段：智能寻路 MVP + Farm P1 基础闭环
 
-更新时间：2026-07-21
+更新时间：2026-07-23
 
 本文记录当前阶段目标、进度、已知缺口、验收标准和开发顺序。这里的内容会比 `AGENTS.md` 更频繁变化；稳定架构约束仍以 `AGENTS.md` 为准。
 
@@ -39,6 +39,9 @@ Selector
 │   ├── ClearObstacleNode
 │   └── RouteNode
 ├── Sequence("Farm")
+│   ├── SwitchToolNode
+│   ├── ClearObstacleNode
+│   ├── RefillWateringCanNode
 │   └── FarmNode
 └── Sequence("Think")
     └── LLM_Node
@@ -61,6 +64,20 @@ Selector
 - `clear_obstacle_owner`
 - `clear_obstacle_tile`
 - `clear_obstacle_type`
+- `require_refill_watering_can`
+- `refill_watering_can_owner`
+- `refill_water_source_tile`
+
+## 当前记忆与缓存模型
+
+项目当前区分四层状态/缓存/记忆：
+
+1. `Realtime State`：每帧事实，例如玩家位置、当前工具、`UsingTool`、`CanMove`。
+2. `State Snapshot Cache`：性能缓存，例如 `obstacles`、`FarmTiles` 低频刷新；C# 没刷新时发 `null`，Python 复用上一份。
+3. `MapKnowledgeCache`：当前运行期地图知识，例如 Farm 水源。后续可记录路上看见但暂不处理的觅食物、箱子和交互点。
+4. `PersistentMemoryStore`：长期记忆预留接口，当前不实现、不调用；未来用于跨运行保存稳定线索。
+
+当前水源不作为每帧 state 高频字段同步。Farm 需要补水时，`RefillWateringCanNode` 先查 `MapKnowledgeCache`，没有缓存时通过 C# `QUERY_WATER_SOURCES` 低频查询一次，并把结果写回缓存。
 
 ## 当前寻路与移动模型
 
@@ -138,6 +155,14 @@ CLEAR_OBSTACLES -> HOE_TILES -> PLANT_SEEDS -> WATER_TILES -> DONE
 
 Farm 分支复用黑板中的工具切换和清障信号，通过 `required_tool_owner="Farm"` 和 `clear_obstacle_owner="Farm"` 区分调用来源。浇水阶段会维护 `_failed_water_tiles`、重试次数和重试时间，避免临时失败导致提前结束。
 
+Farm 水壶补水闭环：
+
+1. C# Observer 在 `Items` 中为 Watering Can 导出 `WaterLeft` 和 `WaterCapacity`。
+2. FarmNode 准备浇水前检查当前水壶 `WaterLeft`；若 `WaterLeft <= 0`，发送 `IDLE` 并通过 blackboard 触发补水。
+3. RefillWateringCanNode 读取/查询 Farm 水源，使用 `PositioningController` 站到水源上下左右相邻可达格并面向水源。
+4. 节点发送 `USE_TOOL` 接水，使用 `ToolActionTracker` 等待收招，再通过下一帧水壶 state 验证 `WaterLeft > 0`。
+5. 补水成功后清理 blackboard 标记，FarmNode 回到原浇水目标继续执行。
+
 ## 当前进度
 
 | 能力 | 状态 | 当前说明 |
@@ -154,6 +179,8 @@ Farm 分支复用黑板中的工具切换和清障信号，通过 `required_tool
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
 | 破坏障碍物 | 基础接入 | A* 可标记 Stone、Twig、Weeds；RouteNode 触发清障，SwitchToolNode 切工具，ClearObstacleNode 使用工具并验证障碍消失 |
 | Farm 浇水 | 基础接入 | FarmNode 可选择未浇水作物，复用 PositioningController 站到相邻格、对准 ToolTarget 后使用水壶；P1 浇水阶段已有临时失败重试队列 |
+| Farm 水壶补水 | 基础接入 | 水壶没水时触发 RefillWateringCanNode，按需查询并缓存 Farm 水源，站到水源旁接水后继续浇水 |
+| 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源，采集物/箱子等机会记忆后续接入 |
 | Farm P1 批处理 | 开发中 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线，仍需更多游戏内测试和失败恢复 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
@@ -173,6 +200,9 @@ Farm 分支复用黑板中的工具切换和清障信号，通过 `required_tool
 - Route/OpenDoor/SwitchTool/ClearObstacle 之间已有黑板标志协作。
 - C# Executor 已支持基础移动、开门、关闭对话、切换工具和使用工具。
 - C# Observer 已同步 `UsingTool`、`CanMove`、`IsPlayerFree` 和 `CanPlayerMove`，用于判断工具动画与玩家控制权。
+- C# Observer 已在背包 `Items` 中导出水壶 `WaterLeft` / `WaterCapacity`。
+- C# Executor 已支持 `QUERY_WATER_SOURCES`，可按需扫描指定场景 `Back` 层 `Water` tile 并返回水源坐标。
+- `agent/memory/` 已加入运行期 `MapKnowledgeCache` 和长期记忆预留接口。
 
 ## 当前缺口
 

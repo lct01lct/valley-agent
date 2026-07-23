@@ -3,6 +3,8 @@ from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
+from agent.action.location.location import Location
+
 
 class StardewAction(Enum):
     # =========================================================================
@@ -60,6 +62,11 @@ class StardewAction(Enum):
     DEFEND_SWORD = "DEFEND_SWORD"  # 武器格挡：使用大剑类武器时的右键防御防守，抵挡怪物的突袭
     PLACE_BOMB = "PLACE_BOMB"  # 放置炸弹：手持并在地面放置樱桃炸弹/巨型炸弹，进行大面积岩石与矿产爆破
 
+    # =========================================================================
+    # 🧠 6. 低频地图知识查询 (Low-frequency Knowledge Queries)
+    # =========================================================================
+    QUERY_WATER_SOURCES = "QUERY_WATER_SOURCES"  # 查询当前或指定场景中的可补水水源坐标，用于地图知识缓存
+
 
 type KeyType = Literal[
     "w",
@@ -93,3 +100,4 @@ class StardewCommand(BaseModel):
     action: StardewAction
     key: List[KeyType] | None = Field(default=None)
     mouse: MouseType | None = Field(default=None)
+    location_name: Location | None = Field(default=None)

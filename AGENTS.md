@@ -41,6 +41,9 @@ Selector
 │   ├── ClearObstacleNode
 │   └── RouteNode
 ├── Sequence("Farm")
+│   ├── SwitchToolNode
+│   ├── ClearObstacleNode
+│   ├── RefillWateringCanNode
 │   └── FarmNode
 └── Sequence("Think")
     └── LLM_Node
@@ -57,7 +60,12 @@ Selector
 - `ClearObstacleNode`：在玩家位于障碍物上下左右相邻格时使用当前工具清理 Stone、Twig、Weeds，并验证障碍消失。
 - `RouteNode`：选择跨场景路线、缓存 tile path、触发 A\*、驱动 MoveController、发现门/清障需求并写入 blackboard。
 
-`Farm` 分支内部当前由 `FarmNode` 消费农业任务。FarmNode 不直接实现底层路径推进，而是求解农业交互所需的候选站位和工具目标地块，再交给动作层的 `PositioningController` 完成站位和转向。
+`Farm` 分支内部的职责边界：
+
+- `SwitchToolNode`：根据 Farm 当前阶段切换 Hoe、种子、Watering Can 或清障工具。
+- `ClearObstacleNode`：处理 FarmNode 规划区域中的 Grass、Weeds、Twig、Stone 等可清障碍。
+- `RefillWateringCanNode`：当 FarmNode 发现水壶 `WaterLeft <= 0` 时，查询/读取地图知识缓存中的水源，移动到水源旁，面向水源并使用水壶补水。
+- `FarmNode`：消费农业任务，求解农业交互所需的候选站位和工具目标地块，再交给动作层的 `PositioningController` 完成站位和转向。
 
 ### Context 负责状态输入和动作输出
 
@@ -66,7 +74,20 @@ Selector
 - 状态输入链路：SMAPI `observer server` -> Python `observer client` -> `State` -> 行为树。
 - 动作输出链路：行为树 -> `Command` -> Python `Executor client` -> SMAPI `Executor`。
 
-`ValleyAgent` 的 tick driver 每轮同时驱动 context 更新和行为树轮询。行为树不直接拥有 Observer/Executor 连接，而是通过 `PlayerContext` 读取最新状态、发送控制命令。
+`PlayerContext` 还持有运行期 `MapKnowledgeCache`。它用于保存低频地图知识和机会记忆，例如按需查询到的 Farm 水源；它不是每帧实时 state，也不是 blackboard 调度信号。
+
+`ValleyAgent` 的 tick driver 每轮同时驱动 context 更新和行为树轮询。行为树不直接拥有 Observer/Executor 连接，而是通过 `PlayerContext` 读取最新状态、发送控制命令，并按需读取运行期地图知识缓存。
+
+### 记忆与缓存分层
+
+项目中“缓存/记忆”分为四层：
+
+1. `Realtime State`：每帧游戏事实，例如位置、当前工具、`UsingTool`、`CanMove`。
+2. `State Snapshot Cache`：性能缓存，例如 `obstacles`、`FarmTiles` 低频刷新；C# 没刷新时发 `null`，Python 复用上一份。
+3. `MapKnowledgeCache`：当前运行期地图知识，例如水源、未来采集物、箱子或交互点。当前已用于 Farm 水源缓存。
+4. `PersistentMemoryStore`：长期记忆预留接口，当前不实现、不调用；未来用于跨运行保存稳定线索。
+
+不要把低变化地图知识塞进每帧 state。水源这类资源应优先走“按需查询 -> 写入 MapKnowledgeCache -> 后续复用”的模式。
 
 ### AgentBlackboard 是调度状态中心
 
@@ -136,6 +157,18 @@ SMAPI Observer 需要持续导出并同步以下状态：
 - 动作失败应区分永久失败和临时失败。Farm P1 浇水阶段的站位卡顿、动作未命中或短暂时序问题应进入浇水重试队列；锄地、播种、清障等阶段只有在明确不可执行或重试耗尽时才标记地块失败。
 - 不要使用 `time.sleep()` 等待工具动画；应通过每 tick 的状态变化判断或使用非阻塞状态机。
 
+### 状态驱动优先，时间等待只做保护
+
+行为树节点的成功、失败和推进判断应优先依赖最新 `context.state`，例如位置、`ToolTarget`、`UsingTool`、`CanMove`、障碍是否消失、`HasHoeDirt`、`HasCrop`、`IsWatered`、`WaterLeft` 等真实游戏状态。
+
+等待固定 tick 数或秒数不能作为主要业务判断，只能作为保护性机制：
+
+- 短暂 grace window：命令刚发出后，允许 SMAPI state 有少量刷新延迟，避免立刻误判失败。
+- 非阻塞节流：避免同一 tick 或极短时间内重复发送高风险动作命令。
+- 超时兜底：当期望的 state 变化一直没有出现时，节点必须退出等待并进入恢复、重试或失败流程，不能永久 `RUNNING`。
+
+因此，类似 `STATE_SETTLE_TICKS`、`*_VERIFY_DELAY_SECONDS`、`*_STUCK_TIMEOUT_SECONDS`、`*_RETRY_DELAY_SECONDS` 的参数只能用于“防误判”和“防死锁”，不应替代状态验证。若 state 已明确证明动作完成或目标已达成，应尽快推进；若 state 已明确证明动作不可执行，应尽快进入恢复或失败，而不是继续等待固定时间。
+
 ## Codex 必须显式读取的项目 Skills
 
 项目内 Skill 位于 `skills/`。项目级 Skill 不一定会被 Codex 自动发现，因此不要依赖自动触发；符合以下条件时，必须显式打开并遵循对应 `SKILL.md`：
@@ -150,12 +183,14 @@ SMAPI Observer 需要持续导出并同步以下状态：
 - `main.py`：当前入口，加载环境、清理日志、初始化 `ValleyAgent` 并提交任务。
 - `agent/valley_agent.py`：创建行为树、`PlayerContext` 和 `AgentBlackboard`，运行高频 tick 循环。
 - `agent/behavior_tree/`：行为树节点、黑板、玩家上下文、规划兜底和寻路控制。
+- `agent/memory/`：运行期地图知识缓存和长期记忆预留接口。
 - `agent/action/map/map.py`：`HardcodedStardewMap`，维护硬编码场景连通图和最少场景跳数候选路线枚举。
 - `agent/action/valley_action/AStar.py`：本地 A\* 寻路、路线动作标注和障碍代价函数。
 - `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。
 - `agent/action/valley_action/positioning_controller.py`：通用交互站位控制，输入候选站位和工具目标地块，输出移动、转向或 READY 状态。
 - `agent/action/valley_action/tool_targeting.py`：工具目标判断、`FACE_DIRECTION` 转向命令和 ToolTarget 日志格式化。
 - `agent/behavior_tree/tool_action_tracker.py`：跨帧跟踪工具动作开始、收招和超时，供清障、锄地、浇水等节点复用。
+- `agent/behavior_tree/refill_watering_can_node.py`：Farm 水壶补水节点，按需查询并缓存水源，复用站位控制和工具动作等待。
 - `server/valley_server.py`：Python 侧 SMAPI Observer/Executor TCP 客户端和状态解析。
 - `StardewMemoryExporter/`：SMAPI Mod，导出结构化状态并执行移动、开门、关闭对话和使用工具等命令。
 - `skills/`：项目内 Codex Skills。若 Codex 无法自动发现，必须通过本文件显式说明。
@@ -171,6 +206,9 @@ SMAPI Observer 需要持续导出并同步以下状态：
 - 清障必须验证工具可用、玩家位于上下左右相邻格、朝向正确，并在动作后从新状态确认障碍已经消失；当前不允许斜向破坏障碍物。
 - 工具切换应优先读取 SMAPI state 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items`，不要在 Python 端硬猜当前工具。
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
+- 节点推进应状态驱动优先；固定 tick/秒数等待只能用于短暂防抖、节流和超时兜底，不要用经验等待替代 SMAPI state 验证。
+- 水壶补水属于 Farm 分支的资源恢复能力。FarmNode 发现 `WaterLeft <= 0` 时应通过 blackboard 触发 `RefillWateringCanNode`，不要在 FarmNode 内部直接实现找水源、移动和补水。
+- 水源坐标属于低频地图知识，优先通过 C# `QUERY_WATER_SOURCES` 按需查询并写入 `MapKnowledgeCache`；不要作为每帧 state 高频字段同步。
 - 不重复实现寻路或动作逻辑；共享行为下沉到 A\*、动作层或复用节点。
 - 交互类节点应优先复用 `PositioningController` 做站位与转向；节点只求解候选站位和工具目标地块，不在节点内部重复维护路径缓存。
 - 不让 A\* 每帧重算；优先维护 RouteNode 的路径缓存、path_index 推进和 MoveController 局部跟随。
