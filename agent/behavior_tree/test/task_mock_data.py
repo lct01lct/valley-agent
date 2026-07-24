@@ -25,6 +25,7 @@ TASK_MOCK_DATA: Dict[
         "FARM_P1_1",
         "FARM_P1_2",
         "FARM_P1_3",
+        "MINING_PO",
     ],
     List[BaseTask],
 ] = {
@@ -195,5 +196,8 @@ TASK_MOCK_DATA: Dict[
             area_width=3,
             area_height=3,
         ),
+    ],
+    "MINING_PO": [
+        RouteTask(task_type="ROUTE", desc="前往矿洞", target_loc="Mine"),
     ],
 }

@@ -46,8 +46,9 @@ class Agent_Model:
 
     async def run(self, prompt: str, ctx: PlayerContext) -> List[BaseTask]:
         TEST_MODE: TaskType = "ROUTE"
-        # TEST_MODE: TaskType = "FARM"
         TEST_MODE: TaskType = "FARM"
+        TEST_MODE: TaskType = "CHEST"
+        TEST_MODE: TaskType = "MINE"
 
         if self.is_mock_data:
             await asyncio.sleep(2.0)
@@ -70,6 +71,8 @@ class Agent_Model:
                 # return TASK_MOCK_DATA["FARM_P1_1"]
                 # return TASK_MOCK_DATA["FARM_P1_2"]
                 return TASK_MOCK_DATA["FARM_P1_3"]
+            elif TEST_MODE == "MINE":
+                return TASK_MOCK_DATA["MINING_PO"]
             else:
                 return []
         else:
@@ -166,16 +169,8 @@ class LLM_Node(BTNode):
         recovery_farm_task: FarmTask,
         missing_chest_items: list[ChestItemRequest],
     ) -> list[ChestTask]:
-        tool_items = [
-            item
-            for item in missing_chest_items
-            if item.qualified_item_id is None
-        ]
-        seed_or_stack_items = [
-            item
-            for item in missing_chest_items
-            if item.qualified_item_id is not None
-        ]
+        tool_items = [item for item in missing_chest_items if item.qualified_item_id is None]
+        seed_or_stack_items = [item for item in missing_chest_items if item.qualified_item_id is not None]
 
         chest_tasks: list[ChestTask] = []
         if tool_items:
@@ -232,7 +227,9 @@ class LLM_Node(BTNode):
         normalized_item_name = self._normalize_tool_text(item_name)
         for tool_name in FARM_BORROWABLE_TOOL_NAMES:
             normalized_tool_name = self._normalize_tool_text(tool_name)
-            if normalized_item_name == normalized_tool_name or normalized_item_name.endswith(f" {normalized_tool_name}"):
+            if normalized_item_name == normalized_tool_name or normalized_item_name.endswith(
+                f" {normalized_tool_name}"
+            ):
                 return True
         return False
 

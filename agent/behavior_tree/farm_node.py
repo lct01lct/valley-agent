@@ -17,10 +17,13 @@ from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.farm_debug_logger import FarmDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_action_tracker import ToolActionTracker
-from agent.behavior_tree.tool_selection import has_scythe_tree_seed_risk, is_current_tool, select_required_tool_for_obstacle
+from agent.behavior_tree.tool_selection import (
+    has_scythe_tree_seed_risk,
+    is_current_tool,
+    select_required_tool_for_obstacle,
+)
 from server.valley_server import InventoryItem, StardewState
 from server.type import Tile
-
 
 type FarmAction = Literal["PLANT", "WATER", "PLANT_AND_WATER"]
 type FarmWorkPhase = Literal["HOE", "PLANT", "WATER", "DONE"]
@@ -71,7 +74,7 @@ class FarmTask(BaseTask):
     ):
         super().__init__(task_type=task_type, desc=desc)
         self.farm_action = farm_action
-        self.target_loc = target_loc
+        self.target_loc: Location = target_loc
         self.seed_name = seed_name
         self.count = count
         self.target_tiles = target_tiles or []
@@ -349,12 +352,20 @@ class FarmNode(BTNode):
             self._reset_target()
 
         target_tile = self._select_next_batch_target(game_state, blackboard, current_task)
-        if target_tile is None and self._batch_phase == "WATER_TILES" and self._has_pending_batch_water_retry(game_state):
+        if (
+            target_tile is None
+            and self._batch_phase == "WATER_TILES"
+            and self._has_pending_batch_water_retry(game_state)
+        ):
             return "RUNNING"
 
         while target_tile is None and self._advance_batch_phase(game_state, current_task):
             target_tile = self._select_next_batch_target(game_state, blackboard, current_task)
-            if target_tile is None and self._batch_phase == "WATER_TILES" and self._has_pending_batch_water_retry(game_state):
+            if (
+                target_tile is None
+                and self._batch_phase == "WATER_TILES"
+                and self._has_pending_batch_water_retry(game_state)
+            ):
                 return "RUNNING"
 
         if target_tile is None or self._batch_phase == "DONE":
@@ -437,7 +448,9 @@ class FarmNode(BTNode):
             blackboard.require_switch_tool = True
             blackboard.is_switching_tool = True
             print(f"\n🟡 [FarmNode] 当前工具不是 {required_tool}，等待 Farm 分支切换工具。")
-            self._log(f"等待 Farm 切换工具: phase={self._target_phase}, required_tool={required_tool}, target={self._target_tile}")
+            self._log(
+                f"等待 Farm 切换工具: phase={self._target_phase}, required_tool={required_tool}, target={self._target_tile}"
+            )
             return "RUNNING"
 
         self._wait_ticks += 1
@@ -635,7 +648,9 @@ class FarmNode(BTNode):
 
         def sort_key(item: tuple[str, Tile]) -> tuple[int, int]:
             obstacle_type, target_tile = item
-            return self._get_obstacle_tool_group_order(obstacle_type), self._get_tile_distance(game_state.player_tile, target_tile)
+            return self._get_obstacle_tool_group_order(obstacle_type), self._get_tile_distance(
+                game_state.player_tile, target_tile
+            )
 
         return sorted(candidates, key=sort_key)[0][1]
 
@@ -718,7 +733,9 @@ class FarmNode(BTNode):
         player_neighbor_tiles = self._get_cardinal_neighbor_tiles(game_state.player_tile)
         actionable_tiles = [tile for tile in candidate_tiles if tile in player_neighbor_tiles]
         if actionable_tiles:
-            selected_tile = sorted(actionable_tiles, key=lambda tile: self._get_tile_distance(tool_target_tile, tile))[0]
+            selected_tile = sorted(actionable_tiles, key=lambda tile: self._get_tile_distance(tool_target_tile, tile))[
+                0
+            ]
             self._log(
                 f"优先选择当前站位可直接操作的邻格: target={selected_tile}, "
                 f"player_tile={game_state.player_tile}, tool_target={tool_target_tile}, "
@@ -982,7 +999,9 @@ class FarmNode(BTNode):
             return None
 
         candidate_tiles = self._get_plant_candidate_tiles(current_task)
-        for target_tile in sorted(candidate_tiles, key=lambda tile: self._get_tile_distance(game_state.player_tile, tile)):
+        for target_tile in sorted(
+            candidate_tiles, key=lambda tile: self._get_tile_distance(game_state.player_tile, tile)
+        ):
             if target_tile in self._completed_plant_tiles:
                 continue
             if target_tile in self._failed_plant_tiles:
@@ -1195,7 +1214,9 @@ class FarmNode(BTNode):
                 if self._should_skip_failed_water_target(target_tile):
                     continue
                 farm_tile_state = game_state.farm_tiles_by_tile.get(target_tile)
-                self._log(f"检查指定浇水目标: target={target_tile}, state={self._format_farm_tile_state(farm_tile_state)}")
+                self._log(
+                    f"检查指定浇水目标: target={target_tile}, state={self._format_farm_tile_state(farm_tile_state)}"
+                )
                 if farm_tile_state is not None and farm_tile_state.is_watered:
                     self._log(f"跳过指定目标，因为已浇水: target={target_tile}")
                     continue
@@ -1240,7 +1261,9 @@ class FarmNode(BTNode):
         self._failed_water_retry_count_by_tile.pop(target_tile, None)
         self._failed_water_retry_at_by_tile.pop(target_tile, None)
         self._failed_water_reason_by_tile.pop(target_tile, None)
-        self._log(f"确认地块已浇水: target={target_tile}, completed={len(self._watered_tiles)}, count={current_task.count}")
+        self._log(
+            f"确认地块已浇水: target={target_tile}, completed={len(self._watered_tiles)}, count={current_task.count}"
+        )
 
     def _mark_water_failed(self, target_tile: Tile, reason: str) -> None:
         retry_count = self._failed_water_retry_count_by_tile.get(target_tile, 0) + 1
@@ -1717,10 +1740,7 @@ class FarmNode(BTNode):
             game_state,
             f"farm_action_settle reason={reason} target={target_tile}",
         )
-        self._log(
-            f"农业动作后等待状态收尾: reason={reason}, target={target_tile}, "
-            f"settle={settle_seconds:.2f}s"
-        )
+        self._log(f"农业动作后等待状态收尾: reason={reason}, target={target_tile}, " f"settle={settle_seconds:.2f}s")
 
     def _is_waiting_after_farm_action(self, game_state: StardewState) -> bool:
         remaining_seconds = self._next_action_available_at - time.time()
@@ -1892,7 +1912,9 @@ class FarmNode(BTNode):
             self._log("FarmTiles 快照为空。")
             return
 
-        preview = ", ".join(self._format_farm_tile_state(farm_tile_state) for farm_tile_state in game_state.farm_tiles[:20])
+        preview = ", ".join(
+            self._format_farm_tile_state(farm_tile_state) for farm_tile_state in game_state.farm_tiles[:20]
+        )
         self._log(f"FarmTiles 快照预览: count={len(game_state.farm_tiles)}, preview=[{preview}]")
 
     def _format_farm_tile_state(self, farm_tile_state) -> str:
