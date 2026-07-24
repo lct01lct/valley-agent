@@ -17,7 +17,8 @@ from server.type import Tile
 
 
 type ChestAction = Literal[
-    "TAKE",  # 从指定箱子取出指定物品；Chest P0 当前只实现该动作。
+    "TAKE",  # 从指定箱子取出指定物品；Chest P0。
+    "PUT",  # 向指定箱子存入指定物品；Chest P1。
 ]
 
 
@@ -93,10 +94,11 @@ class ChestTask(BaseTask):
 
 class ChestNode(BTNode):
     """
-    Chest P0：指定箱子取物。
+    Chest P0/P1：指定箱子取物或存物。
 
     当前不模拟鼠标 UI。节点先复用 PositioningController 走到箱子上下左右相邻格并面向箱子，
-    然后发送 SMAPI 结构化动作 TAKE_ITEMS_FROM_CHEST，并通过下一帧 inventory state 验证背包数量增加。
+    然后发送 SMAPI 结构化动作 TAKE_ITEMS_FROM_CHEST / PUT_ITEMS_TO_CHEST，
+    并通过下一帧 inventory state 验证背包数量变化。
     """
 
     def __init__(self) -> None:
@@ -110,7 +112,7 @@ class ChestNode(BTNode):
         self._opened_chest_at: float | None = None
         self._has_opened_chest = False
         self._has_closed_chest = False
-        self._has_sent_take_command = False
+        self._has_sent_transfer_command = False
         self._last_debug_heartbeat_at = 0.0
         self.chest_debug_logger = ChestDebugLogger()
 
@@ -137,8 +139,8 @@ class ChestNode(BTNode):
 
         self._log_debug_heartbeat(blackboard, game_state, current_task)
 
-        if current_task.chest_action != "TAKE":
-            self._fail(context, blackboard, current_task, f"Chest P0 暂不支持动作: {current_task.chest_action}")
+        if current_task.chest_action not in ("TAKE", "PUT"):
+            self._fail(context, blackboard, current_task, f"Chest 暂不支持动作: {current_task.chest_action}")
             return "SUCCESS"
 
         invalid_items = [item for item in current_task.items if item.count <= 0 or not item.item_name]
@@ -160,13 +162,17 @@ class ChestNode(BTNode):
             return "SUCCESS" if not blackboard.macro_plan else "RUNNING"
 
         if self._started_at is not None and time.time() - self._started_at > CHEST_ACTION_TIMEOUT_SECONDS:
-            self._fail(context, blackboard, current_task, "Chest P0 取物超时")
+            self._fail(context, blackboard, current_task, f"Chest {current_task.chest_action} 动作超时")
             return "SUCCESS"
 
         if self._is_waiting_for_inventory_verification(game_state, context, blackboard, current_task):
             return "RUNNING"
 
-        if self._has_enough_items_in_inventory(game_state, blackboard, current_task):
+        if current_task.chest_action == "TAKE" and self._has_enough_items_in_inventory(game_state, blackboard, current_task):
+            return "SUCCESS"
+
+        if current_task.chest_action == "PUT" and not self._has_any_put_item_in_inventory(game_state, current_task):
+            self._fail(context, blackboard, current_task, "背包中没有任何可存入箱子的目标物品")
             return "SUCCESS"
 
         positioning_result = self._tick_chest_positioning(game_state, context, resolved_chest_tile)
@@ -209,7 +215,7 @@ class ChestNode(BTNode):
             )
             return "RUNNING"
 
-        self._take_items_from_chest(context, blackboard, game_state, current_task, resolved_chest_tile)
+        self._transfer_chest_items(context, blackboard, game_state, current_task, resolved_chest_tile)
         return "RUNNING"
 
     def _start(self, blackboard: AgentBlackboard, game_state: StardewState, current_task: ChestTask) -> None:
@@ -222,7 +228,7 @@ class ChestNode(BTNode):
         self._opened_chest_at = None
         self._has_opened_chest = False
         self._has_closed_chest = False
-        self._has_sent_take_command = False
+        self._has_sent_transfer_command = False
         self._last_debug_heartbeat_at = 0.0
         self.positioning_controller.reset()
         print(
@@ -319,7 +325,7 @@ class ChestNode(BTNode):
             f"tool_target={game_state.tool_target.tile}, response={response}"
         )
 
-    def _take_items_from_chest(
+    def _transfer_chest_items(
         self,
         context: PlayerContext,
         blackboard: AgentBlackboard,
@@ -327,22 +333,27 @@ class ChestNode(BTNode):
         current_task: ChestTask,
         resolved_chest_tile: Tile,
     ) -> None:
-        if self._has_sent_take_command:
+        if self._has_sent_transfer_command:
             return
 
-        missing_item_requests = self._get_missing_item_requests(game_state, current_task)
-        if not missing_item_requests:
-            self._expected_after_counts = self._count_requested_items(game_state, current_task)
-            self._verify_started_at = time.time()
+        transfer_item_requests = self._get_transfer_item_requests(game_state, current_task)
+        if not transfer_item_requests:
+            self._fail(context, blackboard, current_task, f"没有可执行的箱子转移动作: action={current_task.chest_action}")
             return
 
+        transfer_action = (
+            StardewAction.TAKE_ITEMS_FROM_CHEST
+            if current_task.chest_action == "TAKE"
+            else StardewAction.PUT_ITEMS_TO_CHEST
+        )
+        action_desc = "从箱子批量取物" if current_task.chest_action == "TAKE" else "向箱子批量存物"
         print(
-            f"\n📦 [ChestNode] 从箱子批量取物: "
-            f"items={self._format_item_requests(missing_item_requests)}, chest={resolved_chest_tile}"
+            f"\n📦 [ChestNode] {action_desc}: "
+            f"items={self._format_item_requests(transfer_item_requests)}, chest={resolved_chest_tile}"
         )
         response = context.executor_client.send_command(
             StardewCommand(
-                action=StardewAction.TAKE_ITEMS_FROM_CHEST,
+                action=transfer_action,
                 location_name=current_task.target_loc,
                 tile=(resolved_chest_tile.x, resolved_chest_tile.y),
                 chest_items=[
@@ -351,15 +362,15 @@ class ChestNode(BTNode):
                         qualified_item_id=item.qualified_item_id,
                         count=item.count,
                     )
-                    for item in missing_item_requests
+                    for item in transfer_item_requests
                 ],
             )
         )
-        self._has_sent_take_command = True
+        self._has_sent_transfer_command = True
         result = self._parse_chest_batch_action_result(response)
         self._log(
-            f"发送 TAKE_ITEMS_FROM_CHEST: response={response}, parsed={result}, "
-            f"missing_items={self._format_item_requests(missing_item_requests)}, "
+            f"发送 {transfer_action.value}: response={response}, parsed={result}, "
+            f"transfer_items={self._format_item_requests(transfer_item_requests)}, "
             f"before_counts={self._before_counts}, state_counts={self._count_requested_items(game_state, current_task)}"
         )
 
@@ -367,10 +378,10 @@ class ChestNode(BTNode):
             self._expected_after_counts = {}
             self._verify_started_at = None
             failure_reason = result.reason or result.status or "UNKNOWN_FAILURE"
-            self._log(f"TAKE_ITEMS_FROM_CHEST 返回失败: reason={failure_reason}")
+            self._log(f"{transfer_action.value} 返回失败: reason={failure_reason}")
             if self._has_opened_chest and not self._has_closed_chest:
                 self._close_chest_menu(context)
-            self._fail(context, blackboard, current_task, f"从箱子批量取物失败: reason={failure_reason}")
+            self._fail(context, blackboard, current_task, f"箱子批量转移失败: reason={failure_reason}")
             return
 
         if not result.results:
@@ -378,25 +389,32 @@ class ChestNode(BTNode):
             self._verify_started_at = None
             if self._has_opened_chest and not self._has_closed_chest:
                 self._close_chest_menu(context)
-            self._fail(context, blackboard, current_task, "从箱子批量取物失败: C# 未返回物品结果")
+            self._fail(context, blackboard, current_task, "箱子批量转移失败: C# 未返回物品结果")
             return
 
-        failed_results = [item_result for item_result in result.results if item_result.status != "SUCCESS"]
+        failed_results = [
+            item_result
+            for item_result in result.results
+            if not self._is_acceptable_transfer_result(current_task, item_result)
+        ]
         if failed_results:
             self._expected_after_counts = {}
             self._verify_started_at = None
             failure_reason = self._format_item_results(failed_results)
-            self._log(f"TAKE_ITEMS_FROM_CHEST 部分失败，准备关箱子后恢复: {failure_reason}")
+            self._log(f"{transfer_action.value} 部分失败，准备关箱子后恢复: {failure_reason}")
             if self._has_opened_chest and not self._has_closed_chest:
                 self._close_chest_menu(context)
-            self._fail(context, blackboard, current_task, f"从箱子批量取物部分失败: {failure_reason}")
+            self._fail(context, blackboard, current_task, f"箱子批量转移部分失败: {failure_reason}")
             return
 
         self._expected_after_counts = {}
         for item_result in result.results:
             item_key = (item_result.item_name, item_result.qualified_item_id)
             before_count = self._before_counts.get(item_key, 0)
-            self._expected_after_counts[item_key] = before_count + item_result.transferred_count
+            if current_task.chest_action == "TAKE":
+                self._expected_after_counts[item_key] = before_count + item_result.transferred_count
+            else:
+                self._expected_after_counts[item_key] = max(0, before_count - item_result.transferred_count)
         self._verify_started_at = time.time()
 
     def _is_waiting_for_inventory_verification(
@@ -414,17 +432,20 @@ class ChestNode(BTNode):
             return True
 
         current_counts = self._count_requested_items(game_state, current_task)
-        missing_items: list[str] = []
+        unverified_items: list[str] = []
         for item_request in current_task.items:
             item_key = item_request.key
             expected_count = self._expected_after_counts.get(item_key, item_request.count)
             current_count = current_counts.get(item_key, 0)
-            if current_count < expected_count:
-                missing_items.append(f"{item_request.item_name}:{current_count}/{expected_count}")
+            if current_task.chest_action == "TAKE" and current_count < expected_count:
+                unverified_items.append(f"{item_request.item_name}:{current_count}/{expected_count}")
+            if current_task.chest_action == "PUT" and current_count > expected_count:
+                unverified_items.append(f"{item_request.item_name}:{current_count}/{expected_count}")
 
-        if not missing_items:
+        if not unverified_items:
+            action_desc = "批量取物" if current_task.chest_action == "TAKE" else "批量存物"
             print(
-                f"\n🟢 [ChestNode] 批量取物完成: "
+                f"\n🟢 [ChestNode] {action_desc}完成: "
                 f"items={self._format_item_requests(current_task.items)}"
             )
             self._log(
@@ -440,12 +461,12 @@ class ChestNode(BTNode):
                 context,
                 blackboard,
                 current_task,
-                f"批量取物后背包验证超时: missing={missing_items}, expected={self._expected_after_counts}, current={current_counts}",
+                f"箱子批量转移后背包验证超时: unverified={unverified_items}, expected={self._expected_after_counts}, current={current_counts}",
             )
             return True
 
         self._log(
-            f"等待背包 state 验证批量取物结果: missing={missing_items}, "
+            f"等待背包 state 验证箱子批量转移结果: unverified={unverified_items}, "
             f"expected={self._expected_after_counts}, current={current_counts}"
         )
         return True
@@ -558,7 +579,7 @@ class ChestNode(BTNode):
         reason: str,
     ) -> None:
         context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
-        blackboard.prompt = f"Chest P0 取物失败，需要恢复计划：{reason}"
+        blackboard.prompt = f"Chest {current_task.chest_action} 失败，需要恢复计划：{reason}"
         blackboard.macro_plan = []
         blackboard.current_step_index = 0
         print(f"\n🔴 [ChestNode] {reason}")
@@ -686,25 +707,49 @@ class ChestNode(BTNode):
             counts[item_request.key] = self._count_inventory_item(game_state, item_request)
         return counts
 
-    def _get_missing_item_requests(
+    def _get_transfer_item_requests(
         self,
         game_state: StardewState,
         current_task: ChestTask,
     ) -> list[ChestItemRequest]:
-        missing_item_requests: list[ChestItemRequest] = []
+        transfer_item_requests: list[ChestItemRequest] = []
         for item_request in current_task.items:
             current_count = self._count_inventory_item(game_state, item_request)
-            missing_count = item_request.count - current_count
-            if missing_count <= 0:
+            if current_task.chest_action == "TAKE":
+                transfer_count = item_request.count - current_count
+            else:
+                transfer_count = min(item_request.count, current_count)
+
+            if transfer_count <= 0:
                 continue
-            missing_item_requests.append(
+            transfer_item_requests.append(
                 ChestItemRequest(
                     item_name=item_request.item_name,
                     qualified_item_id=item_request.qualified_item_id,
-                    count=missing_count,
+                    count=transfer_count,
                 )
             )
-        return missing_item_requests
+        return transfer_item_requests
+
+    def _has_any_put_item_in_inventory(self, game_state: StardewState, current_task: ChestTask) -> bool:
+        return any(
+            self._count_inventory_item(game_state, item_request) > 0
+            for item_request in current_task.items
+        )
+
+    def _is_acceptable_transfer_result(
+        self,
+        current_task: ChestTask,
+        item_result: ChestItemActionResult,
+    ) -> bool:
+        if item_result.status == "SUCCESS":
+            return True
+
+        return (
+            current_task.chest_action == "PUT"
+            and item_result.transferred_count > 0
+            and item_result.reason == "INVENTORY_NOT_ENOUGH"
+        )
 
     def _count_inventory_item(self, game_state: StardewState, item_request: ChestItemRequest) -> int:
         if item_request.qualified_item_id is None:
@@ -763,6 +808,6 @@ class ChestNode(BTNode):
         self._opened_chest_at = None
         self._has_opened_chest = False
         self._has_closed_chest = False
-        self._has_sent_take_command = False
+        self._has_sent_transfer_command = False
         self._last_debug_heartbeat_at = 0.0
         self.positioning_controller.reset()

@@ -179,27 +179,28 @@ Farm 水壶补水闭环：
 4. 节点发送 `USE_TOOL` 接水，使用 `ToolActionTracker` 等待收招，再通过下一帧水壶 state 验证 `WaterLeft > 0`。
 5. 补水成功后清理 blackboard 标记，FarmNode 回到原浇水目标继续执行。
 
-## 当前 Chest P0 模型
+## 当前 Chest P0/P1 模型
 
-`ChestNode` 当前只支持指定箱子取物：
+`ChestNode` 当前支持指定箱子批量取物和批量存物：
 
 ```text
 RouteTask("前往箱子所在场景") -> ChestTask("从指定 chest_tile 批量取 items")
+RouteTask("前往箱子所在场景") -> ChestTask("向指定 chest_tile 批量存 items")
 ```
 
 执行约束：
 
-1. `ChestTask` 必须指定 `target_loc`、`chest_tile` 和 `items`。`items` 中每一项表示背包至少需要拥有的目标物品数量；如果背包里已经全部足够，节点会直接完成，不再强行开箱取物。旧的 `item_name` / `count` 单物品字段仍保持兼容，但新用例优先使用批量 `items`。
+1. `ChestTask` 必须指定 `target_loc`、`chest_tile`、`chest_action` 和 `items`。`TAKE` 时，`items` 中每一项表示背包至少需要拥有的目标物品数量；如果背包里已经全部足够，节点会直接完成，不再强行开箱取物。`PUT` 时，`items` 表示尝试从背包存入箱子的物品清单；可堆叠物品不足请求数量时允许部分存入。旧的 `item_name` / `count` 单物品字段仍保持兼容，但新用例优先使用批量 `items`。
 2. Python 端先发送 `QUERY_CHESTS` 校验箱子坐标；如果指定坐标不存在但当前场景只有一个箱子，会自动改用这个唯一箱子的真实坐标。
 3. Python 端复用 `PositioningController`，将玩家移动到箱子上下左右相邻可达格，并通过 `FACE_DIRECTION` 面向箱子。
 4. 取物前会额外确认玩家身体稳定进入相邻格，尽量靠近箱子，避免刚踩进邻格就交互导致无法打开箱子。
 5. Python 端发送 `OPEN_CHEST` 打开箱子界面，并等待 0.5 秒让界面稳定。
-6. Python 端发送 `TAKE_ITEMS_FROM_CHEST` 结构化命令，一次性批量取物，不使用鼠标，不拖拽 UI。
+6. Python 端根据 `chest_action` 发送 `TAKE_ITEMS_FROM_CHEST` 或 `PUT_ITEMS_TO_CHEST` 结构化命令，一次性批量转移，不使用鼠标，不拖拽 UI。
 7. C# Executor 要求玩家位于当前场景、与箱子上下左右相邻、玩家没有处于工具动作状态；箱子菜单打开导致的 `CanMove=False` 不会阻止结构化取物。
-8. C# 端在 `Chest.Items` 和 `Game1.player.Items` 之间批量转移物品，返回每个物品的 `transferred_count` 和 `status`。
-9. Python 端发送 `CLOSE_MENU` 关闭箱子界面，再等待下一帧背包 state，并验证所有目标物品数量至少增加对应 `transferred_count` 后才推进 `current_step_index`。
+8. C# 端在 `Chest.Items` 和 `Game1.player.Items` 之间批量转移物品，返回每个物品的 `transferred_count`、`status` 和 `reason`。
+9. Python 端发送 `CLOSE_MENU` 关闭箱子界面，再等待下一帧背包 state：`TAKE` 验证数量增加，`PUT` 验证数量减少，验证通过后才推进 `current_step_index`。
 
-当前暂不支持放入箱子、自动查询箱子、自动选择箱子，也暂未把 FarmResourceCheckNode 的缺资源恢复自动转成 ChestTask；这些内容记录在 `docs/next-development-plan.md`。
+当前暂不支持查询箱子内容、自动选择箱子，也暂未把 FarmResourceCheckNode 的缺资源恢复自动转成 ChestTask；这些内容记录在 `docs/next-development-plan.md`。
 
 ## 当前进度
 
@@ -220,6 +221,7 @@ RouteTask("前往箱子所在场景") -> ChestTask("从指定 chest_tile 批量�
 | Farm 资源检查 | 基础接入 | FarmResourceCheckNode 在 FarmTask 前检查背包/工具栏中的工具、种子和水壶 state；缺资源时写入恢复上下文，不直接操作箱子 |
 | Farm 水壶补水 | 基础接入 | 水壶没水时触发 RefillWateringCanNode，按需查询并缓存 Farm 水源，站到水源旁接水后继续浇水 |
 | Chest P0 指定取物 | 基础接入 | ChestNode 可用 `QUERY_CHESTS` 校验/恢复唯一箱子坐标，站到箱子旁，调用 SMAPI `TAKE_ITEMS_FROM_CHEST` 结构化动作批量取物，并用背包 state 验证数量增加 |
+| Chest P1 指定存物 | 基础接入 | ChestNode 可调用 SMAPI `PUT_ITEMS_TO_CHEST` 结构化动作批量存物，支持部分存入并用背包 state 验证数量减少 |
 | 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源，采集物/箱子等机会记忆后续接入 |
 | Farm P1 批处理 | 开发中 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线，仍需更多游戏内测试和失败恢复 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |

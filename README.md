@@ -84,7 +84,7 @@ Selector
 
 ## Chest / Inventory 结构化动作
 
-Chest P0 不模拟鼠标和 UI 拖拽。Python `ChestNode` 会先用 `QUERY_CHESTS` 低频校验指定箱子坐标；如果指定坐标不存在但当前场景只有一个箱子，会自动改用这个唯一箱子的真实坐标。随后节点复用 `PositioningController` 移动到箱子上下左右相邻格并面向箱子，并在玩家身体稳定进入相邻格后发送 `OPEN_CHEST` 打开箱子界面，等待 0.5 秒，再向 SMAPI Executor 发送 `TAKE_ITEMS_FROM_CHEST` 批量取物：
+Chest P0/P1 不模拟鼠标和 UI 拖拽。Python `ChestNode` 会先用 `QUERY_CHESTS` 低频校验指定箱子坐标；如果指定坐标不存在但当前场景只有一个箱子，会自动改用这个唯一箱子的真实坐标。随后节点复用 `PositioningController` 移动到箱子上下左右相邻格并面向箱子，并在玩家身体稳定进入相邻格后发送 `OPEN_CHEST` 打开箱子界面，等待 0.5 秒，再向 SMAPI Executor 发送结构化批量动作：
 
 ```json
 {
@@ -98,7 +98,9 @@ Chest P0 不模拟鼠标和 UI 拖拽。Python `ChestNode` 会先用 `QUERY_CHES
 }
 ```
 
-C# 端要求玩家位于当前场景、与箱子上下左右相邻且未处于工具动作中，然后直接通过游戏对象模型在 `Chest.Items` 和 `Game1.player.Items` 之间批量转移物品。取物后 Python 会发送 `CLOSE_MENU` 关闭箱子界面，再等待下一帧背包 state 中所有目标物品数量增加。当前 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；如果背包里已经全部足够，`ChestNode` 会直接完成，不再强行开箱取物。
+C# 端要求玩家位于当前场景、与箱子上下左右相邻且未处于工具动作中，然后直接通过游戏对象模型在 `Chest.Items` 和 `Game1.player.Items` 之间批量转移物品。转移后 Python 会发送 `CLOSE_MENU` 关闭箱子界面，再等待下一帧背包 state 验证目标物品数量变化。`TAKE` 时 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；如果背包里已经全部足够，`ChestNode` 会直接完成，不再强行开箱取物。
+
+存物使用同一套站位、开箱、关箱和验证流程，只是动作换成 `PUT_ITEMS_TO_CHEST`。`PUT` 的语义是把背包中匹配清单的物品尽量放入箱子，并用背包 state 验证数量减少；如果可堆叠物品不足请求数量，允许部分存入并记录实际 `transferred_count`。
 
 ## 工具动作等待机制
 

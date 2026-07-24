@@ -78,24 +78,29 @@
 
 ### Chest / Inventory 后续能力
 
-Chest P0 已完成最小闭环：指定 `chest_tile`，通过 `QUERY_CHESTS` 校验坐标，站到箱子旁，通过 SMAPI `TAKE_ITEMS_FROM_CHEST` 一次性批量取出指定物品清单，并用背包 state 验证数量增加。若指定坐标不存在但当前场景只有一个箱子，P0 会自动使用唯一箱子的真实坐标。
+Chest P0/P1 已完成最小闭环：指定 `chest_tile`，通过 `QUERY_CHESTS` 校验坐标，站到箱子旁，通过 SMAPI `TAKE_ITEMS_FROM_CHEST` 一次性批量取出指定物品清单，或通过 `PUT_ITEMS_TO_CHEST` 一次性批量存入指定物品清单，并用背包 state 验证数量变化。若指定坐标不存在但当前场景只有一个箱子，会自动使用唯一箱子的真实坐标。
 
 后续按以下顺序推进：
 
 #### Chest P1：指定箱子存物
 
-目标：
+当前已完成基础接入：
 
 ```text
-站到指定 chest_tile 旁 -> PUT_TO_CHEST -> 验证背包数量减少
+站到指定 chest_tile 旁 -> PUT_ITEMS_TO_CHEST -> CLOSE_MENU -> 验证背包数量减少
 ```
 
-需要实现：
+已实现：
 
-- C# Executor 新增 `PUT_TO_CHEST`。
-- Python `ChestTask` 增加 `PUT`。
-- `ChestNode` 支持把背包里的指定物品放入指定箱子。
+- C# Executor 新增 `PUT_ITEMS_TO_CHEST`。
+- Python `ChestTask.chest_action` 支持 `PUT`。
+- `ChestNode` 支持把背包里的指定物品批量放入指定箱子。
 - 处理背包没有物品、箱子满、部分成功和验证超时。
+
+后续增强：
+
+- 对箱子满、部分存入和关键工具缺失做更细粒度恢复计划。
+- 结合 Chest P2 的箱子内容缓存，在存取成功后失效或更新缓存。
 
 #### Chest P2：查询箱子内容与缓存
 
@@ -232,12 +237,11 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 ## 当前建议顺序
 
-1. Chest P1：指定箱子存物。
-2. Chest P2：查询箱子内容，并把箱子位置/内容接入 `MapKnowledgeCache`。
-3. Chest P3：自动选择箱子。
-4. Chest P4：Farm 缺资源恢复联动。
-5. Farm 资源检查增强：体力、背包容量、箱子取物恢复计划。
-6. Farm 失败恢复细化。
+1. Chest P2：查询箱子内容，并把箱子位置/内容接入 `MapKnowledgeCache`。
+2. Chest P3：自动选择箱子。
+3. Chest P4：Farm 缺资源恢复联动。
+4. Farm 资源检查增强：体力、背包容量、箱子取物恢复计划。
+5. Farm 失败恢复细化。
 7. Farm mock 测试数据与验收日志整理。
 8. Daily Water。
 9. Harvest。

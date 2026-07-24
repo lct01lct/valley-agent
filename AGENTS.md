@@ -65,9 +65,9 @@ Selector
 
 `Chest` 分支内部的职责边界：
 
-- `ChestNode`：当前实现 Chest P0，只处理指定箱子取物。节点先用 `QUERY_CHESTS` 校验箱子坐标；若指定坐标不存在但当前场景只有一个箱子，可自动改用唯一箱子的真实坐标。随后复用 `PositioningController` 站到箱子上下左右相邻格并面向箱子，确认玩家身体稳定进入相邻格后发送 `OPEN_CHEST` 打开箱子界面，等待 0.5 秒，再发送 SMAPI 结构化动作 `TAKE_ITEMS_FROM_CHEST` 批量取物，之后发送 `CLOSE_MENU` 关闭箱子界面，最后用背包 state 验证所有目标物品数量增加。
+- `ChestNode`：当前实现 Chest P0/P1，处理指定箱子批量取物和批量存物。节点先用 `QUERY_CHESTS` 校验箱子坐标；若指定坐标不存在但当前场景只有一个箱子，可自动改用唯一箱子的真实坐标。随后复用 `PositioningController` 站到箱子上下左右相邻格并面向箱子，确认玩家身体稳定进入相邻格后发送 `OPEN_CHEST` 打开箱子界面，等待 0.5 秒，再根据 `ChestTask.chest_action` 发送 SMAPI 结构化动作 `TAKE_ITEMS_FROM_CHEST` 或 `PUT_ITEMS_TO_CHEST`，之后发送 `CLOSE_MENU` 关闭箱子界面，最后用背包 state 验证所有目标物品数量变化。
 
-Chest P0 不使用鼠标或 UI 拖拽。C# Executor 可以直接操作 `Chest.Items` 和 `Game1.player.Items`，但必须保持游戏约束：玩家在当前场景、位于箱子上下左右相邻格、玩家不处于 `UsingTool` / `CanMove=False` 状态。当前 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；若背包已有全部目标物品，ChestNode 应直接完成，不强行开箱取物。未来放入箱子、查询箱子内容、自动选择箱子和 Farm 缺资源恢复应继续扩展 Chest 分支，不要塞进 FarmNode。
+Chest P0/P1 不使用鼠标或 UI 拖拽。C# Executor 可以直接操作 `Chest.Items` 和 `Game1.player.Items`，但必须保持游戏约束：玩家在当前场景、位于箱子上下左右相邻格、玩家不处于 `UsingTool` / `CanMove=False` 状态。`TAKE` 的 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；若背包已有全部目标物品，ChestNode 应直接完成，不强行开箱取物。`PUT` 表示“把背包中匹配清单的物品尽量放入箱子”，可堆叠物品不足请求数量时允许部分存入并记录实际转移数量。未来查询箱子内容、自动选择箱子和 Farm 缺资源恢复应继续扩展 Chest 分支，不要塞进 FarmNode。
 
 `Farm` 分支内部的职责边界：
 

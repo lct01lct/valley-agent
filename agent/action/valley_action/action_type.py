@@ -71,6 +71,7 @@ class StardewAction(Enum):
     QUERY_CHESTS = "QUERY_CHESTS"  # 查询当前或指定场景中的箱子坐标，用于 Chest P0 坐标校验和后续箱子缓存
     TAKE_FROM_CHEST = "TAKE_FROM_CHEST"  # 从指定箱子取出指定物品；要求玩家位于箱子上下左右相邻格
     TAKE_ITEMS_FROM_CHEST = "TAKE_ITEMS_FROM_CHEST"  # 从指定箱子批量取出多个物品；要求玩家位于箱子上下左右相邻格
+    PUT_ITEMS_TO_CHEST = "PUT_ITEMS_TO_CHEST"  # 向指定箱子批量存入多个物品；要求玩家位于箱子上下左右相邻格
 
 
 type KeyType = Literal[

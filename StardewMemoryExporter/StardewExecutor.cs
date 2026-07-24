@@ -228,6 +228,10 @@ namespace StardewMemoryExporter
                 {
                     HandleTakeItemsFromChest(packet);
                 }
+                else if (actionType.Equals("PUT_ITEMS_TO_CHEST", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandlePutItemsToChest(packet);
+                }
 
                 else
                 {
@@ -648,6 +652,94 @@ namespace StardewMemoryExporter
             SendChestBatchTransferResponse(batchStatus, batchReason, locationName, chestTile, results);
         }
 
+        private void HandlePutItemsToChest(JObject packet)
+        {
+            ClearHeldMoveButtons();
+            if (IsPlayerBusyForChestTransfer())
+            {
+                SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", "FAILURE", "PLAYER_BUSY", "", null, new JArray());
+                return;
+            }
+
+            string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "";
+            if (!TryReadTile(packet, out Vector2 chestTile))
+            {
+                SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", "FAILURE", "INVALID_TILE", locationName, null, new JArray());
+                return;
+            }
+
+            if (packet["chest_items"] is not JArray chestItems || chestItems.Count == 0)
+            {
+                SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", "FAILURE", "INVALID_ITEMS", locationName, chestTile, new JArray());
+                return;
+            }
+
+            if (Game1.currentLocation == null || !string.Equals(Game1.currentLocation.Name, locationName, StringComparison.OrdinalIgnoreCase))
+            {
+                SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", "FAILURE", "CURRENT_LOCATION_MISMATCH", locationName, chestTile, new JArray());
+                return;
+            }
+
+            GameLocation location = Game1.currentLocation;
+            if (!location.Objects.TryGetValue(chestTile, out StardewValley.Object obj))
+            {
+                SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", "FAILURE", "OBJECT_NOT_FOUND", locationName, chestTile, new JArray());
+                return;
+            }
+
+            if (obj is not Chest chest)
+            {
+                SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", "FAILURE", "NOT_A_CHEST", locationName, chestTile, new JArray());
+                return;
+            }
+
+            if (!IsPlayerCardinalNeighbor(chestTile))
+            {
+                SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", "FAILURE", "PLAYER_NOT_NEXT_TO_CHEST", locationName, chestTile, new JArray());
+                return;
+            }
+
+            JArray results = new JArray();
+            int successCount = 0;
+            int transferredItemTypes = 0;
+
+            foreach (JToken rawItemRequest in chestItems)
+            {
+                string itemName = rawItemRequest["item_name"]?.ToString() ?? "";
+                string qualifiedItemId = rawItemRequest["qualified_item_id"]?.ToString() ?? "";
+                int requestedCount = rawItemRequest["count"]?.ToObject<int>() ?? 0;
+
+                if (string.IsNullOrWhiteSpace(itemName) || requestedCount <= 0)
+                {
+                    results.Add(BuildChestItemTransferResult("FAILURE", "INVALID_ITEM_REQUEST", itemName, qualifiedItemId, requestedCount, 0));
+                    continue;
+                }
+
+                int transferredCount = PutItemsToChest(chest, itemName, qualifiedItemId, requestedCount, out bool hasMatchingItem, out bool isChestFull);
+                string status = transferredCount >= requestedCount ? "SUCCESS" : "FAILURE";
+                string reason = "";
+                if (status != "SUCCESS")
+                {
+                    reason = isChestFull ? "CHEST_FULL" : hasMatchingItem ? "INVENTORY_NOT_ENOUGH" : "ITEM_NOT_FOUND";
+                }
+
+                if (transferredCount > 0)
+                {
+                    transferredItemTypes++;
+                }
+                if (status == "SUCCESS")
+                {
+                    successCount++;
+                }
+
+                results.Add(BuildChestItemTransferResult(status, reason, itemName, qualifiedItemId, requestedCount, transferredCount));
+            }
+
+            string batchStatus = successCount == results.Count ? "SUCCESS" : transferredItemTypes > 0 ? "PARTIAL_SUCCESS" : "FAILURE";
+            string batchReason = batchStatus == "SUCCESS" ? "" : "ITEM_TRANSFER_INCOMPLETE";
+            SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", batchStatus, batchReason, locationName, chestTile, results);
+        }
+
         private void HandleQueryChests(string locationName)
         {
             ClearHeldMoveButtons();
@@ -765,6 +857,72 @@ namespace StardewMemoryExporter
             return transferredCount;
         }
 
+        private int PutItemsToChest(
+            Chest chest,
+            string itemName,
+            string qualifiedItemId,
+            int requestedCount,
+            out bool hasMatchingItem,
+            out bool isChestFull
+        )
+        {
+            int remainingCount = requestedCount;
+            int transferredCount = 0;
+            hasMatchingItem = false;
+            isChestFull = false;
+
+            for (int inventoryIndex = 0; inventoryIndex < Game1.player.Items.Count; inventoryIndex++)
+            {
+                Item inventoryItem = Game1.player.Items[inventoryIndex];
+                if (inventoryItem == null || !IsItemMatch(inventoryItem, qualifiedItemId, itemName))
+                {
+                    continue;
+                }
+                hasMatchingItem = true;
+
+                int availableCount = Math.Max(inventoryItem.Stack, 1);
+                int putCount = Math.Min(remainingCount, availableCount);
+                if (putCount <= 0)
+                {
+                    continue;
+                }
+
+                Item itemToPut = inventoryItem.getOne();
+                itemToPut.Stack = putCount;
+                Item leftover = chest.addItem(itemToPut);
+
+                int leftoverCount = leftover?.Stack ?? 0;
+                int addedCount = Math.Max(0, putCount - leftoverCount);
+                if (addedCount <= 0)
+                {
+                    isChestFull = true;
+                    break;
+                }
+
+                inventoryItem.Stack -= addedCount;
+                transferredCount += addedCount;
+                remainingCount -= addedCount;
+
+                if (inventoryItem.Stack <= 0)
+                {
+                    Game1.player.Items[inventoryIndex] = null;
+                }
+
+                if (remainingCount <= 0)
+                {
+                    break;
+                }
+
+                if (leftoverCount > 0)
+                {
+                    isChestFull = true;
+                    break;
+                }
+            }
+
+            return transferredCount;
+        }
+
         private bool IsItemMatch(Item item, string qualifiedItemId, string itemName)
         {
             if (!string.IsNullOrWhiteSpace(qualifiedItemId)
@@ -864,10 +1022,22 @@ namespace StardewMemoryExporter
             JArray results
         )
         {
+            SendChestBatchTransferResponse("TAKE_ITEMS_FROM_CHEST", status, reason, locationName, chestTile, results);
+        }
+
+        private void SendChestBatchTransferResponse(
+            string action,
+            string status,
+            string reason,
+            string locationName,
+            Vector2? chestTile,
+            JArray results
+        )
+        {
             JObject response = new JObject
             {
                 ["status"] = status,
-                ["action"] = "TAKE_ITEMS_FROM_CHEST",
+                ["action"] = action,
                 ["reason"] = reason,
                 ["location_name"] = locationName,
                 ["results"] = results,
