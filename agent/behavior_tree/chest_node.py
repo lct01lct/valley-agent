@@ -10,10 +10,11 @@ from agent.action.valley_action.positioning_controller import PositioningControl
 from agent.action.valley_action.tool_targeting import build_tool_target_face_command, is_tool_targeting
 from agent.base_task import BaseTask, TaskType
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
-from agent.behavior_tree.blackboard import AgentBlackboard
+from agent.behavior_tree.blackboard import AgentBlackboard, BorrowedChestItem
 from agent.behavior_tree.chest_debug_logger import ChestDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_selection import count_inventory_items
+from agent.memory.map_knowledge_cache import ChestContentKnowledge
 from server.valley_server import StardewState
 from server.type import Tile
 
@@ -32,6 +33,7 @@ CHEST_MENU_WAIT_SECONDS = 0.5
 CHEST_STAND_TILE_MARGIN_PX = 1.0
 CHEST_INTERACTION_EDGE_MARGIN_PX = 1.0
 CHEST_INTERACTION_POSITION_TOLERANCE_PX = 2.0
+BORROWABLE_TOOL_NAMES: tuple[str, ...] = ("Axe", "Hoe", "Pickaxe", "Scythe", "Watering Can")
 
 
 @dataclass(frozen=True)
@@ -472,6 +474,10 @@ class ChestNode(BTNode):
             resolved_chest_tile,
             reason=f"{transfer_action.value} accepted",
         )
+        if current_task.chest_action == "TAKE":
+            self._record_borrowed_tool_items(blackboard, current_task, resolved_chest_tile, result.results)
+        elif current_task.chest_action == "PUT":
+            self._mark_borrowed_tool_items_returned(blackboard, current_task, resolved_chest_tile, result.results)
         self._log(
             f"标记箱子内容缓存过期: location={current_task.target_loc}, "
             f"chest={resolved_chest_tile}, reason={transfer_action.value} accepted"
@@ -578,6 +584,25 @@ class ChestNode(BTNode):
             return self._resolved_chest_tile
 
         if current_task.chest_tile is None:
+            if current_task.chest_action == "PUT":
+                borrowed_chest_tile = self._resolve_borrowed_return_chest_tile(blackboard, current_task)
+                if borrowed_chest_tile is not None:
+                    self._resolved_chest_tile = borrowed_chest_tile
+                    self._log(
+                        f"根据借用记录解析归还箱子: chest={borrowed_chest_tile}, "
+                        f"items={self._format_item_requests(current_task.items)}"
+                    )
+                    return self._resolved_chest_tile
+
+                semantic_chest_tile = self._resolve_semantic_tool_chest_tile(context, game_state, current_task)
+                if semantic_chest_tile is not None:
+                    self._resolved_chest_tile = semantic_chest_tile
+                    self._log(
+                        f"根据箱子语义记忆解析归还箱子: chest={semantic_chest_tile}, "
+                        f"items={self._format_item_requests(current_task.items)}"
+                    )
+                    return self._resolved_chest_tile
+
             self._fail(context, blackboard, current_task, f"{current_task.chest_action} 当前必须指定 chest_tile")
             return None
 
@@ -691,7 +716,7 @@ class ChestNode(BTNode):
         game_state: StardewState,
         current_task: ChestTask,
     ) -> NodeStatus:
-        if not self._ensure_scan_chest_tiles(context, blackboard, current_task):
+        if not self._ensure_take_search_chest_tiles(context, blackboard, game_state, current_task):
             return "SUCCESS"
 
         if self._scan_index >= len(self._scan_chest_tiles):
@@ -752,6 +777,96 @@ class ChestNode(BTNode):
             f"chests={self._format_tile_list(self._scan_chest_tiles)}"
         )
         return True
+
+    def _ensure_take_search_chest_tiles(
+        self,
+        context: PlayerContext,
+        blackboard: AgentBlackboard,
+        game_state: StardewState,
+        current_task: ChestTask,
+    ) -> bool:
+        if self._scan_chest_tiles:
+            return True
+
+        chests = self.chest_knowledge_service.query_chests(context, current_task.target_loc)
+        if chests is None:
+            self._fail(context, blackboard, current_task, f"查询箱子坐标失败: location={current_task.target_loc}")
+            return False
+
+        unknown_tiles: list[Tile] = []
+        stale_matching_tiles: list[Tile] = []
+        stale_fallback_tiles: list[Tile] = []
+        skipped_fresh_tiles: list[Tile] = []
+
+        for chest in chests:
+            chest_tile = chest.tile
+            cached_content = context.map_knowledge_cache.get_chest_content(
+                current_task.target_loc,
+                chest_tile,
+                include_stale=True,
+            )
+            if cached_content is None:
+                unknown_tiles.append(chest_tile)
+                continue
+
+            if not cached_content.is_stale:
+                if self._does_cached_chest_content_satisfy_requests(cached_content, current_task.items):
+                    self._scan_chest_tiles = [chest_tile]
+                    self._scan_index = 0
+                    self._scanned_chest_count = 0
+                    self._log(
+                        f"TAKE 搜索队列命中已知新鲜缓存: chest={chest_tile}, "
+                        f"items={self._format_item_requests(current_task.items)}"
+                    )
+                    return True
+
+                skipped_fresh_tiles.append(chest_tile)
+                continue
+
+            if self._does_cached_chest_content_satisfy_requests(cached_content, current_task.items):
+                stale_matching_tiles.append(chest_tile)
+            else:
+                stale_fallback_tiles.append(chest_tile)
+
+        self._scan_chest_tiles = self._sort_tiles_by_distance(
+            stale_matching_tiles,
+            game_state.player_tile,
+        ) + self._sort_tiles_by_distance(
+            unknown_tiles,
+            game_state.player_tile,
+        ) + self._sort_tiles_by_distance(
+            stale_fallback_tiles,
+            game_state.player_tile,
+        )
+        self._scan_index = 0
+        self._scanned_chest_count = 0
+
+        self._log(
+            f"准备按需搜索箱子: location={current_task.target_loc}, "
+            f"items={self._format_item_requests(current_task.items)}, "
+            f"queue={self._format_tile_list(self._scan_chest_tiles)}, "
+            f"unknown={self._format_tile_list(unknown_tiles)}, "
+            f"stale_matching={self._format_tile_list(stale_matching_tiles)}, "
+            f"stale_fallback={self._format_tile_list(stale_fallback_tiles)}, "
+            f"skipped_fresh_non_matching={self._format_tile_list(skipped_fresh_tiles)}"
+        )
+
+        if self._scan_chest_tiles:
+            if skipped_fresh_tiles:
+                print(
+                    f"\n📦 [ChestNode] 跳过已知不匹配箱子: "
+                    f"chests={self._format_tile_list(skipped_fresh_tiles)}"
+                )
+            return True
+
+        self._fail(
+            context,
+            blackboard,
+            current_task,
+            f"已知箱子缓存均不包含目标物品，且没有未知箱子可查看: "
+            f"items={self._format_item_requests(current_task.items)}",
+        )
+        return False
 
     def _begin_scan_chest(self, chest_tile: Tile) -> None:
         self._resolved_chest_tile = chest_tile
@@ -858,6 +973,250 @@ class ChestNode(BTNode):
             player_tile=chest_tile,
         )
         return any(matched_chest.tile == chest_tile for matched_chest in matched_chests)
+
+    def _does_cached_chest_content_satisfy_requests(
+        self,
+        chest_content: ChestContentKnowledge,
+        item_requests: list[ChestItemRequest],
+    ) -> bool:
+        for item_request in item_requests:
+            if self._count_items_in_cached_chest_content(chest_content, item_request) < item_request.count:
+                return False
+        return True
+
+    def _count_items_in_cached_chest_content(
+        self,
+        chest_content: ChestContentKnowledge,
+        item_request: ChestItemRequest,
+    ) -> int:
+        total_count = 0
+        for item in chest_content.items:
+            if item_request.qualified_item_id is not None:
+                if item.QualifiedItemId != item_request.qualified_item_id:
+                    continue
+            elif item.Name != item_request.item_name and item.DisplayName != item_request.item_name:
+                continue
+            total_count += max(item.Stack, 1)
+        return total_count
+
+    def _sort_tiles_by_distance(self, tiles: list[Tile], player_tile: Tile | None) -> list[Tile]:
+        return sorted(
+            tiles,
+            key=lambda tile: (
+                self._get_tile_distance(player_tile, tile),
+                tile.x,
+                tile.y,
+            ),
+        )
+
+    def _get_tile_distance(self, start_tile: Tile | None, end_tile: Tile) -> int:
+        if start_tile is None:
+            return 0
+        return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
+
+    def _record_borrowed_tool_items(
+        self,
+        blackboard: AgentBlackboard,
+        current_task: ChestTask,
+        chest_tile: Tile,
+        item_results: list[ChestItemActionResult],
+    ) -> None:
+        if current_task.chest_action != "TAKE":
+            return
+
+        recorded_items: list[str] = []
+        for item_result in item_results:
+            if item_result.transferred_count <= 0:
+                continue
+            if not self._is_borrowable_tool_name(item_result.item_name):
+                continue
+
+            self._add_borrowed_chest_item(
+                blackboard,
+                BorrowedChestItem(
+                    location_name=current_task.target_loc,
+                    chest_tile=chest_tile,
+                    item_name=item_result.item_name,
+                    qualified_item_id=item_result.qualified_item_id,
+                    count=item_result.transferred_count,
+                ),
+            )
+            recorded_items.append(f"{item_result.item_name}:{item_result.transferred_count}")
+
+        if recorded_items:
+            self._log(
+                f"记录工具借用来源: location={current_task.target_loc}, chest={chest_tile}, "
+                f"items={recorded_items}, borrowed={self._format_borrowed_chest_items(blackboard.borrowed_chest_items)}"
+            )
+
+    def _mark_borrowed_tool_items_returned(
+        self,
+        blackboard: AgentBlackboard,
+        current_task: ChestTask,
+        chest_tile: Tile,
+        item_results: list[ChestItemActionResult],
+    ) -> None:
+        if current_task.chest_action != "PUT":
+            return
+
+        returned_items: list[str] = []
+        for item_result in item_results:
+            if item_result.transferred_count <= 0:
+                continue
+            if not self._is_borrowable_tool_name(item_result.item_name):
+                continue
+
+            remaining_count = item_result.transferred_count
+            next_borrowed_items: list[BorrowedChestItem] = []
+            for borrowed_item in blackboard.borrowed_chest_items:
+                if remaining_count <= 0:
+                    next_borrowed_items.append(borrowed_item)
+                    continue
+
+                if not self._matches_borrowed_item(
+                    borrowed_item,
+                    current_task.target_loc,
+                    chest_tile,
+                    item_result.item_name,
+                    item_result.qualified_item_id,
+                ):
+                    next_borrowed_items.append(borrowed_item)
+                    continue
+
+                consumed_count = min(borrowed_item.count, remaining_count)
+                borrowed_item.count -= consumed_count
+                remaining_count -= consumed_count
+                if borrowed_item.count > 0:
+                    next_borrowed_items.append(borrowed_item)
+
+            blackboard.borrowed_chest_items = next_borrowed_items
+            returned_items.append(f"{item_result.item_name}:{item_result.transferred_count - remaining_count}")
+
+        if returned_items:
+            self._log(
+                f"扣减已归还工具借用记录: location={current_task.target_loc}, chest={chest_tile}, "
+                f"items={returned_items}, borrowed={self._format_borrowed_chest_items(blackboard.borrowed_chest_items)}"
+            )
+
+    def _add_borrowed_chest_item(
+        self,
+        blackboard: AgentBlackboard,
+        borrowed_item: BorrowedChestItem,
+    ) -> None:
+        for existing_item in blackboard.borrowed_chest_items:
+            if existing_item.key == borrowed_item.key:
+                existing_item.count += borrowed_item.count
+                return
+        blackboard.borrowed_chest_items.append(borrowed_item)
+
+    def _resolve_borrowed_return_chest_tile(
+        self,
+        blackboard: AgentBlackboard,
+        current_task: ChestTask,
+    ) -> Tile | None:
+        borrowed_by_tile: dict[tuple[int, int], list[BorrowedChestItem]] = {}
+        for borrowed_item in blackboard.borrowed_chest_items:
+            if borrowed_item.location_name != current_task.target_loc:
+                continue
+            borrowed_by_tile.setdefault((borrowed_item.chest_tile.x, borrowed_item.chest_tile.y), []).append(borrowed_item)
+
+        for borrowed_items in borrowed_by_tile.values():
+            if self._borrowed_items_satisfy_requests(borrowed_items, current_task.items):
+                return borrowed_items[0].chest_tile
+        return None
+
+    def _resolve_semantic_tool_chest_tile(
+        self,
+        context: PlayerContext,
+        game_state: StardewState,
+        current_task: ChestTask,
+    ) -> Tile | None:
+        if not current_task.items or not all(self._is_borrowable_tool_name(item.item_name) for item in current_task.items):
+            return None
+
+        semantic_chests = context.map_knowledge_cache.find_chest_semantics(
+            current_task.target_loc,
+            required_label="tool_chest",
+            intended_item_names={item.item_name for item in current_task.items},
+            player_tile=game_state.player_tile,
+        )
+        if not semantic_chests:
+            return None
+        return semantic_chests[0].tile
+
+    def _borrowed_items_satisfy_requests(
+        self,
+        borrowed_items: list[BorrowedChestItem],
+        item_requests: list[ChestItemRequest],
+    ) -> bool:
+        for item_request in item_requests:
+            matched_count = 0
+            for borrowed_item in borrowed_items:
+                if self._matches_item_identity(
+                    borrowed_item.item_name,
+                    borrowed_item.qualified_item_id,
+                    item_request.item_name,
+                    item_request.qualified_item_id,
+                ):
+                    matched_count += borrowed_item.count
+            if matched_count < item_request.count:
+                return False
+        return True
+
+    def _matches_borrowed_item(
+        self,
+        borrowed_item: BorrowedChestItem,
+        location_name: Location,
+        chest_tile: Tile,
+        item_name: str,
+        qualified_item_id: str | None,
+    ) -> bool:
+        return (
+            borrowed_item.location_name == location_name
+            and borrowed_item.chest_tile == chest_tile
+            and self._matches_item_identity(
+                borrowed_item.item_name,
+                borrowed_item.qualified_item_id,
+                item_name,
+                qualified_item_id,
+            )
+        )
+
+    def _matches_item_identity(
+        self,
+        source_item_name: str,
+        source_qualified_item_id: str | None,
+        target_item_name: str,
+        target_qualified_item_id: str | None,
+    ) -> bool:
+        if target_qualified_item_id is not None or source_qualified_item_id is not None:
+            return source_qualified_item_id == target_qualified_item_id
+        return self._normalize_tool_text(source_item_name) == self._normalize_tool_text(target_item_name)
+
+    def _is_borrowable_tool_name(self, item_name: str) -> bool:
+        normalized_item_name = self._normalize_tool_text(item_name)
+        for tool_name in BORROWABLE_TOOL_NAMES:
+            normalized_tool_name = self._normalize_tool_text(tool_name)
+            if normalized_item_name == normalized_tool_name or normalized_item_name.endswith(f" {normalized_tool_name}"):
+                return True
+        return False
+
+    def _normalize_tool_text(self, value: str) -> str:
+        return " ".join(value.strip().lower().split())
+
+    def _format_borrowed_chest_items(self, borrowed_items: list[BorrowedChestItem]) -> str:
+        return str(
+            [
+                {
+                    "location": item.location_name,
+                    "chest": item.chest_tile,
+                    "item": item.item_name,
+                    "qualified_item_id": item.qualified_item_id,
+                    "count": item.count,
+                }
+                for item in borrowed_items
+            ]
+        )
 
     def _reset_current_chest_interaction(self) -> None:
         self._opened_chest_at = None

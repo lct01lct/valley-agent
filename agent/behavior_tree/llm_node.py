@@ -9,10 +9,13 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.base_task import BaseTask, TaskType
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
+from agent.behavior_tree.chest_node import ChestItemRequest, ChestTask
 from agent.behavior_tree.farm_node import FarmTask
 from agent.behavior_tree.route_node import RouteTask
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.test.task_mock_data import TASK_MOCK_DATA
+
+FARM_BORROWABLE_TOOL_NAMES: tuple[str, ...] = ("Axe", "Hoe", "Pickaxe", "Scythe", "Watering Can")
 
 
 class Agent_Model:
@@ -44,7 +47,7 @@ class Agent_Model:
     async def run(self, prompt: str, ctx: PlayerContext) -> List[BaseTask]:
         TEST_MODE: TaskType = "ROUTE"
         # TEST_MODE: TaskType = "FARM"
-        TEST_MODE: TaskType = "CHEST"
+        TEST_MODE: TaskType = "FARM"
 
         if self.is_mock_data:
             await asyncio.sleep(2.0)
@@ -65,7 +68,8 @@ class Agent_Model:
                 # return TASK_MOCK_DATA["FARM_P0_3"]
                 # return TASK_MOCK_DATA["FARM_P0_4"]
                 # return TASK_MOCK_DATA["FARM_P1_1"]
-                return TASK_MOCK_DATA["FARM_P1_2"]
+                # return TASK_MOCK_DATA["FARM_P1_2"]
+                return TASK_MOCK_DATA["FARM_P1_3"]
             else:
                 return []
         else:
@@ -98,7 +102,9 @@ class LLM_Node(BTNode):
             blackboard.new_plan_received = False
 
             async def async_worker():
-                tasks = await self.agent.models.run(blackboard.prompt, ctx)
+                tasks = self._build_mock_farm_resource_recovery_plan(blackboard)
+                if tasks is None:
+                    tasks = await self.agent.models.run(blackboard.prompt, ctx)
                 blackboard.macro_plan = tasks
                 blackboard.current_step_index = 0
                 blackboard.new_plan_received = True
@@ -111,3 +117,124 @@ class LLM_Node(BTNode):
             return "RUNNING"
 
         return "FAILURE"  # 还有计划在干，放行控制流
+
+    def _build_mock_farm_resource_recovery_plan(self, blackboard: AgentBlackboard) -> list[BaseTask] | None:
+        if not self.agent.models.is_mock_data:
+            return None
+        if not blackboard.farm_resource_check_failed:
+            return None
+        if blackboard.farm_recovery_task is None:
+            return None
+        if not isinstance(blackboard.farm_recovery_task, FarmTask):
+            return None
+
+        missing_chest_items = [
+            ChestItemRequest(
+                item_name=str(raw_item["item_name"]),
+                count=int(raw_item["count"] or 0),
+                qualified_item_id=str(raw_item["qualified_item_id"]) if raw_item.get("qualified_item_id") else None,
+            )
+            for raw_item in blackboard.farm_missing_chest_items
+            if raw_item.get("item_name") and int(raw_item.get("count") or 0) > 0
+        ]
+        if not missing_chest_items:
+            return None
+
+        recovery_farm_task = blackboard.farm_recovery_task
+        chest_tasks = self._build_mock_farm_resource_chest_tasks(recovery_farm_task, missing_chest_items)
+        return_tool_tasks = self._build_mock_return_borrowed_tool_tasks(recovery_farm_task, missing_chest_items)
+        print(
+            "\n🟢 [LLM_Node] Farm 资源缺失，生成 Chest P4 mock 恢复计划："
+            f"items={[f'{item.item_name}:{item.count}' for item in missing_chest_items]}, "
+            f"chest_tasks={len(chest_tasks)}, return_tool_tasks={len(return_tool_tasks)}"
+        )
+        blackboard.farm_resource_check_failed = False
+        blackboard.farm_missing_resources = []
+        blackboard.farm_missing_chest_items = []
+        blackboard.farm_resource_recovery_hint = None
+        blackboard.farm_recovery_task = None
+
+        return [
+            RouteTask(task_type="ROUTE", desc="前往农场箱子所在场景", target_loc=recovery_farm_task.target_loc),
+            *chest_tasks,
+            recovery_farm_task,
+            *return_tool_tasks,
+        ]
+
+    def _build_mock_farm_resource_chest_tasks(
+        self,
+        recovery_farm_task: FarmTask,
+        missing_chest_items: list[ChestItemRequest],
+    ) -> list[ChestTask]:
+        tool_items = [
+            item
+            for item in missing_chest_items
+            if item.qualified_item_id is None
+        ]
+        seed_or_stack_items = [
+            item
+            for item in missing_chest_items
+            if item.qualified_item_id is not None
+        ]
+
+        chest_tasks: list[ChestTask] = []
+        if tool_items:
+            chest_tasks.append(
+                ChestTask(
+                    task_type="CHEST",
+                    desc="根据 Farm 缺失资源自动从当前场景箱子取工具",
+                    chest_action="TAKE",
+                    target_loc=recovery_farm_task.target_loc,
+                    chest_tile=None,
+                    items=tool_items,
+                )
+            )
+
+        for item in seed_or_stack_items:
+            chest_tasks.append(
+                ChestTask(
+                    task_type="CHEST",
+                    desc=f"根据 Farm 缺失资源自动从当前场景箱子取 {item.item_name}",
+                    chest_action="TAKE",
+                    target_loc=recovery_farm_task.target_loc,
+                    chest_tile=None,
+                    items=[item],
+                )
+            )
+
+        return chest_tasks
+
+    def _build_mock_return_borrowed_tool_tasks(
+        self,
+        recovery_farm_task: FarmTask,
+        missing_chest_items: list[ChestItemRequest],
+    ) -> list[ChestTask]:
+        borrowed_tool_items = [
+            item
+            for item in missing_chest_items
+            if self._is_borrowable_tool_name(item.item_name) and item.qualified_item_id is None
+        ]
+        if not borrowed_tool_items:
+            return []
+
+        return [
+            ChestTask(
+                task_type="CHEST",
+                desc="Farm 任务完成后把借来的工具放回原箱子",
+                chest_action="PUT",
+                target_loc=recovery_farm_task.target_loc,
+                chest_tile=None,
+                items=borrowed_tool_items,
+            )
+        ]
+
+    def _is_borrowable_tool_name(self, item_name: str) -> bool:
+        normalized_item_name = self._normalize_tool_text(item_name)
+        for tool_name in FARM_BORROWABLE_TOOL_NAMES:
+            normalized_tool_name = self._normalize_tool_text(tool_name)
+            if normalized_item_name == normalized_tool_name or normalized_item_name.endswith(f" {normalized_tool_name}"):
+                return True
+        return False
+
+    def _normalize_tool_text(self, value: str) -> str:
+        return " ".join(value.strip().lower().split())

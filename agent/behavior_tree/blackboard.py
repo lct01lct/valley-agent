@@ -1,7 +1,34 @@
 from typing import List
 
+from agent.action.location.location import Location
 from agent.base_task import BaseTask
 from server.type import Tile
+
+
+class BorrowedChestItem:
+    def __init__(
+        self,
+        location_name: Location,
+        chest_tile: Tile,
+        item_name: str,
+        count: int,
+        qualified_item_id: str | None = None,
+    ) -> None:
+        self.location_name = location_name
+        self.chest_tile = chest_tile
+        self.item_name = item_name
+        self.count = count
+        self.qualified_item_id = qualified_item_id
+
+    @property
+    def key(self) -> tuple[Location, int, int, str, str | None]:
+        return (
+            self.location_name,
+            self.chest_tile.x,
+            self.chest_tile.y,
+            self.item_name,
+            self.qualified_item_id,
+        )
 
 
 class AgentBlackboard:
@@ -40,4 +67,11 @@ class AgentBlackboard:
         # Farm 资源检查
         self.farm_resource_check_failed = False
         self.farm_missing_resources: list[str] = []
+        self.farm_missing_chest_items: list[dict[str, str | int | None]] = []
         self.farm_resource_recovery_hint: str | None = None
+        self.farm_recovery_task: BaseTask | None = None
+
+        # Chest 任务级借用记录
+        # 记录本轮计划中“从哪个箱子取出了哪些工具”，用于 Farm 结束后把工具放回原箱子。
+        # 这是临时调度事实，不等同于长期 ChestSemanticMemory。
+        self.borrowed_chest_items: list[BorrowedChestItem] = []

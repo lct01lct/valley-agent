@@ -72,7 +72,10 @@ Selector
 - `refill_water_source_tile`
 - `farm_resource_check_failed`
 - `farm_missing_resources`
+- `farm_missing_chest_items`
 - `farm_resource_recovery_hint`
+- `farm_recovery_task`
+- `borrowed_chest_items`
 
 ## 当前记忆与缓存模型
 
@@ -80,10 +83,12 @@ Selector
 
 1. `Realtime State`：每帧事实，例如玩家位置、当前工具、`UsingTool`、`CanMove`。
 2. `State Snapshot Cache`：性能缓存，例如 `obstacles`、`FarmTiles` 低频刷新；C# 没刷新时发 `null`，Python 复用上一份。
-3. `MapKnowledgeCache`：当前运行期地图知识，例如 Farm 水源。后续可记录路上看见但暂不处理的觅食物、箱子和交互点。
+3. `MapKnowledgeCache`：当前运行期地图知识，例如 Farm 水源、箱子位置、箱子内容快照和箱子语义记忆。后续可记录路上看见但暂不处理的觅食物和交互点。
 4. `PersistentMemoryStore`：长期记忆预留接口，当前不实现、不调用；未来用于跨运行保存稳定线索。
 
 当前水源不作为每帧 state 高频字段同步。Farm 需要补水时，`RefillWateringCanNode` 先查 `MapKnowledgeCache`，没有缓存时通过 C# `QUERY_WATER_SOURCES` 低频查询一次，并把结果写回缓存。
+
+箱子相关知识分为三类：`ChestContentKnowledge` 是打开箱子后得到的内容事实；`ChestSemanticMemory` 是“工具箱/种子箱”等用途倾向，只能作为候选推荐；`borrowed_chest_items` 是本轮任务级借用账本，用来把借出的工具还回原箱子。
 
 ## 当前寻路与移动模型
 
@@ -169,8 +174,8 @@ Farm 资源检查闭环：
 2. `WATER` 至少要求 Watering Can，并验证水壶存在时有 `WaterLeft` / `WaterCapacity` state。
 3. `PLANT` 至少要求 Hoe、目标种子，以及规划区域内清障所需工具。
 4. `PLANT_AND_WATER` 同时要求 Hoe、Watering Can、目标种子和清障工具。
-5. 若工具或种子不在背包/工具栏里，节点只判定“当前背包缺失”，不会直接猜测或操作箱子；它会安全 `IDLE`，把 `farm_missing_resources` 和 `farm_resource_recovery_hint` 写入 blackboard，并清空当前计划以触发恢复规划。
-6. 未来箱子取物应由独立 Chest 节点根据这些缺口去查询箱子、移动到箱子旁并取回资源。
+5. 若工具或种子不在背包/工具栏里，节点只判定“当前背包缺失”，不会直接猜测或操作箱子；它会安全 `IDLE`，把 `farm_missing_resources`、可转成 ChestTask 的 `farm_missing_chest_items`、`farm_resource_recovery_hint` 和原始 `farm_recovery_task` 写入 blackboard，并清空当前计划以触发恢复规划。
+6. 当前 mock Planner 可把这些缺口转成 `RouteTask + 多个 ChestTask(TAKE, chest_tile=None) + 原 FarmTask + ChestTask(PUT, chest_tile=None)`：工具会合并成一组取物任务，种子等堆叠物按物品拆成独立取物任务，避免错误要求“同一个箱子同时拥有所有缺失资源”。ChestNode 会先查缓存，缓存缺失时按需打开当前场景箱子查看；已知新鲜且不满足当前取物需求的箱子会跳过，找到满足当前取物任务的箱子后立即取物，不继续翻看其他箱子。Farm 完成后，借出的工具按 `borrowed_chest_items` 记录归还到原箱子；种子默认不归还。
 
 Farm 水壶补水闭环：
 
@@ -207,11 +212,12 @@ Chest P2/P3 约定：
 
 1. `SCAN` 会先低频查询 `target_loc` 当前场景中的箱子坐标，然后逐个移动到箱子旁、打开箱子、查看内容、写入 `MapKnowledgeCache` 并关闭箱子；不要通过底层代码直接遍历所有箱子内容。
 2. `QUERY` 用于打开查看指定箱子内容并写入缓存。
-3. `TAKE` 允许 `chest_tile=None`；此时 `ChestNode` 先查当前运行期缓存，缓存缺失时只在 `target_loc` 当前场景内按距离逐个打开箱子查看，找到满足目标物品的箱子后停止，并在当前打开的箱子中取物。
+3. `TAKE` 允许 `chest_tile=None`；此时 `ChestNode` 先查当前运行期缓存。缓存没有正命中时，只在 `target_loc` 当前场景内按需打开候选箱子查看：未知箱子优先，已知新鲜且不满足当前物品需求的箱子会跳过，过期且不匹配的箱子只作为兜底候选。找到满足目标物品的箱子后停止，并在当前打开的箱子中取物。
 4. 跨场景找箱子不属于 ChestNode 职责；应由 Planner/LLM 结合记忆生成 `RouteTask + ChestTask`。
 5. 取放成功后，Python 会保守地把对应箱子内容缓存标记为过期，后续需要时重新查询。
+6. 对 Farm 资源恢复中借出的工具，`ChestNode` 会记录来源箱子；后续 `PUT chest_tile=None` 优先使用该借用记录解析归还箱子。没有借用记录时，未来可用 `tool_chest` 语义记忆作为兜底推荐，但仍必须执行真实存物动作。
 
-当前暂未把 FarmResourceCheckNode 的缺资源恢复自动转成 ChestTask；这些内容记录在 `docs/next-development-plan.md`。
+当前已把 FarmResourceCheckNode 的缺资源恢复基础接入 mock Planner；真实 Planner 和更复杂的跨场景恢复仍记录在 `docs/next-development-plan.md`。
 
 ## 当前进度
 
@@ -229,11 +235,11 @@ Chest P2/P3 约定：
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
 | 破坏障碍物 | 基础接入 | A* 可标记 Stone、Twig、Weeds；RouteNode 触发清障，SwitchToolNode 切工具，ClearObstacleNode 使用工具并验证障碍消失 |
 | Farm 浇水 | 基础接入 | FarmNode 可选择未浇水作物，复用 PositioningController 站到相邻格、对准 ToolTarget 后使用水壶；P1 浇水阶段已有临时失败重试队列 |
-| Farm 资源检查 | 基础接入 | FarmResourceCheckNode 在 FarmTask 前检查背包/工具栏中的工具、种子和水壶 state；缺资源时写入恢复上下文，不直接操作箱子 |
+| Farm 资源检查/恢复 | 基础接入 | FarmResourceCheckNode 在 FarmTask 前检查背包/工具栏中的工具、种子和水壶 state；缺资源时写入恢复上下文和原始 FarmTask，mock Planner 可补 ChestTask 取回资源后继续 Farm |
 | Farm 水壶补水 | 基础接入 | 水壶没水时触发 RefillWateringCanNode，按需查询并缓存 Farm 水源，站到水源旁接水后继续浇水 |
 | Chest P0 指定取物 | 基础接入 | ChestNode 可用 `QUERY_CHESTS` 校验/恢复唯一箱子坐标，站到箱子旁，调用 SMAPI `TAKE_ITEMS_FROM_CHEST` 结构化动作批量取物，并用背包 state 验证数量增加 |
 | Chest P1 指定存物 | 基础接入 | ChestNode 可调用 SMAPI `PUT_ITEMS_TO_CHEST` 结构化动作批量存物，支持部分存入并用背包 state 验证数量减少 |
-| Chest P2/P3 箱子知识 | 基础接入 | 支持打开箱子后 `QUERY_CHEST_CONTENT` 写入缓存、`SCAN` 逐箱交互式查看，以及 `TAKE` 不指定 chest_tile 时基于缓存/按需逐箱查看自动选箱 |
+| Chest P2/P3 箱子知识 | 基础接入 | 支持打开箱子后 `QUERY_CHEST_CONTENT` 写入缓存、`SCAN` 逐箱交互式查看，以及 `TAKE` 不指定 chest_tile 时基于缓存/按需查看自动选箱；自动取物会跳过已知新鲜且不匹配的箱子 |
 | 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源和箱子位置/内容，采集物等机会记忆后续接入 |
 | Farm P1 批处理 | 开发中 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线，仍需更多游戏内测试和失败恢复 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |

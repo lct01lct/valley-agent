@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Literal
 
 from server.type import Tile
 
@@ -7,7 +7,27 @@ from agent.behavior_tree.chest_node import ChestItemRequest, ChestTask
 from agent.behavior_tree.farm_node import FarmTask
 from agent.behavior_tree.route_node import RouteTask
 
-TASK_MOCK_DATA: Dict[str, List[BaseTask]] = {
+TASK_MOCK_DATA: Dict[
+    Literal[
+        "CHEST_P0_1",
+        "CHEST_P0_2",
+        "CHEST_P1_1",
+        "CHEST_P2_P3_1",
+        "ROUTE_1",
+        "ROUTE_BACKUP",
+        "ROUTE_2",
+        "ROUTE_3",
+        "ROUTE_4",
+        "FARM_P0_1",
+        "FARM_P0_2",
+        "FARM_P0_3",
+        "FARM_P0_4",
+        "FARM_P1_1",
+        "FARM_P1_2",
+        "FARM_P1_3",
+    ],
+    List[BaseTask],
+] = {
     "CHEST_P0_1": [  # Chest P0 测试数据 1：前往农场，从指定箱子取出防风草种子。
         RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
         ChestTask(
@@ -160,6 +180,20 @@ TASK_MOCK_DATA: Dict[str, List[BaseTask]] = {
             area_origin=Tile(63, 25),
             area_width=7,
             area_height=7,
+        ),
+    ],
+    "FARM_P1_3": [  # Farm P1/P4 测试数据：资源不足时应先去箱子取资源，再回到该 3x3 种植浇水任务。
+        RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
+        FarmTask(
+            task_type="FARM",
+            desc="在 (43, 15) 开始规划 3x3 区域种植防风草并浇水",
+            farm_action="PLANT_AND_WATER",
+            target_loc="Farm",
+            seed_name="Parsnip Seeds",
+            count=9,
+            area_origin=Tile(43, 15),
+            area_width=3,
+            area_height=3,
         ),
     ],
 }

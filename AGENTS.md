@@ -72,9 +72,11 @@ Selector
 
 Chest P0/P1 不使用鼠标或 UI 拖拽。C# Executor 可以直接操作 `Chest.Items` 和 `Game1.player.Items`，但必须保持游戏约束：玩家在当前场景、位于箱子上下左右相邻格、玩家不处于 `UsingTool` / `CanMove=False` 状态。`TAKE` 的 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；若背包已有全部目标物品，ChestNode 应直接完成，不强行开箱取物。`PUT` 表示“把背包中匹配清单的物品尽量放入箱子”，可堆叠物品不足请求数量时允许部分存入并记录实际转移数量。
 
-Chest P2/P3 的查询和自动选箱只在 `current_task.target_loc` 指定场景内进行；跨场景找箱子由 Planner/LLM 结合记忆生成 `RouteTask + ChestTask`，不要让 ChestNode 自己遍历世界。`SCAN` 只允许先低频查询当前场景箱子坐标，再逐个移动到箱子旁、打开、查看内容、写入缓存并关闭；`QUERY` 同样必须走到指定箱子旁打开查看；`TAKE` 且 `chest_tile=None` 时先查 `MapKnowledgeCache`，缓存缺失再按距离逐个打开当前场景箱子查看，找到满足需求的箱子后在已打开的箱子中取物。取放成功后应保守地把对应箱子内容缓存标记为过期，不在 Python 端硬改箱子堆叠数量。
+Chest P2/P3 的查询和自动选箱只在 `current_task.target_loc` 指定场景内进行；跨场景找箱子由 Planner/LLM 结合记忆生成 `RouteTask + ChestTask`，不要让 ChestNode 自己遍历世界。`SCAN` 只允许先低频查询当前场景箱子坐标，再逐个移动到箱子旁、打开、查看内容、写入缓存并关闭；`QUERY` 同样必须走到指定箱子旁打开查看；`TAKE` 且 `chest_tile=None` 时先查 `MapKnowledgeCache`，缓存命中目标物品时直接选箱；没有正命中时，只打开未知箱子或必要的过期候选箱子，已知新鲜且不满足当前取物需求的箱子应跳过，避免重复翻看。找到满足需求的箱子后在已打开的箱子中取物。取放成功后应保守地把对应箱子内容缓存标记为过期，不在 Python 端硬改箱子堆叠数量。
 
-未来 Farm 缺资源恢复应继续扩展 Chest 分支和 Planner，不要塞进 FarmNode。
+工具借用归还使用任务级 `borrowed_chest_items` 账本：`ChestNode` 从箱子 TAKE 出 Axe、Hoe、Pickaxe、Scythe、Watering Can 等工具后记录来源箱子，后续 `PUT chest_tile=None` 应优先从该账本解析原箱子并归还。种子等消耗品默认不进入归还账本。若没有借用记录，未来可用 `ChestSemanticMemory` 中的 `tool_chest` 语义作为兜底推荐，但语义记忆只表示“这个箱子通常/计划用来放什么”，不能替代打开验证或结构化存取动作。
+
+Farm 缺资源恢复应继续扩展 Chest 分支和 Planner，不要塞进 FarmNode。
 
 `Farm` 分支内部的职责边界：
 
@@ -84,7 +86,7 @@ Chest P2/P3 的查询和自动选箱只在 `current_task.target_loc` 指定场�
 - `RefillWateringCanNode`：当 FarmNode 发现水壶 `WaterLeft <= 0` 时，查询/读取地图知识缓存中的水源，移动到水源旁，面向水源并使用水壶补水。
 - `FarmNode`：消费农业任务，求解农业交互所需的候选站位和工具目标地块，再交给动作层的 `PositioningController` 完成站位和转向。
 
-Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。若必要工具或种子不在背包/工具栏中，节点只能判定“当前背包缺失”，并把缺口写入 `farm_missing_resources` / `farm_resource_recovery_hint`；不要在该节点中猜测或直接操作箱子。未来箱子取物应由独立 Chest 节点读取箱子状态、移动到箱子旁并取回资源后，再恢复 FarmTask。
+Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。若必要工具或种子不在背包/工具栏中，节点只能判定“当前背包缺失”，并把缺口写入 `farm_missing_resources` / `farm_missing_chest_items` / `farm_resource_recovery_hint`，同时把原始 FarmTask 暂存到 `farm_recovery_task`；不要在该节点中猜测或直接操作箱子。箱子取物应由独立 Chest 节点读取箱子状态、移动到箱子旁并取回资源后，再恢复 FarmTask。恢复计划不应假设所有缺失资源都在同一个箱子里；工具可合并成一组取物，种子等堆叠物应按物品拆成独立取物任务。
 
 ### Context 负责状态输入和动作输出
 
@@ -107,6 +109,8 @@ Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。
 4. `PersistentMemoryStore`：长期记忆预留接口，当前不实现、不调用；未来用于跨运行保存稳定线索。
 
 不要把低变化地图知识塞进每帧 state。水源这类资源应优先走“按需查询 -> 写入 MapKnowledgeCache -> 后续复用”的模式。
+
+箱子记忆要区分“内容事实”和“语义记忆”：`ChestContentKnowledge` 来自实际打开箱子后的内容快照，可能过期；`ChestSemanticMemory` 描述工具箱、种子箱等用途倾向，只能影响候选排序或兜底选择，不能直接当成箱子真实内容。
 
 ### AgentBlackboard 是调度状态中心
 

@@ -31,7 +31,7 @@
 
 - 当前体力是否足够支持锄地、清障、浇水等操作。
 - 背包空间是否可能被清障掉落物塞满。
-- 工具或种子在箱子中时，由未来 Chest/取物节点根据资源缺口补计划并取回。
+- 工具或种子在箱子中时，当前 mock Planner 已可根据资源缺口补 `ChestTask` 并取回；后续需要升级成真实 Planner 策略。
 
 预期行为：
 
@@ -130,7 +130,7 @@ ChestTask 不指定 chest_tile -> 查缓存 -> 缓存缺失时逐个打开箱子
 
 - `ChestTask.chest_tile` 允许为空。
 - `TAKE` 不指定 `chest_tile` 时，优先从 `MapKnowledgeCache` 找含目标物品的箱子。
-- 缓存缺失时只用 `QUERY_CHESTS` 获取当前 `target_loc` 场景内箱子坐标，然后按距离逐个走到箱子旁、打开查看、缓存内容。
+- 缓存缺失时只用 `QUERY_CHESTS` 获取当前 `target_loc` 场景内箱子坐标，然后按距离走到候选箱子旁、打开查看、缓存内容；已知新鲜且不匹配当前取物需求的箱子会跳过，避免重复打开。
 - 找到满足目标物品的箱子后停止查看，并在当前打开的箱子中取物。
 
 后续增强：
@@ -150,13 +150,29 @@ FarmResourceCheckNode 发现缺工具/种子
     -> 重新执行 FarmTask
 ```
 
-短期可以先用 mock 数据验证：
+当前已基础接入 mock 恢复闭环：
 
 ```text
-RouteTask("Farm") -> ChestTask("取防风草种子") -> FarmTask("种植并浇水")
+FarmResourceCheckNode 记录缺失资源和原始 FarmTask
+-> LLM_Node mock 生成 RouteTask("Farm") + 多个 ChestTask(TAKE, chest_tile=None) + 原 FarmTask
+-> 工具合并成一组取物任务，种子等堆叠物拆成独立取物任务
+-> ChestNode 找到满足当前取物任务的箱子后取物，不继续翻看其余箱子；已知新鲜且不含目标资源的箱子会被缓存过滤
+-> FarmTask 重新执行
+-> FarmTask 完成后，ChestNode 根据 borrowed_chest_items 把借来的工具放回原箱子
 ```
 
-长期由 Planner 根据 `blackboard.farm_missing_resources` 和 `farm_resource_recovery_hint` 自动补恢复计划。
+当前 mock 测试重点：
+
+- `FARM_P1_3`：以 `(43, 15)` 为 `area_origin` 规划 `7x7` 防风草种植并浇水。
+- 背包缺工具或种子时，应补箱子取物计划；箱子有目标资源后立即停止继续翻看，已知不匹配的箱子不应重复打开。
+- 农业任务结束后，应归还借出的工具；种子等消耗品不归还。
+
+后续增强：
+
+- 由真实 Planner 根据 `blackboard.farm_missing_resources`、`farm_missing_chest_items` 和 `farm_resource_recovery_hint` 自动补恢复计划。
+- 支持跨场景候选箱子搜索，由 Planner 基于记忆决定先去哪一个场景。
+- 接入 `ChestSemanticMemory` 的工具箱/种子箱标签，让语义记忆影响候选搜索顺序；语义记忆只做推荐，不替代真实开箱验证或结构化存取。
+- 处理箱子也缺资源、多个箱子分散存放资源、背包空间不足、工具归还失败等恢复分支。
 
 ### 区域规划策略
 
@@ -243,14 +259,11 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 ## 当前建议顺序
 
-1. Chest P2：查询箱子内容，并把箱子位置/内容接入 `MapKnowledgeCache`。
-2. Chest P3：自动选择箱子。
-3. Chest P4：Farm 缺资源恢复联动。
-4. Farm 资源检查增强：体力、背包容量、箱子取物恢复计划。
-5. Farm 失败恢复细化。
-7. Farm mock 测试数据与验收日志整理。
-8. Daily Water。
-9. Harvest。
-10. Replant。
-11. AI / Planner 接入区域规划策略。
-12. Farm 日程化。
+1. Farm 资源检查增强：体力、背包容量、箱子取物恢复分支细化。
+2. Farm 失败恢复细化。
+3. Farm mock 测试数据与验收日志整理。
+4. Daily Water。
+5. Harvest。
+6. Replant。
+7. AI / Planner 接入区域规划策略。
+8. Farm 日程化。

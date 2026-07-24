@@ -322,6 +322,39 @@ class MapKnowledgeCache:
     def get_chest_semantic(self, location_name: Location, tile: Tile) -> ChestSemanticMemory | None:
         return self._chest_semantics.get(self._build_chest_key(location_name, tile))
 
+    def find_chest_semantics(
+        self,
+        location_name: Location,
+        required_label: str | None = None,
+        intended_item_names: set[str] | None = None,
+        player_tile: Tile | None = None,
+    ) -> list[ChestSemanticMemory]:
+        """
+        查找箱子的语义记忆。
+
+        语义记忆只表示“这个箱子通常/计划用来放什么”，不代表真实内容。
+        调用方仍应走到箱子旁执行结构化动作或打开验证，不要把该结果当成箱子内容事实。
+        """
+        matched_semantics: list[ChestSemanticMemory] = []
+        for chest_semantic in self._chest_semantics.values():
+            if chest_semantic.location_name != location_name:
+                continue
+            if required_label is not None and required_label not in chest_semantic.labels:
+                continue
+            if intended_item_names is not None and not intended_item_names.issubset(chest_semantic.intended_items):
+                continue
+            matched_semantics.append(chest_semantic)
+
+        return sorted(
+            matched_semantics,
+            key=lambda chest_semantic: (
+                self._get_tile_distance(player_tile, chest_semantic.tile) if player_tile is not None else 0,
+                -chest_semantic.confidence,
+                chest_semantic.tile.x,
+                chest_semantic.tile.y,
+            ),
+        )
+
     def find_chests_containing_items(
         self,
         location_name: Location,

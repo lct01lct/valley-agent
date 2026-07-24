@@ -25,6 +25,10 @@ FARM_TOOL_NAME = {
     "Watering Can": "Watering Can",
 }
 
+FARM_SEED_QUALIFIED_ITEM_ID_BY_NAME = {
+    "Parsnip Seeds": "(O)472",
+}
+
 
 @dataclass(frozen=True)
 class FarmResourceIssue:
@@ -77,7 +81,9 @@ class FarmResourceCheckNode(BTNode):
         self._passed_task_signature = task_signature
         blackboard.farm_resource_check_failed = False
         blackboard.farm_missing_resources = []
+        blackboard.farm_missing_chest_items = []
         blackboard.farm_resource_recovery_hint = None
+        blackboard.farm_recovery_task = None
         print(f"\n🟢 [FarmResourceCheckNode] Farm 资源检查通过: action={current_task.farm_action}")
         return "SUCCESS"
 
@@ -222,6 +228,8 @@ class FarmResourceCheckNode(BTNode):
         missing_resources = [self._format_issue(issue) for issue in issues]
         blackboard.farm_resource_check_failed = True
         blackboard.farm_missing_resources = missing_resources
+        blackboard.farm_missing_chest_items = self._build_missing_chest_items(issues)
+        blackboard.farm_recovery_task = current_task
         blackboard.farm_resource_recovery_hint = (
             "Farm 任务资源不足。当前只能确认背包/工具栏缺口；若资源在箱子里，需要后续 Chest/取物节点补计划。"
         )
@@ -235,6 +243,32 @@ class FarmResourceCheckNode(BTNode):
         print("\n🔴 [FarmResourceCheckNode] Farm 资源检查失败，已停止并请求恢复计划。")
         for issue in issues:
             print(f"   - {self._format_issue(issue)}")
+
+    def _build_missing_chest_items(self, issues: list[FarmResourceIssue]) -> list[dict[str, str | int | None]]:
+        missing_chest_items_by_key: dict[tuple[str, str | None], dict[str, str | int | None]] = {}
+        for issue in issues:
+            if issue.code not in (
+                "MISSING_TOOL_IN_INVENTORY",
+                "MISSING_SEED_IN_INVENTORY",
+                "INSUFFICIENT_SEED_COUNT",
+            ):
+                continue
+
+            qualified_item_id = FARM_SEED_QUALIFIED_ITEM_ID_BY_NAME.get(issue.resource_name)
+            item_key = (issue.resource_name, qualified_item_id)
+            required_count = max(1, issue.required_count)
+            existing_item = missing_chest_items_by_key.get(item_key)
+            if existing_item is None:
+                missing_chest_items_by_key[item_key] = {
+                    "item_name": issue.resource_name,
+                    "count": required_count,
+                    "qualified_item_id": qualified_item_id,
+                }
+                continue
+
+            existing_item["count"] = max(int(existing_item["count"] or 0), required_count)
+
+        return list(missing_chest_items_by_key.values())
 
     def _format_issue(self, issue: FarmResourceIssue) -> str:
         return (
