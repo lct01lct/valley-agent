@@ -48,13 +48,17 @@ Selector
 │   ├── ClearObstacleNode
 │   ├── RefillWateringCanNode
 │   └── FarmNode
+├── Sequence("Mining")
+│   ├── MiningResourceCheckNode
+│   ├── SwitchToolNode
+│   └── MineNode
 └── Sequence("Think")
     └── LLM_Node
 ```
 
 `ValleyAgent` 在主循环中先刷新 `PlayerContext.state`，再运行行为树。`Selector` 每个 tick 从左到右轮询子节点，遇到 `RUNNING` 或 `SUCCESS` 就停止本轮扫描。
 
-因此，`Guard`、`Route`、`Chest`、`Farm` 和 `Think` 是顶层 Selector 下的同级候选分支。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+因此，`Guard`、`Route`、`Chest`、`Farm`、`Mining` 和 `Think` 是顶层 Selector 下的同级候选分支。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
 
 `Route` 分支内部的职责边界：
 
@@ -87,6 +91,12 @@ Farm 缺资源恢复应继续扩展 Chest 分支和 Planner，不要塞进 FarmN
 - `FarmNode`：消费农业任务，求解农业交互所需的候选站位和工具目标地块，再交给动作层的 `PositioningController` 完成站位和转向。
 
 Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。若必要工具或种子不在背包/工具栏中，节点只能判定“当前背包缺失”，并把缺口写入 `farm_missing_resources` / `farm_missing_chest_items` / `farm_resource_recovery_hint`，同时把原始 FarmTask 暂存到 `farm_recovery_task`；不要在该节点中猜测或直接操作箱子。箱子取物应由独立 Chest 节点读取箱子状态、移动到箱子旁并取回资源后，再恢复 FarmTask。恢复计划不应假设所有缺失资源都在同一个箱子里；工具可合并成一组取物，种子等堆叠物应按物品拆成独立取物任务。
+
+`Mining` 分支内部的职责边界：
+
+- `MiningResourceCheckNode`：在 MiningTask 开始前检查背包/工具栏中是否有 Pickaxe；缺失时安全停止并把恢复原因写入 blackboard。
+- `SwitchToolNode`：根据 Mining 当前阶段切换 Pickaxe。
+- `MineNode`：当前实现 Mining P0，负责矿洞入口交互、读取 `MineLevel`、寻找 Ladder，没有 Ladder 时站到 Stone / MiningNode 上下左右相邻格并使用 Pickaxe，验证 Stone 消失或 Ladder 出现，最终进入目标矿层。
 
 ### Context 负责状态输入和动作输出
 
@@ -222,6 +232,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/action/valley_action/tool_targeting.py`：工具目标判断、`FACE_DIRECTION` 转向命令和 ToolTarget 日志格式化。
 - `agent/behavior_tree/tool_action_tracker.py`：跨帧跟踪工具动作开始、收招和超时，供清障、锄地、浇水等节点复用。
 - `agent/behavior_tree/refill_watering_can_node.py`：Farm 水壶补水节点，按需查询并缓存水源，复用站位控制和工具动作等待。
+- `agent/behavior_tree/mining_resource_check_node.py` / `agent/behavior_tree/mining_node.py`：Mining P0 节点，检查 Pickaxe，交互矿洞入口/梯子，必要时用镐子破坏 Stone / MiningNode 并验证进入目标矿层。
 - `server/valley_server.py`：Python 侧 SMAPI Observer/Executor TCP 客户端和状态解析。
 - `StardewMemoryExporter/`：SMAPI Mod，导出结构化状态并执行移动、开门、关闭对话和使用工具等命令。
 - `skills/`：项目内 Codex Skills。若 Codex 无法自动发现，必须通过本文件显式说明。

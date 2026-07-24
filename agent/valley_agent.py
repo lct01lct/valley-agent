@@ -11,6 +11,8 @@ from agent.behavior_tree.chest_node import ChestNode
 from agent.behavior_tree.clear_obstacle_node import ClearObstacleNode
 from agent.behavior_tree.farm_resource_check_node import FarmResourceCheckNode
 from agent.behavior_tree.farm_node import FarmNode
+from agent.behavior_tree.mining_node import MineNode
+from agent.behavior_tree.mining_resource_check_node import MiningResourceCheckNode
 from agent.behavior_tree.open_door_node import OpenDoorNode
 from agent.behavior_tree.refill_watering_can_node import RefillWateringCanNode
 from agent.behavior_tree.switch_tool_node import SwitchToolNode
@@ -61,6 +63,14 @@ class ValleyAgent:
                         ClearObstacleNode(owner="Farm"),
                         RefillWateringCanNode(owner="Farm"),
                         FarmNode(),
+                    ],
+                ),
+                Sequence(
+                    node_name="Mining",
+                    children=[
+                        MiningResourceCheckNode(),
+                        SwitchToolNode(owner="Mining"),
+                        MineNode(),
                     ],
                 ),
                 Sequence(

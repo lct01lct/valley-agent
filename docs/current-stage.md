@@ -22,6 +22,8 @@
 
 Farm P1 当前暂停继续扩展资源管理细节。已有 Farm 模块保留为基础农业技能；体力、背包容量、资源缺失恢复、复杂箱子搜索和工具归还失败等更适合在 Mining 模块中集中验证，后续再把稳定下来的通用能力回流 Farm。
 
+下一阶段优先开发 Mining 模块。Mining 的第一目标不是完整采矿收益最大化，而是先完成“矿洞第一层找到下一层并进入第二层”；第二层开始再接入 Defend，随后再做体力、背包容量、资源采集和长期记忆。
+
 ## 当前运行模型
 
 当前运行中存在两个相对独立的循环：
@@ -244,6 +246,7 @@ Chest P2/P3 约定：
 | Chest P2/P3 箱子知识 | 基础接入 | 支持打开箱子后 `QUERY_CHEST_CONTENT` 写入缓存、`SCAN` 逐箱交互式查看，以及 `TAKE` 不指定 chest_tile 时基于缓存/按需查看自动选箱；自动取物会跳过已知新鲜且不匹配的箱子 |
 | 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源和箱子位置/内容，采集物等机会记忆后续接入 |
 | Farm P1 批处理 | 基础接入，暂停扩展 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线；后续资源管理和复杂失败恢复先转 Mining 模块验证 |
+| Mining P0 | 基础接入，待游戏内实测 | 已新增 MiningTask、MiningResourceCheckNode、MineNode、矿洞 state/action 协议和 mock 数据；目标是进入第一层，找到/挖出梯子并进入第二层 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
@@ -285,16 +288,14 @@ Chest P2/P3 约定：
 
 ## 第一阶段开发顺序
 
-1. 保持 `LLM_Node` mock 计划稳定，确保黑板能够连续消费多个 `RouteTask`。
-2. 继续校验硬编码场景连通图和 warp 目标名称，避免错误跨场景边导致目标 warp 不存在。
-3. 继续验证 A* 障碍代价函数，区分不可通行、可绕行和可破坏障碍，并保持“不允许斜向清障”的路径约束。
-4. 完善 `SwitchToolNode` 和 `ClearObstacleNode` 的游戏内验证、体力检查、工具等级和失败恢复。
-5. 继续验证工具动作等待机制，确保 `UsingTool` / `CanMove` 和 state 结果验证足以覆盖清障、锄地、浇水。
-6. 将清障、开门和后续 NPC/商店柜台等交互逐步迁移到 `PositioningController` 的候选站位 + 工具目标地块模型。
-7. 强化玩家朝向、清障动作、超时与障碍消失验证。
-8. 完善 Farm P1 的体力/背包容量检查、区域选择和失败恢复。
-9. 完善 `OpenDoorNode` 的非阻塞状态机和门结果验证。
-10. 增加确定性寻路/Farm 场景测试与游戏内端到端验收。
+1. 游戏内验证 Mining P0：确认 `TASK_MOCK_DATA["MINING_P0_1"]` 能从 Mine 入口进入第一层，找到/挖出梯子并进入第二层。
+2. 若 P0 实测失败，优先检查 `logs/mining_node_debug.log` 中的 `MineLevel`、`MineEntrances`、`Ladders`、`MiningNodes` 和站位日志。
+3. 第二层开始接入 Defend：识别怪物，先实现躲避和近身攻击，保证 Mining 测试安全。
+4. 扩展 Mining 基础采矿：打碎指定数量 Stone / MiningNode，验证节点消失。
+5. 在 Mining 中实现资源管理底座：体力检查、背包容量检查、Pickaxe 缺失恢复、掉落/拾取验证、工具归还。
+6. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
+7. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
+8. 增加确定性 Route/Farm/Mining 场景测试与游戏内端到端验收。
 
 ## 第一阶段验收标准
 

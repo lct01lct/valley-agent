@@ -22,6 +22,8 @@ class PositioningGoal:
     candidate_stand_tiles: set[Tile]
     tool_target_tile: Tile | None = None
     extra_blocked_tiles: set[Tile] | None = None
+    allowed_blocked_tiles: set[Tile] | None = None
+    require_close_to_target: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,12 @@ class PositioningController:
         self.move_controller = MoveController()
         self._tile_path: list[RouteTile] = []
         self._path_index = 0
-        self._goal_key: tuple[tuple[tuple[int, int], ...], tuple[int, int] | None] | None = None
+        self._goal_key: tuple[
+            tuple[tuple[int, int], ...],
+            tuple[int, int] | None,
+            tuple[tuple[int, int], ...],
+            bool,
+        ] | None = None
 
     def reset(self) -> None:
         self._tile_path = []
@@ -62,10 +69,12 @@ class PositioningController:
 
     def tick(self, state: StardewState, goal: PositioningGoal) -> PositioningResult:
         extra_blocked_tiles = goal.extra_blocked_tiles or set()
+        allowed_blocked_tiles = goal.allowed_blocked_tiles or set()
         candidate_stand_tiles = self._filter_candidate_stand_tiles(
             state,
             goal.candidate_stand_tiles,
             extra_blocked_tiles,
+            allowed_blocked_tiles,
         )
         if not candidate_stand_tiles:
             return PositioningResult(status="FAILED", reason="没有可用候选站位")
@@ -73,9 +82,19 @@ class PositioningController:
         if state.player_tile in candidate_stand_tiles:
             self._tile_path = []
             self._path_index = 0
-            return self._build_arrived_result(state, state.player_tile, goal.tool_target_tile)
+            return self._build_arrived_result(
+                state,
+                state.player_tile,
+                goal.tool_target_tile,
+                goal.require_close_to_target,
+            )
 
-        goal_key = self._build_goal_key(candidate_stand_tiles, goal.tool_target_tile)
+        goal_key = self._build_goal_key(
+            candidate_stand_tiles,
+            goal.tool_target_tile,
+            allowed_blocked_tiles,
+            goal.require_close_to_target,
+        )
         if self._goal_key != goal_key:
             self._goal_key = goal_key
             self._tile_path = []
@@ -83,7 +102,12 @@ class PositioningController:
             self.move_controller.reset()
 
         if not self._tile_path or self._path_index >= len(self._tile_path):
-            self._tile_path = self._build_path_to_stand_tiles(state, candidate_stand_tiles, extra_blocked_tiles)
+            self._tile_path = self._build_path_to_stand_tiles(
+                state,
+                candidate_stand_tiles,
+                extra_blocked_tiles,
+                allowed_blocked_tiles,
+            )
             self._path_index = 0
 
             if not self._tile_path:
@@ -108,9 +132,27 @@ class PositioningController:
         state: StardewState,
         stand_tile: Tile,
         tool_target_tile: Tile | None,
+        require_close_to_target: bool,
     ) -> PositioningResult:
         if tool_target_tile is None:
             return PositioningResult(status="READY", stand_tile=stand_tile)
+
+        if require_close_to_target and not self.move_controller.is_player_close_to_target_edge(
+            state,
+            stand_tile,
+            tool_target_tile,
+        ):
+            command = self.move_controller.build_move_command_to_target_edge(
+                state,
+                stand_tile,
+                tool_target_tile,
+            )
+            return PositioningResult(
+                status="MOVING",
+                command=command,
+                stand_tile=stand_tile,
+                reason="已到候选站位，继续贴近交互目标边缘",
+            )
 
         if is_tool_targeting(state, tool_target_tile):
             return PositioningResult(status="READY", stand_tile=stand_tile)
@@ -123,13 +165,14 @@ class PositioningController:
         state: StardewState,
         candidate_stand_tiles: set[Tile],
         extra_blocked_tiles: set[Tile],
+        allowed_blocked_tiles: set[Tile],
     ) -> list[RouteTile]:
         goal_tiles = {RouteTile(tile.x, tile.y, type="walk") for tile in candidate_stand_tiles}
         blocked_tiles = astar_solver._get_blocked_tiles(state) | extra_blocked_tiles
         start = RouteTile(*state.player_tile, type="walk")
 
         def positioning_cost_func(curr, neigh, st, base_c):
-            if neigh != start and neigh in blocked_tiles:
+            if neigh != start and neigh in blocked_tiles and neigh not in allowed_blocked_tiles:
                 return False, float("inf"), "blocked"
             return True, base_c, "walk"
 
@@ -146,6 +189,7 @@ class PositioningController:
         state: StardewState,
         candidate_stand_tiles: set[Tile],
         extra_blocked_tiles: set[Tile],
+        allowed_blocked_tiles: set[Tile],
     ) -> set[Tile]:
         map_width, map_height = state.map_size
         blocked_tiles = astar_solver._get_blocked_tiles(state) | extra_blocked_tiles
@@ -154,7 +198,7 @@ class PositioningController:
         for tile in candidate_stand_tiles:
             if tile.x < 0 or tile.y < 0 or tile.x >= map_width or tile.y >= map_height:
                 continue
-            if tile in blocked_tiles:
+            if tile in blocked_tiles and tile not in allowed_blocked_tiles:
                 continue
             result.add(tile)
 
@@ -169,7 +213,10 @@ class PositioningController:
         self,
         candidate_stand_tiles: set[Tile],
         tool_target_tile: Tile | None,
-    ) -> tuple[tuple[tuple[int, int], ...], tuple[int, int] | None]:
+        allowed_blocked_tiles: set[Tile],
+        require_close_to_target: bool,
+    ) -> tuple[tuple[tuple[int, int], ...], tuple[int, int] | None, tuple[tuple[int, int], ...], bool]:
         stand_key = tuple(sorted((tile.x, tile.y) for tile in candidate_stand_tiles))
         target_key = None if tool_target_tile is None else (tool_target_tile.x, tool_target_tile.y)
-        return stand_key, target_key
+        allowed_key = tuple(sorted((tile.x, tile.y) for tile in allowed_blocked_tiles))
+        return stand_key, target_key, allowed_key, require_close_to_target

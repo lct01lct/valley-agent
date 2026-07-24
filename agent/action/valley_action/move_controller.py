@@ -120,6 +120,96 @@ class MoveController:
 
         return StardewCommand(action=StardewAction.IDLE)
 
+    def is_player_close_to_target_edge(
+        self,
+        state: StardewState,
+        stand_tile: Tile,
+        target_tile: Tile,
+        edge_margin: float = 2.0,
+    ) -> bool:
+        return self.build_move_command_to_target_edge(
+            state,
+            stand_tile,
+            target_tile,
+            edge_margin=edge_margin,
+        ).action == StardewAction.IDLE
+
+    def build_move_command_to_target_edge(
+        self,
+        state: StardewState,
+        stand_tile: Tile,
+        target_tile: Tile,
+        edge_margin: float = 2.0,
+        edge_dead_zone: float = 4.0,
+    ) -> StardewCommand:
+        tile_size = state.tile_size or 64
+        player_width, player_height = state.player_size
+        half_width = player_width / 2
+        half_height = player_height / 2
+
+        stand_left = stand_tile.x * tile_size
+        stand_right = stand_left + tile_size
+        stand_top = stand_tile.y * tile_size
+        stand_bottom = stand_top + tile_size
+
+        min_x = stand_left + half_width + edge_margin
+        max_x = stand_right - half_width - edge_margin
+        min_y = stand_top + half_height + edge_margin
+        max_y = stand_bottom - half_height - edge_margin
+
+        pressed_keys: set[str] = set()
+        delta_x = target_tile.x - stand_tile.x
+        delta_y = target_tile.y - stand_tile.y
+
+        if delta_x > 0:
+            desired_x = max_x
+            if state.position.x < desired_x - edge_dead_zone:
+                pressed_keys.add("d")
+        elif delta_x < 0:
+            desired_x = min_x
+            if state.position.x > desired_x + edge_dead_zone:
+                pressed_keys.add("a")
+        elif state.position.x < min_x - edge_dead_zone:
+            pressed_keys.add("d")
+        elif state.position.x > max_x + edge_dead_zone:
+            pressed_keys.add("a")
+
+        if delta_y > 0:
+            desired_y = max_y
+            if state.position.y < desired_y - edge_dead_zone:
+                pressed_keys.add("s")
+        elif delta_y < 0:
+            desired_y = min_y
+            if state.position.y > desired_y + edge_dead_zone:
+                pressed_keys.add("w")
+        elif state.position.y < min_y - edge_dead_zone:
+            pressed_keys.add("s")
+        elif state.position.y > max_y + edge_dead_zone:
+            pressed_keys.add("w")
+
+        if "w" in pressed_keys and "d" in pressed_keys:
+            return self._build_diagonal_move_command(StardewAction.MOVE_UP_RIGHT, "w", "d")
+        if "w" in pressed_keys and "a" in pressed_keys:
+            return self._build_diagonal_move_command(StardewAction.MOVE_UP_LEFT, "w", "a")
+        if "s" in pressed_keys and "d" in pressed_keys:
+            return self._build_diagonal_move_command(StardewAction.MOVE_DOWN_RIGHT, "s", "d")
+        if "s" in pressed_keys and "a" in pressed_keys:
+            return self._build_diagonal_move_command(StardewAction.MOVE_DOWN_LEFT, "s", "a")
+        if "w" in pressed_keys:
+            self._last_primary_axis = "vertical"
+            return StardewCommand(action=StardewAction.MOVE_UP, key=["w"])
+        if "s" in pressed_keys:
+            self._last_primary_axis = "vertical"
+            return StardewCommand(action=StardewAction.MOVE_DOWN, key=["s"])
+        if "a" in pressed_keys:
+            self._last_primary_axis = "horizontal"
+            return StardewCommand(action=StardewAction.MOVE_LEFT, key=["a"])
+        if "d" in pressed_keys:
+            self._last_primary_axis = "horizontal"
+            return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
+
+        return StardewCommand(action=StardewAction.IDLE)
+
     def build_face_command(self, player_tile: Tile, target_tile: Tile) -> StardewCommand:
         if target_tile.x > player_tile.x:
             return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])

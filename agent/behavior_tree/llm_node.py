@@ -72,7 +72,7 @@ class Agent_Model:
                 # return TASK_MOCK_DATA["FARM_P1_2"]
                 return TASK_MOCK_DATA["FARM_P1_3"]
             elif TEST_MODE == "MINE":
-                return TASK_MOCK_DATA["MINING_PO"]
+                return TASK_MOCK_DATA["MINING_P0_1"]
             else:
                 return []
         else:

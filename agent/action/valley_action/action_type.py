@@ -44,6 +44,7 @@ class StardewAction(Enum):
     HARVEST_CROP = "HARVEST_CROP"  # 空手采摘：采集已成熟的农作物（如防风草、土豆、蔓越莓等）
     PICKUP_FORAGE = "PICKUP_FORAGE"  # 野外觅食：捡起野外或海滩上散落的季节性觅食物（如松露、浆果、贝壳）
     INTERACT_OBJECT = "INTERACT_OBJECT"  # 激活设备：往熔炉塞矿石、往酿酒桶塞水果、打开/关闭宝箱提取物品
+    INTERACT_TILE = "INTERACT_TILE"  # 对指定地图格执行交互：例如矿洞入口、下层梯子等需要面向 tile 后按 X 的目标
     OPEN_DOOR = "OPEN_DOOR"  # 场景开门：打开或关闭建筑物的正门、或者动物小屋让动物进出的闸门
     OPEN_CHEST = "OPEN_CHEST"  # 打开箱子界面：要求玩家站在箱子上下左右相邻格并面向箱子
     CLOSE_MENU = "CLOSE_MENU"  # 关闭当前打开的菜单界面，例如箱子界面
@@ -63,6 +64,7 @@ class StardewAction(Enum):
     ATTACK_WEAPON = "ATTACK_WEAPON"  # 武器攻击：挥动剑、锤子、匕首等武器攻击史莱姆、蝙蝠等矿区怪物
     DEFEND_SWORD = "DEFEND_SWORD"  # 武器格挡：使用大剑类武器时的右键防御防守，抵挡怪物的突袭
     PLACE_BOMB = "PLACE_BOMB"  # 放置炸弹：手持并在地面放置樱桃炸弹/巨型炸弹，进行大面积岩石与矿产爆破
+    ENTER_MINE_LEVEL = "ENTER_MINE_LEVEL"  # 进入指定矿洞层数：用于矿洞大厅进入第一层，避免误把矿车/电梯当入口
 
     # =========================================================================
     # 🧠 6. 低频地图知识查询 (Low-frequency Knowledge Queries)

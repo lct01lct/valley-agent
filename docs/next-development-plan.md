@@ -10,6 +10,14 @@
 
 Farm P1 当前先暂停继续扩展。已有 Farm 模块已经能证明“确定性农业技能 + Chest 资源恢复 + 工具归还”这条链路成立；后续资源管理、背包容量、体力消耗和复杂恢复更适合放到 Mining 模块中验证，因为采矿场景会更密集地触发这些问题。
 
+下一阶段 Mining 的主线不是先做完整采矿收益最大化，而是先跑通矿洞核心循环：
+
+```text
+进入矿洞 -> 找到下一层 -> 第二层开始处理战斗风险 -> 再做资源采集与资源管理
+```
+
+因此开发优先级调整为：先完成“找到下一层”，再接 Defend，最后把体力、背包、箱子恢复和目标资源采集逐步叠上去。
+
 Farm 当前保留为可复用的基础农业技能：
 
 ```text
@@ -57,6 +65,152 @@ Farm 当前先停在“P1 基础闭环可用”的边界：
 5. 区域规划策略：
    - 暂不在 FarmNode 内硬编码复杂规划。
    - 未来由 AI / Planner 根据农场布局、当前位置、水源、箱子、障碍、作物目标和长期收益给出 `target_tiles` 或 `area_origin / area_width / area_height`。
+
+## Mining 开发路线
+
+### Mining P0：找到下一层
+
+目标：在矿洞第一层完成“找到并进入下一层”的最小闭环。第一层默认没有怪物，因此 P0 不处理战斗。
+
+当前状态：已基础实现 `MiningTask`、`MiningResourceCheckNode`、`MineNode`、`INTERACT_TILE`、`MineLevel`、`Ladders`、`MiningNodes` 和 `MineEntrances` 协议，下一步需要进入游戏实测并根据日志校正矿洞入口/梯子识别。
+
+推荐任务：
+
+```text
+RouteTask("Mine")
+-> MiningTask(mine_action="FIND_NEXT_LEVEL", target_mine_level=2)
+```
+
+P0 行为流程：
+
+```text
+确认当前在 Mine 且 MineLevel == 1
+-> 查询当前层是否已有 Ladder / Stairs
+-> 如果已有下一层入口，移动到入口并进入
+-> 如果没有入口，选择附近 Stone / MiningNode
+-> 切 Pickaxe
+-> 站到目标上下左右相邻格并面向目标
+-> 挥镐并等待工具动作收招
+-> 验证 Stone / MiningNode 消失
+-> 重新查询 Ladder / Stairs
+-> 找到入口后进入下一层
+-> 验证 MineLevel == 2
+```
+
+P0 需要补齐或确认的 state / action：
+
+- `MineLevel`：当前矿洞层数。
+- `Ladders` / `Stairs`：当前层可进入下一层的入口坐标。
+- `MiningNodes` 或可复用的结构化障碍信息：至少能识别可破坏 Stone。
+- 当前工具、背包 `Items`、`UsingTool`、`CanMove`、`ToolTarget`。
+- 进入下一层动作：优先设计通用 `INTERACT_TILE`，短期也可封装专用 `ENTER_LADDER`，但必须通过最新 state 验证层数变化。
+
+P0 验收标准：
+
+- 能进入矿洞第一层。
+- 能读取并验证 `MineLevel == 1`。
+- 能识别已有下一层入口。
+- 没有入口时能打碎 Stone / MiningNode 并重新检查入口。
+- 能进入下一层，并通过 state 验证 `MineLevel == 2`。
+- 失败、超时或出现 P0 不处理的怪物时，必须发送 `IDLE` 并给出明确失败原因。
+
+### Mining P1：第二层开始接入 Defend
+
+目标：进入第二层后，开始处理怪物导致的测试不稳定问题。Defend 是 Guard 分支，不消费 MiningTask，应抢占 Mining/Route/Farm。
+
+Defend 策略先分两类：
+
+- `AVOID`：躲避战斗，优先保证生存并继续 Mining。
+- `FIGHT`：怪物近身或阻挡任务时，攻击以保证安全。
+
+P1 行为流程：
+
+```text
+Mining 进入 MineLevel >= 2
+-> DefendNode 读取 monsters / player health
+-> 威胁不在范围内：Defend 返回 FAILURE，Mining 继续
+-> 怪物接近但未贴脸：选择远离怪物的安全 tile
+-> 怪物贴脸或无法躲避：切武器，面向怪物，攻击
+-> 威胁解除后恢复 Mining
+```
+
+需要补齐或确认的 state：
+
+- `Monsters`：怪物名称、位置/tile、Health、是否死亡。
+- 玩家 `Health`。
+- 当前武器/工具栏信息。
+- 可通行邻格或局部障碍信息。
+
+P1 验收标准：
+
+- 没有怪物时不干扰 Mining。
+- 怪物进入威胁范围时能暂停 Mining。
+- 近身威胁能攻击或击退。
+- 低血或非必要战斗时优先躲避。
+- 威胁解除后 Mining 可以继续。
+
+### Mining P2：基础采矿与资源节点选择
+
+目标：从“找下一层”扩展到“打碎指定数量资源节点”。
+
+推荐任务：
+
+```text
+MiningTask(mine_action="BREAK_ROCKS", count=5)
+MiningTask(mine_action="COLLECT_RESOURCE", target_resource_types=["Copper Ore"], count=10)
+```
+
+P2 重点：
+
+- 抽出 Mining 目标选择策略：优先选择最近、可达、可破坏的资源节点。
+- 支持普通 Stone、Ore、Gem Node、Container 等类型逐步扩展。
+- 复用 `PositioningController` 做候选站位与 ToolTarget 对准。
+- 复用 `ToolActionTracker` 等待挥镐收招。
+- 通过最新 state 验证节点消失或目标资源数量增加。
+
+### Mining P3：资源管理底座
+
+目标：在 Mining 中验证通用资源管理能力，然后再回流 Farm。
+
+P3 需要实现：
+
+- 体力检查：体力不足时停止采矿或触发恢复/撤退。
+- 背包容量检查：背包满时停止采矿或触发整理/回箱子。
+- 工具检查：缺 Pickaxe 时触发 Chest 恢复；借出工具任务结束后归还。
+- 掉落/拾取验证：打碎节点后验证目标资源是否进入背包，或记录需要移动拾取的掉落物。
+- 任务级安全停机：失败、资源不足、背包满、体力低时都要发送 `IDLE`。
+
+### Mining P4：楼层策略与目标资源采集
+
+目标：不只进入下一层，而是围绕目标资源、楼层和时间做决策。
+
+后续能力：
+
+- 指定目标层数，例如进入 5 层、10 层。
+- 根据资源类型选择楼层，例如铜矿、铁矿、煤矿。
+- 找不到楼梯时继续打石头。
+- 找到楼梯后判断是否下楼或继续采当前层资源。
+- 低体力、低血量、时间过晚时撤退。
+
+### Mining P5：长期记忆与机会资源
+
+目标：把 Mining 中遇到但暂不处理的资源纳入机会记忆。
+
+后续能力：
+
+- 记录路上看见但未采集的矿石、宝石、箱子、怪物密集区域。
+- 将矿洞箱子、入口、危险区域写入 `MapKnowledgeCache` 或未来 `PersistentMemoryStore`。
+- 让 Planner 能基于记忆生成下一次 Mining 路线。
+
+### Mining P6：收益型采矿与日程联动
+
+目标：从确定性技能升级成更完整的采矿 routine。
+
+后续能力：
+
+- 根据时间、体力、背包、目标资源和危险程度决定继续深入或撤退。
+- 结合 Farm/Chest/Route：出门前取工具，结束后归还工具和整理资源。
+- 结合未来交易/制作系统：采集目标服务于制作、升级工具或赚钱。
 
 ## 已暂缓的 Farm P1 优先任务
 
@@ -307,9 +461,13 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 ## 当前建议顺序
 
-1. 设计 Mining P0：明确 MiningTask、MineNode、需要的 SMAPI state、成功/失败验收标准。
-2. 实现 Mining P0 最小闭环：进入矿洞/指定场景，寻找附近可破坏矿石或石头，切 Pickaxe，站位，挥镐，验证资源节点消失。
-3. 在 Mining 中实现资源管理底座：体力检查、背包容量检查、工具缺失恢复、掉落物/资源收集结果验证。
-4. 在 Mining 中验证 Chest/Inventory 恢复：缺 Pickaxe 或背包整理需求时，复用 ChestNode 和运行期箱子知识。
-5. 将 Mining 中稳定下来的通用资源检查和失败恢复能力回流 Farm。
-6. 再恢复 Farm 未来任务：Daily Water、Harvest、Replant、区域规划策略和 Farm 日程化。
+1. Mining P0 设计：确认 `MiningTask`、`MineNode`、`MiningResourceCheckNode`、mock 数据和验收标准。
+2. SMAPI state/action 补齐：`MineLevel`、`Ladders/Stairs`、`MiningNodes`、进入下一层动作。
+3. Mining P0 实现：第一层找到下一层；没有入口时打 Stone 直到出现入口；验证进入第二层。
+4. Defend P0/P1 接入：第二层开始识别怪物，先做躲避/近身攻击，保证 Mining 测试安全。
+5. Mining P2 基础采矿：打碎指定数量 Stone / MiningNode，验证节点消失。
+6. Mining P3 资源管理：体力、背包容量、Pickaxe 缺失恢复、掉落/拾取验证、工具归还。
+7. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层。
+8. Mining P5 记忆接入：记录矿洞中遇到的资源、箱子和危险区域。
+9. 将 Mining 中稳定的资源管理和失败恢复能力回流 Farm。
+10. 再恢复 Farm 未来任务：Daily Water、Harvest、Replant、区域规划策略和 Farm 日程化。

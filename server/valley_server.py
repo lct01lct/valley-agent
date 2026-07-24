@@ -123,6 +123,31 @@ class ToolTargetState:
         return self.tile == target_tile
 
 
+class MineInteractTargetState:
+    def __init__(self, raw_target: dict):
+        # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
+        raw_tile = raw_target.get("Tile", [0, 0])
+        self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
+        self.type: str = raw_target.get("Type", "")
+        self.name: str = raw_target.get("Name", "")
+        self.display_name: str = raw_target.get("DisplayName", "")
+        self.qualified_item_id: str = raw_target.get("QualifiedItemId", "")
+        self.source: str = raw_target.get("Source", "")
+        self.action: str = raw_target.get("Action", "")
+
+
+class MiningNodeState:
+    def __init__(self, raw_mining_node: dict):
+        # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
+        raw_tile = raw_mining_node.get("Tile", [0, 0])
+        self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
+        self.type: str = raw_mining_node.get("Type", "")
+        self.name: str = raw_mining_node.get("Name", "")
+        self.display_name: str = raw_mining_node.get("DisplayName", "")
+        self.qualified_item_id: str = raw_mining_node.get("QualifiedItemId", "")
+        self.parent_sheet_index: int = int(raw_mining_node.get("ParentSheetIndex", -1))
+
+
 class StardewState:
     def __init__(self, raw_json_data: dict):
         self.location_name: Location = raw_json_data.get("location_name", "UnknownScene")
@@ -143,6 +168,7 @@ class StardewState:
         self.can_move: bool = bool(raw_json_data.get("CanMove", True))
         self.is_player_free: bool = bool(raw_json_data.get("IsPlayerFree", True))
         self.can_player_move: bool = bool(raw_json_data.get("CanPlayerMove", self.can_move))
+        self.mine_level: int | None = self._read_optional_int(raw_json_data, "MineLevel")
         self.inventory = InventoryState(
             {
                 "CurrentToolIndex": raw_json_data.get("CurrentToolIndex", -1),
@@ -151,6 +177,31 @@ class StardewState:
             }
         )
         self.tool_target = ToolTargetState(raw_json_data.get("ToolTarget"))
+
+        self.ladders: list[MineInteractTargetState] = []
+        raw_ladders = raw_json_data.get("Ladders")
+        self.has_ladders_snapshot = isinstance(raw_ladders, list)
+        for raw_ladder in (raw_ladders if self.has_ladders_snapshot else []):
+            if isinstance(raw_ladder, dict):
+                self.ladders.append(MineInteractTargetState(raw_ladder))
+
+        self.mining_nodes: list[MiningNodeState] = []
+        self.mining_nodes_by_tile: dict[Tile, MiningNodeState] = {}
+        raw_mining_nodes = raw_json_data.get("MiningNodes")
+        self.has_mining_nodes_snapshot = isinstance(raw_mining_nodes, list)
+        for raw_mining_node in (raw_mining_nodes if self.has_mining_nodes_snapshot else []):
+            if not isinstance(raw_mining_node, dict):
+                continue
+            mining_node = MiningNodeState(raw_mining_node)
+            self.mining_nodes.append(mining_node)
+            self.mining_nodes_by_tile[mining_node.tile] = mining_node
+
+        self.mine_entrances: list[MineInteractTargetState] = []
+        raw_mine_entrances = raw_json_data.get("MineEntrances")
+        self.has_mine_entrances_snapshot = isinstance(raw_mine_entrances, list)
+        for raw_mine_entrance in (raw_mine_entrances if self.has_mine_entrances_snapshot else []):
+            if isinstance(raw_mine_entrance, dict):
+                self.mine_entrances.append(MineInteractTargetState(raw_mine_entrance))
 
         self.farm_tiles: list[FarmTileState] = []
         self.farm_tiles_by_tile: dict[Tile, FarmTileState] = {}
@@ -244,6 +295,12 @@ class StardewState:
                     except ValueError:
                         pass
 
+    def _read_optional_int(self, raw_json_data: dict, key: str) -> int | None:
+        value = raw_json_data.get(key)
+        if value is None:
+            return None
+        return int(value)
+
     def merge_known_layers_from(self, previous_state: "StardewState") -> None:
         if previous_state.location_name != self.location_name:
             return
@@ -269,6 +326,24 @@ class StardewState:
                     continue
                 self.farm_tiles.append(previous_farm_tile)
                 self.farm_tiles_by_tile[previous_farm_tile.tile] = previous_farm_tile
+
+        if not self.has_ladders_snapshot:
+            self.ladders = previous_state.ladders.copy()
+
+        if not self.has_mining_nodes_snapshot:
+            self.mining_nodes = previous_state.mining_nodes.copy()
+            self.mining_nodes_by_tile = previous_state.mining_nodes_by_tile.copy()
+        elif self.state_scope != "global" and self.scan_range is not None:
+            for previous_mining_node in previous_state.mining_nodes:
+                if previous_mining_node.tile in self.mining_nodes_by_tile:
+                    continue
+                if self.is_tile_inside_current_scan(previous_mining_node.tile):
+                    continue
+                self.mining_nodes.append(previous_mining_node)
+                self.mining_nodes_by_tile[previous_mining_node.tile] = previous_mining_node
+
+        if not self.has_mine_entrances_snapshot:
+            self.mine_entrances = previous_state.mine_entrances.copy()
 
     def is_tile_inside_current_scan(self, tile: Tile) -> bool:
         if self.state_scope == "global":
@@ -380,7 +455,7 @@ class StardewExecutorClient:
                 return None
 
         try:
-            raw_packet = command.model_dump_json() + "\n"
+            raw_packet = command.model_dump_json(exclude_none=True) + "\n"
             self.client_socket.settimeout(COMMAND_RESPONSE_TIMEOUT_SECONDS)
             self.client_socket.sendall(raw_packet.encode("utf-8"))
 

@@ -5,6 +5,7 @@ from server.type import Tile
 from agent.base_task import BaseTask
 from agent.behavior_tree.chest_node import ChestItemRequest, ChestTask
 from agent.behavior_tree.farm_node import FarmTask
+from agent.behavior_tree.mining_node import MiningTask
 from agent.behavior_tree.route_node import RouteTask
 
 TASK_MOCK_DATA: Dict[
@@ -25,7 +26,7 @@ TASK_MOCK_DATA: Dict[
         "FARM_P1_1",
         "FARM_P1_2",
         "FARM_P1_3",
-        "MINING_PO",
+        "MINING_P0_1",
     ],
     List[BaseTask],
 ] = {
@@ -197,7 +198,14 @@ TASK_MOCK_DATA: Dict[
             area_height=3,
         ),
     ],
-    "MINING_PO": [
+    "MINING_P0_1": [  # Mining P0：前往矿洞，进入第一层，找到/挖出梯子并进入第二层。
         RouteTask(task_type="ROUTE", desc="前往矿洞", target_loc="Mine"),
+        MiningTask(
+            task_type="MINE",
+            desc="进入矿洞第一层并找到下一层",
+            mine_action="FIND_NEXT_LEVEL",
+            target_loc="Mine",
+            target_mine_level=4,
+        ),
     ],
 }

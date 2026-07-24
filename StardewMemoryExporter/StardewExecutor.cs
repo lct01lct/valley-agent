@@ -13,6 +13,7 @@ using StardewValley.Menus;
 using StardewModdingAPI.Events;
 using StardewValley.Objects;
 using StardewValley.Tools;
+using StardewValley.Locations;
 
 namespace StardewMemoryExporter
 {
@@ -194,6 +195,14 @@ namespace StardewMemoryExporter
                 else if (actionType.Equals("OPEN_CHEST", StringComparison.OrdinalIgnoreCase))
                 {
                     HandleOpenChest(packet);
+                }
+                else if (actionType.Equals("INTERACT_TILE", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleInteractTile(packet);
+                }
+                else if (actionType.Equals("ENTER_MINE_LEVEL", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleEnterMineLevel(packet);
                 }
                 else if (actionType.Equals("CLOSE_MENU", StringComparison.OrdinalIgnoreCase))
                 {
@@ -395,6 +404,90 @@ namespace StardewMemoryExporter
 
             _helper.Input.Press(SButton.X);
             SendResponseToPython("SUCCESS");
+        }
+
+        private void HandleInteractTile(JObject packet)
+        {
+            ClearHeldMoveButtons();
+
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                SendResponseToPython("BUSY");
+                return;
+            }
+
+            string locationName = ReadOptionalLocationName(packet);
+            if (!TryReadTile(packet, out Vector2 targetTile))
+            {
+                SendResponseToPython("FAILURE:INVALID_TILE");
+                return;
+            }
+
+            if (Game1.currentLocation == null || !string.Equals(Game1.currentLocation.Name, locationName, StringComparison.OrdinalIgnoreCase))
+            {
+                SendResponseToPython($"FAILURE:CURRENT_LOCATION_MISMATCH:{Game1.currentLocation?.Name ?? ""}:{locationName}");
+                return;
+            }
+
+            if (!IsPlayerCardinalNeighbor(targetTile) && !IsPlayerStandingOnTile(targetTile))
+            {
+                Point playerTile = Game1.player.TilePoint;
+                SendResponseToPython(
+                    $"FAILURE:PLAYER_NOT_NEXT_TO_TILE:player=({playerTile.X},{playerTile.Y}):target=({(int)targetTile.X},{(int)targetTile.Y})"
+                );
+                return;
+            }
+
+            FaceTileIfNeeded(targetTile);
+            _helper.Input.Press(SButton.X);
+            SendResponseToPython("SUCCESS");
+        }
+
+        private void HandleEnterMineLevel(JObject packet)
+        {
+            ClearHeldMoveButtons();
+
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                SendResponseToPython("BUSY");
+                return;
+            }
+
+            int targetMineLevel = packet["count"]?.ToObject<int>() ?? 1;
+            if (targetMineLevel <= 0)
+            {
+                SendResponseToPython("FAILURE");
+                return;
+            }
+
+            if (Game1.currentLocation == null)
+            {
+                SendResponseToPython("FAILURE");
+                return;
+            }
+
+            if (Game1.currentLocation is MineShaft currentMineShaft && currentMineShaft.mineLevel == targetMineLevel)
+            {
+                SendResponseToPython("SUCCESS");
+                return;
+            }
+
+            if (!string.Equals(Game1.currentLocation.Name, "Mine", StringComparison.OrdinalIgnoreCase))
+            {
+                SendResponseToPython("FAILURE");
+                return;
+            }
+
+            try
+            {
+                Game1.enterMine(targetMineLevel);
+                SendResponseToPython("SUCCESS");
+            }
+            catch (Exception ex)
+            {
+                _monitor.Log($"❌ [DebugServer] ENTER_MINE_LEVEL 失败: level={targetMineLevel}, error={ex.Message}", LogLevel.Warn);
+                SendResponseToPython("FAILURE");
+            }
         }
 
         private void HandleCloseMenu()
@@ -844,12 +937,45 @@ namespace StardewMemoryExporter
             return true;
         }
 
+        private string ReadOptionalLocationName(JObject packet)
+        {
+            string locationName = packet["location_name"]?.ToString() ?? "";
+            if (!string.IsNullOrWhiteSpace(locationName))
+            {
+                return locationName;
+            }
+            return Game1.currentLocation?.Name ?? "";
+        }
+
         private bool IsPlayerCardinalNeighbor(Vector2 targetTile)
         {
             Point playerTile = Game1.player.TilePoint;
             int distanceX = Math.Abs(playerTile.X - (int)targetTile.X);
             int distanceY = Math.Abs(playerTile.Y - (int)targetTile.Y);
             return distanceX + distanceY == 1;
+        }
+
+        private bool IsPlayerStandingOnTile(Vector2 targetTile)
+        {
+            Point playerTile = Game1.player.TilePoint;
+            return playerTile.X == (int)targetTile.X && playerTile.Y == (int)targetTile.Y;
+        }
+
+        private void FaceTileIfNeeded(Vector2 targetTile)
+        {
+            Point playerTile = Game1.player.TilePoint;
+            int dx = (int)targetTile.X - playerTile.X;
+            int dy = (int)targetTile.Y - playerTile.Y;
+
+            if (Math.Abs(dx) + Math.Abs(dy) != 1)
+            {
+                return;
+            }
+
+            if (dx > 0) Game1.player.faceDirection(1);
+            else if (dx < 0) Game1.player.faceDirection(3);
+            else if (dy > 0) Game1.player.faceDirection(2);
+            else if (dy < 0) Game1.player.faceDirection(0);
         }
 
         private int TakeItemsFromChest(

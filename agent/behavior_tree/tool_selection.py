@@ -5,7 +5,7 @@ from agent.action.valley_action.clearance_policy import normalize_obstacle_type
 from server.valley_server import InventoryItem, StardewState
 from server.type import Tile
 
-type ClearObstacleOwner = Literal["Route", "Farm"]
+type ClearObstacleOwner = Literal["Route", "Farm", "Mining"]
 
 TOOLBAR_SIZE = 12
 TOOLBAR_KEYS: tuple[KeyType, ...] = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=")
@@ -108,6 +108,9 @@ def _select_tool_for_weeds(state: StardewState, target_tile: Tile, owner: ClearO
         if not has_tree_seed_risk and find_tool_item(state, "Scythe") is not None:
             return "Scythe"
         return _select_first_available_tool(state, ("Axe", "Pickaxe", "Hoe", "Scythe"))
+
+    if owner == "Mining":
+        return _select_first_available_tool(state, ("Pickaxe", "Axe", "Scythe"))
 
     if find_tool_item(state, "Hoe") is not None:
         return "Hoe"
