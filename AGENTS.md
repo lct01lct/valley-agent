@@ -40,6 +40,8 @@ Selector
 │   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   └── RouteNode
+├── Sequence("Chest")
+│   └── ChestNode
 ├── Sequence("Farm")
 │   ├── FarmResourceCheckNode
 │   ├── SwitchToolNode
@@ -52,7 +54,7 @@ Selector
 
 `ValleyAgent` 在主循环中先刷新 `PlayerContext.state`，再运行行为树。`Selector` 每个 tick 从左到右轮询子节点，遇到 `RUNNING` 或 `SUCCESS` 就停止本轮扫描。
 
-因此，`Guard`、`Route`、`Farm` 和 `Think` 是顶层 Selector 下的同级候选分支。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+因此，`Guard`、`Route`、`Chest`、`Farm` 和 `Think` 是顶层 Selector 下的同级候选分支。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
 
 `Route` 分支内部的职责边界：
 
@@ -60,6 +62,12 @@ Selector
 - `SwitchToolNode`：根据 `context.state` 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items` 切换到清障所需工具。
 - `ClearObstacleNode`：在玩家位于障碍物上下左右相邻格时使用当前工具清理 Stone、Twig、Weeds，并验证障碍消失。
 - `RouteNode`：选择跨场景路线、缓存 tile path、触发 A\*、驱动 MoveController、发现门/清障需求并写入 blackboard。
+
+`Chest` 分支内部的职责边界：
+
+- `ChestNode`：当前实现 Chest P0，只处理指定箱子取物。节点先用 `QUERY_CHESTS` 校验箱子坐标；若指定坐标不存在但当前场景只有一个箱子，可自动改用唯一箱子的真实坐标。随后复用 `PositioningController` 站到箱子上下左右相邻格并面向箱子，确认玩家身体稳定进入相邻格后发送 `OPEN_CHEST` 打开箱子界面，等待 0.5 秒，再发送 SMAPI 结构化动作 `TAKE_ITEMS_FROM_CHEST` 批量取物，之后发送 `CLOSE_MENU` 关闭箱子界面，最后用背包 state 验证所有目标物品数量增加。
+
+Chest P0 不使用鼠标或 UI 拖拽。C# Executor 可以直接操作 `Chest.Items` 和 `Game1.player.Items`，但必须保持游戏约束：玩家在当前场景、位于箱子上下左右相邻格、玩家不处于 `UsingTool` / `CanMove=False` 状态。当前 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；若背包已有全部目标物品，ChestNode 应直接完成，不强行开箱取物。未来放入箱子、查询箱子内容、自动选择箱子和 Farm 缺资源恢复应继续扩展 Chest 分支，不要塞进 FarmNode。
 
 `Farm` 分支内部的职责边界：
 

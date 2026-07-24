@@ -45,6 +45,8 @@ class StardewAction(Enum):
     PICKUP_FORAGE = "PICKUP_FORAGE"  # 野外觅食：捡起野外或海滩上散落的季节性觅食物（如松露、浆果、贝壳）
     INTERACT_OBJECT = "INTERACT_OBJECT"  # 激活设备：往熔炉塞矿石、往酿酒桶塞水果、打开/关闭宝箱提取物品
     OPEN_DOOR = "OPEN_DOOR"  # 场景开门：打开或关闭建筑物的正门、或者动物小屋让动物进出的闸门
+    OPEN_CHEST = "OPEN_CHEST"  # 打开箱子界面：要求玩家站在箱子上下左右相邻格并面向箱子
+    CLOSE_MENU = "CLOSE_MENU"  # 关闭当前打开的菜单界面，例如箱子界面
     TALK_NPC = "TALK_NPC"  # NPC 对话：每日靠近村民进行交谈，用于刷好感度或推进任务
     GIFT_NPC = "GIFT_NPC"  # NPC 送礼：手持特定物品右键村民，触发每日/生日送礼行为
 
@@ -66,6 +68,9 @@ class StardewAction(Enum):
     # 🧠 6. 低频地图知识查询 (Low-frequency Knowledge Queries)
     # =========================================================================
     QUERY_WATER_SOURCES = "QUERY_WATER_SOURCES"  # 查询当前或指定场景中的可补水水源坐标，用于地图知识缓存
+    QUERY_CHESTS = "QUERY_CHESTS"  # 查询当前或指定场景中的箱子坐标，用于 Chest P0 坐标校验和后续箱子缓存
+    TAKE_FROM_CHEST = "TAKE_FROM_CHEST"  # 从指定箱子取出指定物品；要求玩家位于箱子上下左右相邻格
+    TAKE_ITEMS_FROM_CHEST = "TAKE_ITEMS_FROM_CHEST"  # 从指定箱子批量取出多个物品；要求玩家位于箱子上下左右相邻格
 
 
 type KeyType = Literal[
@@ -96,8 +101,19 @@ class MouseType(BaseModel):
     position: Tuple[float, float]
 
 
+class ChestItemPayload(BaseModel):
+    item_name: str
+    count: int
+    qualified_item_id: str | None = Field(default=None)
+
+
 class StardewCommand(BaseModel):
     action: StardewAction
     key: List[KeyType] | None = Field(default=None)
     mouse: MouseType | None = Field(default=None)
     location_name: Location | None = Field(default=None)
+    tile: Tuple[int, int] | None = Field(default=None)
+    item_name: str | None = Field(default=None)
+    qualified_item_id: str | None = Field(default=None)
+    count: int | None = Field(default=None)
+    chest_items: List[ChestItemPayload] | None = Field(default=None)

@@ -76,6 +76,77 @@
 
 ## P1 暂缓但需要记录的任务
 
+### Chest / Inventory 后续能力
+
+Chest P0 已完成最小闭环：指定 `chest_tile`，通过 `QUERY_CHESTS` 校验坐标，站到箱子旁，通过 SMAPI `TAKE_ITEMS_FROM_CHEST` 一次性批量取出指定物品清单，并用背包 state 验证数量增加。若指定坐标不存在但当前场景只有一个箱子，P0 会自动使用唯一箱子的真实坐标。
+
+后续按以下顺序推进：
+
+#### Chest P1：指定箱子存物
+
+目标：
+
+```text
+站到指定 chest_tile 旁 -> PUT_TO_CHEST -> 验证背包数量减少
+```
+
+需要实现：
+
+- C# Executor 新增 `PUT_TO_CHEST`。
+- Python `ChestTask` 增加 `PUT`。
+- `ChestNode` 支持把背包里的指定物品放入指定箱子。
+- 处理背包没有物品、箱子满、部分成功和验证超时。
+
+#### Chest P2：查询箱子内容与缓存
+
+目标：
+
+```text
+QUERY_CHEST_CONTENT -> 写入 MapKnowledgeCache
+```
+
+需要实现：
+
+- `QUERY_CHESTS` 已在 Chest P0 中基础接入，用于返回当前地点箱子坐标和基础信息；后续需要把结果写入缓存并处理过期。
+- C# Executor 新增 `QUERY_CHEST_CONTENT`，返回指定箱子的 `Items` 摘要。
+- Python 解析箱子查询结果。
+- `MapKnowledgeCache` 增加箱子位置和箱子内容缓存。
+- 取放成功后更新或失效对应缓存。
+
+#### Chest P3：自动选择箱子
+
+目标：
+
+```text
+ChestTask 不指定 chest_tile -> 查缓存/低频查询 -> 选择含目标物品且距离近的箱子
+```
+
+需要实现：
+
+- `ChestTask.chest_tile` 允许为空。
+- 优先从 `MapKnowledgeCache` 找含目标物品的箱子。
+- 缓存缺失或疑似过期时调用 `QUERY_CHESTS` / `QUERY_CHEST_CONTENT`。
+- 多个箱子都满足时，优先选择当前玩家到箱子的距离更短者。
+
+#### Chest P4：Farm 缺资源恢复联动
+
+目标：
+
+```text
+FarmResourceCheckNode 发现缺工具/种子
+    -> LLM/Planner 生成 ChestTask
+    -> ChestNode 取回资源
+    -> 重新执行 FarmTask
+```
+
+短期可以先用 mock 数据验证：
+
+```text
+RouteTask("Farm") -> ChestTask("取防风草种子") -> FarmTask("种植并浇水")
+```
+
+长期由 Planner 根据 `blackboard.farm_missing_resources` 和 `farm_resource_recovery_hint` 自动补恢复计划。
+
 ### 区域规划策略
 
 该任务先记录，暂不优先实现。
@@ -161,11 +232,15 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 ## 当前建议顺序
 
-1. Farm 资源检查增强：体力、背包容量、箱子取物恢复计划。
-2. Farm 失败恢复细化。
-3. Farm mock 测试数据与验收日志整理。
-4. Daily Water。
-5. Harvest。
-6. Replant。
-7. AI / Planner 接入区域规划策略。
-8. Farm 日程化。
+1. Chest P1：指定箱子存物。
+2. Chest P2：查询箱子内容，并把箱子位置/内容接入 `MapKnowledgeCache`。
+3. Chest P3：自动选择箱子。
+4. Chest P4：Farm 缺资源恢复联动。
+5. Farm 资源检查增强：体力、背包容量、箱子取物恢复计划。
+6. Farm 失败恢复细化。
+7. Farm mock 测试数据与验收日志整理。
+8. Daily Water。
+9. Harvest。
+10. Replant。
+11. AI / Planner 接入区域规划策略。
+12. Farm 日程化。

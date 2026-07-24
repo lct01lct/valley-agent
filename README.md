@@ -50,6 +50,8 @@ Selector
 │   ├── SwitchToolNode
 │   ├── ClearObstacleNode
 │   └── RouteNode
+├── Sequence("Chest")
+│   └── ChestNode
 ├── Sequence("Farm")
 │   ├── FarmResourceCheckNode
 │   ├── SwitchToolNode
@@ -64,11 +66,12 @@ Selector
 
 1. `Defend_Node` 预留给紧急安全行为。
 2. `OpenDoorNode`、`SwitchToolNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性移动、开门和清障动作。
-3. `Farm` 分支通过 `FarmResourceCheckNode`、`SwitchToolNode`、`ClearObstacleNode`、`RefillWateringCanNode` 和 `FarmNode` 协作完成农业任务，例如资源前置检查、浇水、清障、锄地、播种，以及水壶没水时去农场水源补水。
-4. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
-5. 新计划到达后，Selector 重新从高优先级节点扫描。
+3. `ChestNode` 当前支持 Chest P0：站到指定箱子旁，通过 SMAPI 结构化动作从箱子取指定物品，并用背包 state 验证数量增加。
+4. `Farm` 分支通过 `FarmResourceCheckNode`、`SwitchToolNode`、`ClearObstacleNode`、`RefillWateringCanNode` 和 `FarmNode` 协作完成农业任务，例如资源前置检查、浇水、清障、锄地、播种，以及水壶没水时去农场水源补水。
+5. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
+6. 新计划到达后，Selector 重新从高优先级节点扫描。
 
-因此，`Route`、`Farm` 和 `Think` 分支在顶层 Selector 视角是同级概念；`Think` 优先级最低，职责更偏规划兜底。
+因此，`Route`、`Chest`、`Farm` 和 `Think` 分支在顶层 Selector 视角是同级概念；`Think` 优先级最低，职责更偏规划兜底。
 
 ## 移动与交互站位
 
@@ -78,6 +81,24 @@ Selector
 - 交互前站位由 `PositioningController` 管理。调用方输入 `candidate_stand_tiles` 和可选 `tool_target_tile`，控制器负责移动到最近可达站位，并在站好后用 `FACE_DIRECTION` 原地转向，直到 `ToolTarget` 对准目标。
 
 这个接口用于 Farm 浇水，也适合后续复用到箱子、树、NPC、商店柜台、门和清障等交互。业务节点只负责求解“可以站哪些格”和“工具目标应该是哪一格”，不重复实现 A\*、路径推进或转向控制。
+
+## Chest / Inventory 结构化动作
+
+Chest P0 不模拟鼠标和 UI 拖拽。Python `ChestNode` 会先用 `QUERY_CHESTS` 低频校验指定箱子坐标；如果指定坐标不存在但当前场景只有一个箱子，会自动改用这个唯一箱子的真实坐标。随后节点复用 `PositioningController` 移动到箱子上下左右相邻格并面向箱子，并在玩家身体稳定进入相邻格后发送 `OPEN_CHEST` 打开箱子界面，等待 0.5 秒，再向 SMAPI Executor 发送 `TAKE_ITEMS_FROM_CHEST` 批量取物：
+
+```json
+{
+  "action": "TAKE_ITEMS_FROM_CHEST",
+  "location_name": "Farm",
+  "tile": [64, 15],
+  "chest_items": [
+    {"item_name": "Pickaxe", "count": 1},
+    {"item_name": "Parsnip Seeds", "qualified_item_id": "(O)472", "count": 49}
+  ]
+}
+```
+
+C# 端要求玩家位于当前场景、与箱子上下左右相邻且未处于工具动作中，然后直接通过游戏对象模型在 `Chest.Items` 和 `Game1.player.Items` 之间批量转移物品。取物后 Python 会发送 `CLOSE_MENU` 关闭箱子界面，再等待下一帧背包 state 中所有目标物品数量增加。当前 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；如果背包里已经全部足够，`ChestNode` 会直接完成，不再强行开箱取物。
 
 ## 工具动作等待机制
 

@@ -3,10 +3,42 @@ from typing import Dict, List
 from server.type import Tile
 
 from agent.base_task import BaseTask
+from agent.behavior_tree.chest_node import ChestItemRequest, ChestTask
 from agent.behavior_tree.farm_node import FarmTask
 from agent.behavior_tree.route_node import RouteTask
 
 TASK_MOCK_DATA: Dict[str, List[BaseTask]] = {
+    "CHEST_P0_1": [  # Chest P0 测试数据 1：前往农场，从指定箱子取出防风草种子。
+        RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
+        ChestTask(
+            task_type="CHEST",
+            desc="从指定箱子取防风草种子",
+            chest_action="TAKE",
+            target_loc="Farm",
+            chest_tile=Tile(64, 15),
+            item_name="Parsnip Seeds",
+            count=49,
+            qualified_item_id="(O)472",
+        ),
+    ],
+    "CHEST_P0_2": [  # Chest P0 测试数据 2：确保背包里有基础农场工具和 49 个防风草种子。
+        RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
+        ChestTask(
+            task_type="CHEST",
+            desc="一次性从指定箱子取出基础农场工具和 49 个防风草种子",
+            chest_action="TAKE",
+            target_loc="Farm",
+            chest_tile=Tile(64, 15),
+            items=[
+                ChestItemRequest(item_name="Pickaxe", count=1),
+                ChestItemRequest(item_name="Axe", count=1),
+                ChestItemRequest(item_name="Scythe", count=1),
+                ChestItemRequest(item_name="Parsnip Seeds", count=49, qualified_item_id="(O)472"),
+                ChestItemRequest(item_name="Watering Can", count=1),
+                ChestItemRequest(item_name="Hoe", count=1),
+            ],
+        ),
+    ],
     "ROUTE_1": [  # ROUTE 测试数据 1：寻路基础任务
         RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="SeedShop"),
     ],

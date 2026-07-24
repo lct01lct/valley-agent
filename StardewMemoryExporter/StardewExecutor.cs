@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -10,6 +11,7 @@ using StardewModdingAPI;
 using StardewValley;
 using StardewValley.Menus;
 using StardewModdingAPI.Events;
+using StardewValley.Objects;
 
 namespace StardewMemoryExporter
 {
@@ -188,6 +190,14 @@ namespace StardewMemoryExporter
                 {
                     HandleOpenDoor(pressedKeys);
                 }
+                else if (actionType.Equals("OPEN_CHEST", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleOpenChest(packet);
+                }
+                else if (actionType.Equals("CLOSE_MENU", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleCloseMenu();
+                }
                 else if (actionType.Equals("USE_TOOL", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("c"))
                 {
                     HandleUseTool(pressedKeys);
@@ -204,6 +214,19 @@ namespace StardewMemoryExporter
                 {
                     string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "Farm";
                     HandleQueryWaterSources(locationName);
+                }
+                else if (actionType.Equals("QUERY_CHESTS", StringComparison.OrdinalIgnoreCase))
+                {
+                    string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "Farm";
+                    HandleQueryChests(locationName);
+                }
+                else if (actionType.Equals("TAKE_FROM_CHEST", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleTakeFromChest(packet);
+                }
+                else if (actionType.Equals("TAKE_ITEMS_FROM_CHEST", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleTakeItemsFromChest(packet);
                 }
 
                 else
@@ -320,6 +343,64 @@ namespace StardewMemoryExporter
             return;
         }
 
+        private void HandleOpenChest(JObject packet)
+        {
+            ClearHeldMoveButtons();
+
+            if (Game1.activeClickableMenu != null)
+            {
+                SendResponseToPython("SUCCESS");
+                return;
+            }
+
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                SendResponseToPython("BUSY");
+                return;
+            }
+
+            string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "";
+            if (!TryReadTile(packet, out Vector2 chestTile))
+            {
+                SendResponseToPython("FAILURE");
+                return;
+            }
+
+            if (Game1.currentLocation == null || !string.Equals(Game1.currentLocation.Name, locationName, StringComparison.OrdinalIgnoreCase))
+            {
+                SendResponseToPython("FAILURE");
+                return;
+            }
+
+            if (!Game1.currentLocation.Objects.TryGetValue(chestTile, out StardewValley.Object obj) || obj is not Chest)
+            {
+                SendResponseToPython("FAILURE");
+                return;
+            }
+
+            if (!IsPlayerCardinalNeighbor(chestTile))
+            {
+                SendResponseToPython("FAILURE");
+                return;
+            }
+
+            _helper.Input.Press(SButton.X);
+            SendResponseToPython("SUCCESS");
+        }
+
+        private void HandleCloseMenu()
+        {
+            ClearHeldMoveButtons();
+            if (Game1.activeClickableMenu == null)
+            {
+                SendResponseToPython("SUCCESS");
+                return;
+            }
+
+            Game1.exitActiveMenu();
+            SendResponseToPython("SUCCESS");
+        }
+
         private void HandleUseTool(List<string> pressedKeys)
         {
             ClearHeldMoveButtons();
@@ -417,11 +498,402 @@ namespace StardewMemoryExporter
             }.ToString(Newtonsoft.Json.Formatting.None));
         }
 
+        private void HandleTakeFromChest(JObject packet)
+        {
+            ClearHeldMoveButtons();
+            if (IsPlayerBusyForChestTransfer())
+            {
+                SendChestTransferResponse("FAILURE", "PLAYER_BUSY", "", "", 0, 0, 0, null);
+                return;
+            }
+
+            string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "";
+            string itemName = packet["item_name"]?.ToString() ?? "";
+            string qualifiedItemId = packet["qualified_item_id"]?.ToString() ?? "";
+            int requestedCount = packet["count"]?.ToObject<int>() ?? 0;
+
+            if (requestedCount <= 0)
+            {
+                SendChestTransferResponse("FAILURE", "INVALID_COUNT", locationName, itemName, requestedCount, 0, 0, null);
+                return;
+            }
+
+            if (!TryReadTile(packet, out Vector2 chestTile))
+            {
+                SendChestTransferResponse("FAILURE", "INVALID_TILE", locationName, itemName, requestedCount, 0, 0, null);
+                return;
+            }
+
+            if (Game1.currentLocation == null || !string.Equals(Game1.currentLocation.Name, locationName, StringComparison.OrdinalIgnoreCase))
+            {
+                SendChestTransferResponse(
+                    "FAILURE",
+                    "CURRENT_LOCATION_MISMATCH",
+                    locationName,
+                    itemName,
+                    requestedCount,
+                    0,
+                    0,
+                    chestTile
+                );
+                return;
+            }
+
+            GameLocation location = Game1.currentLocation;
+            if (!location.Objects.TryGetValue(chestTile, out StardewValley.Object obj))
+            {
+                SendChestTransferResponse("FAILURE", "OBJECT_NOT_FOUND", locationName, itemName, requestedCount, 0, 0, chestTile);
+                return;
+            }
+
+            if (obj is not Chest chest)
+            {
+                SendChestTransferResponse("FAILURE", "NOT_A_CHEST", locationName, itemName, requestedCount, 0, 0, chestTile);
+                return;
+            }
+
+            if (!IsPlayerCardinalNeighbor(chestTile))
+            {
+                SendChestTransferResponse("FAILURE", "PLAYER_NOT_NEXT_TO_CHEST", locationName, itemName, requestedCount, 0, 0, chestTile);
+                return;
+            }
+
+            int transferredCount = TakeItemsFromChest(chest, itemName, qualifiedItemId, requestedCount, out bool hasMatchingItem);
+            string status = transferredCount > 0 ? "SUCCESS" : "FAILURE";
+            string reason = transferredCount > 0 ? "" : hasMatchingItem ? "INVENTORY_FULL" : "ITEM_NOT_FOUND";
+            SendChestTransferResponse(status, reason, locationName, itemName, requestedCount, transferredCount, CountInventoryItems(itemName, qualifiedItemId), chestTile);
+        }
+
+        private void HandleTakeItemsFromChest(JObject packet)
+        {
+            ClearHeldMoveButtons();
+            if (IsPlayerBusyForChestTransfer())
+            {
+                SendChestBatchTransferResponse("FAILURE", "PLAYER_BUSY", "", null, new JArray());
+                return;
+            }
+
+            string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "";
+            if (!TryReadTile(packet, out Vector2 chestTile))
+            {
+                SendChestBatchTransferResponse("FAILURE", "INVALID_TILE", locationName, null, new JArray());
+                return;
+            }
+
+            if (packet["chest_items"] is not JArray chestItems || chestItems.Count == 0)
+            {
+                SendChestBatchTransferResponse("FAILURE", "INVALID_ITEMS", locationName, chestTile, new JArray());
+                return;
+            }
+
+            if (Game1.currentLocation == null || !string.Equals(Game1.currentLocation.Name, locationName, StringComparison.OrdinalIgnoreCase))
+            {
+                SendChestBatchTransferResponse("FAILURE", "CURRENT_LOCATION_MISMATCH", locationName, chestTile, new JArray());
+                return;
+            }
+
+            GameLocation location = Game1.currentLocation;
+            if (!location.Objects.TryGetValue(chestTile, out StardewValley.Object obj))
+            {
+                SendChestBatchTransferResponse("FAILURE", "OBJECT_NOT_FOUND", locationName, chestTile, new JArray());
+                return;
+            }
+
+            if (obj is not Chest chest)
+            {
+                SendChestBatchTransferResponse("FAILURE", "NOT_A_CHEST", locationName, chestTile, new JArray());
+                return;
+            }
+
+            if (!IsPlayerCardinalNeighbor(chestTile))
+            {
+                SendChestBatchTransferResponse("FAILURE", "PLAYER_NOT_NEXT_TO_CHEST", locationName, chestTile, new JArray());
+                return;
+            }
+
+            JArray results = new JArray();
+            int successCount = 0;
+            int transferredItemTypes = 0;
+
+            foreach (JToken rawItemRequest in chestItems)
+            {
+                string itemName = rawItemRequest["item_name"]?.ToString() ?? "";
+                string qualifiedItemId = rawItemRequest["qualified_item_id"]?.ToString() ?? "";
+                int requestedCount = rawItemRequest["count"]?.ToObject<int>() ?? 0;
+
+                if (string.IsNullOrWhiteSpace(itemName) || requestedCount <= 0)
+                {
+                    results.Add(BuildChestItemTransferResult("FAILURE", "INVALID_ITEM_REQUEST", itemName, qualifiedItemId, requestedCount, 0));
+                    continue;
+                }
+
+                int transferredCount = TakeItemsFromChest(chest, itemName, qualifiedItemId, requestedCount, out bool hasMatchingItem);
+                string status = transferredCount >= requestedCount ? "SUCCESS" : "FAILURE";
+                string reason = transferredCount >= requestedCount ? "" : hasMatchingItem ? "INVENTORY_FULL" : "ITEM_NOT_FOUND";
+
+                if (transferredCount > 0)
+                {
+                    transferredItemTypes++;
+                }
+                if (status == "SUCCESS")
+                {
+                    successCount++;
+                }
+
+                results.Add(BuildChestItemTransferResult(status, reason, itemName, qualifiedItemId, requestedCount, transferredCount));
+            }
+
+            string batchStatus = successCount == results.Count ? "SUCCESS" : transferredItemTypes > 0 ? "PARTIAL_SUCCESS" : "FAILURE";
+            string batchReason = batchStatus == "SUCCESS" ? "" : "ITEM_TRANSFER_INCOMPLETE";
+            SendChestBatchTransferResponse(batchStatus, batchReason, locationName, chestTile, results);
+        }
+
+        private void HandleQueryChests(string locationName)
+        {
+            ClearHeldMoveButtons();
+
+            GameLocation location = Game1.getLocationFromName(locationName);
+            if (location == null)
+            {
+                SendResponseToPython(new JObject
+                {
+                    ["status"] = "FAILURE",
+                    ["reason"] = "LOCATION_NOT_FOUND",
+                    ["location_name"] = locationName,
+                    ["chests"] = new JArray(),
+                }.ToString(Newtonsoft.Json.Formatting.None));
+                return;
+            }
+
+            JArray chests = new JArray();
+            foreach (KeyValuePair<Vector2, StardewValley.Object> pair in location.Objects.Pairs)
+            {
+                if (pair.Value is not Chest chest)
+                {
+                    continue;
+                }
+
+                chests.Add(new JObject
+                {
+                    ["Tile"] = new JArray((int)pair.Key.X, (int)pair.Key.Y),
+                    ["Name"] = chest.Name,
+                    ["DisplayName"] = chest.DisplayName,
+                    ["ItemCount"] = chest.Items.Count,
+                });
+            }
+
+            SendResponseToPython(new JObject
+            {
+                ["status"] = "SUCCESS",
+                ["location_name"] = locationName,
+                ["chests"] = chests,
+            }.ToString(Newtonsoft.Json.Formatting.None));
+        }
+
+        private bool TryReadTile(JObject packet, out Vector2 tile)
+        {
+            tile = Vector2.Zero;
+            if (packet["tile"] is not JArray tileArray || tileArray.Count < 2)
+            {
+                return false;
+            }
+
+            tile = new Vector2(tileArray[0]!.ToObject<int>(), tileArray[1]!.ToObject<int>());
+            return true;
+        }
+
+        private bool IsPlayerCardinalNeighbor(Vector2 targetTile)
+        {
+            Point playerTile = Game1.player.TilePoint;
+            int distanceX = Math.Abs(playerTile.X - (int)targetTile.X);
+            int distanceY = Math.Abs(playerTile.Y - (int)targetTile.Y);
+            return distanceX + distanceY == 1;
+        }
+
+        private int TakeItemsFromChest(
+            Chest chest,
+            string itemName,
+            string qualifiedItemId,
+            int requestedCount,
+            out bool hasMatchingItem
+        )
+        {
+            int remainingCount = requestedCount;
+            int transferredCount = 0;
+            hasMatchingItem = false;
+
+            foreach (Item chestItem in chest.Items.ToList())
+            {
+                if (chestItem == null || !IsItemMatch(chestItem, qualifiedItemId, itemName))
+                {
+                    continue;
+                }
+                hasMatchingItem = true;
+
+                int takeCount = Math.Min(remainingCount, chestItem.Stack);
+                if (takeCount <= 0)
+                {
+                    continue;
+                }
+
+                Item itemToAdd = chestItem.getOne();
+                itemToAdd.Stack = takeCount;
+                Item leftover = Game1.player.addItemToInventory(itemToAdd);
+
+                int leftoverCount = leftover?.Stack ?? 0;
+                int addedCount = Math.Max(0, takeCount - leftoverCount);
+                if (addedCount <= 0)
+                {
+                    break;
+                }
+
+                chestItem.Stack -= addedCount;
+                transferredCount += addedCount;
+                remainingCount -= addedCount;
+
+                if (chestItem.Stack <= 0)
+                {
+                    chest.Items.Remove(chestItem);
+                }
+
+                if (remainingCount <= 0)
+                {
+                    break;
+                }
+            }
+
+            return transferredCount;
+        }
+
+        private bool IsItemMatch(Item item, string qualifiedItemId, string itemName)
+        {
+            if (!string.IsNullOrWhiteSpace(qualifiedItemId)
+                && string.Equals(item.QualifiedItemId, qualifiedItemId, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(itemName)
+                && string.Equals(item.Name, itemName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(itemName)
+                && string.Equals(item.DisplayName, itemName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private int CountInventoryItems(string itemName, string qualifiedItemId)
+        {
+            int totalCount = 0;
+            foreach (Item item in Game1.player.Items)
+            {
+                if (item == null || !IsItemMatch(item, qualifiedItemId, itemName))
+                {
+                    continue;
+                }
+
+                totalCount += Math.Max(item.Stack, 1);
+            }
+
+            return totalCount;
+        }
+
+        private void SendChestTransferResponse(
+            string status,
+            string reason,
+            string locationName,
+            string itemName,
+            int requestedCount,
+            int transferredCount,
+            int inventoryCount,
+            Vector2? chestTile
+        )
+        {
+            JObject response = new JObject
+            {
+                ["status"] = status,
+                ["action"] = "TAKE_FROM_CHEST",
+                ["reason"] = reason,
+                ["location_name"] = locationName,
+                ["item_name"] = itemName,
+                ["requested_count"] = requestedCount,
+                ["transferred_count"] = transferredCount,
+                ["inventory_count"] = inventoryCount,
+            };
+
+            if (chestTile.HasValue)
+            {
+                response["tile"] = new JArray((int)chestTile.Value.X, (int)chestTile.Value.Y);
+            }
+
+            SendResponseToPython(response.ToString(Newtonsoft.Json.Formatting.None));
+        }
+
+        private JObject BuildChestItemTransferResult(
+            string status,
+            string reason,
+            string itemName,
+            string qualifiedItemId,
+            int requestedCount,
+            int transferredCount
+        )
+        {
+            return new JObject
+            {
+                ["status"] = status,
+                ["reason"] = reason,
+                ["item_name"] = itemName,
+                ["qualified_item_id"] = qualifiedItemId,
+                ["requested_count"] = requestedCount,
+                ["transferred_count"] = transferredCount,
+                ["inventory_count"] = CountInventoryItems(itemName, qualifiedItemId),
+            };
+        }
+
+        private void SendChestBatchTransferResponse(
+            string status,
+            string reason,
+            string locationName,
+            Vector2? chestTile,
+            JArray results
+        )
+        {
+            JObject response = new JObject
+            {
+                ["status"] = status,
+                ["action"] = "TAKE_ITEMS_FROM_CHEST",
+                ["reason"] = reason,
+                ["location_name"] = locationName,
+                ["results"] = results,
+            };
+
+            if (chestTile.HasValue)
+            {
+                response["tile"] = new JArray((int)chestTile.Value.X, (int)chestTile.Value.Y);
+            }
+
+            SendResponseToPython(response.ToString(Newtonsoft.Json.Formatting.None));
+        }
+
         private bool IsPlayerBusyForImmediateCommand()
         {
             Farmer player = Game1.player;
             if (player == null) return true;
             return player.UsingTool || !player.CanMove;
+        }
+
+        private bool IsPlayerBusyForChestTransfer()
+        {
+            Farmer player = Game1.player;
+            if (player == null) return true;
+            if (player.UsingTool) return true;
+            return Game1.activeClickableMenu == null && !player.CanMove;
         }
 
         private SButton? GetMoveButton(string direction)
