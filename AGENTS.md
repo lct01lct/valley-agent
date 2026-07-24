@@ -189,8 +189,15 @@ SMAPI Observer 需要持续导出并同步以下状态：
 
 - 新增、修改、重构或审查代码：`skills/code-style/SKILL.md`
 - 新增、修改或审查行为树节点：`skills/behavior-tree/SKILL.md`
+- 修改 README、AGENTS 或 docs 文档：`skills/documentation/SKILL.md`
 
-如果任务同时涉及编码和行为树，应先读取 `code-style`，再读取 `behavior-tree`。`SKILL.md` 引用的 `references/`、`assets/` 或模板应按其中的路由说明继续读取。用户明确要求的规则优先于 Skill；行为树专属契约以 `behavior-tree` Skill 为准。
+如果任务同时涉及多类 Skill，应按“文档 -> 编码 -> 行为树”的顺序读取与任务相关的 Skill；行为树专属契约以 `behavior-tree` Skill 为准。`SKILL.md` 引用的 `references/`、`assets/` 或模板应按其中的路由说明继续读取。用户明确要求的规则优先于 Skill。
+
+## 文档维护边界
+
+`README.md` 是项目门面，只保留项目目标、总体架构、当前能力摘要、运行方式和文档导航。不要在 README 中展开行为树节点状态机、SMAPI/Python 协议字段、工具动作等待、箱子/背包/菜单交互细节、临时 mock 数据或调试日志解释。
+
+Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段目标、验收标准和已知缺口应写入 `docs/current-stage.md`；未来计划和暂不实现的设计应写入 `docs/next-development-plan.md`。更完整的判断规则见 `skills/documentation/SKILL.md`。
 
 ## 当前主要模块
 

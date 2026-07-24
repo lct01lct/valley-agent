@@ -28,97 +28,16 @@ Valley Agent 是一个让 AI 自主游玩《星露谷物语》的实验项目。
 - `AgentBlackboard` 在 BT 外侧承担计划、进度和跨节点信号协作；BT 每个 tick 读取 state 与 blackboard 后决定当前节点行为。
 - `PlayerContext` 额外持有运行期 `MapKnowledgeCache`，用于保存水源、未来采集物等低频地图知识；它不同于每帧 state，也不同于 blackboard 的调度信号。
 
-## 记忆与缓存分层
+## 当前能力概览
 
-项目当前把“缓存/记忆”分成四层，避免把实时状态、性能缓存和 Agent 记忆混在一起：
+项目当前重点验证以下能力：
 
-1. `Realtime State`：每帧游戏事实，例如玩家位置、当前工具、`UsingTool`、`CanMove`。
-2. `State Snapshot Cache`：性能缓存，例如 `obstacles`、`FarmTiles` 低频刷新；C# 没刷新时发 `null`，Python 复用上一份。
-3. `MapKnowledgeCache`：当前运行期地图知识，例如按需查询并缓存 Farm 水源；后续可记录路上见过但暂不采集的觅食物。
-4. `PersistentMemoryStore`：长期记忆预留接口，当前不实现、不调用；未来用于跨运行保存稳定线索，例如常用箱子、水源和商店柜台位置。
+- 跨场景导航、局部路径跟随和动态重规划。
+- 基础农业任务闭环，包括区域规划、地块处理和结果验证。
+- 基础资源管理任务闭环。
+- 运行期地图知识缓存，为低频查询和后续机会记忆预留接口。
 
-好处是：水源这类低变化资源不需要塞进每帧 state；采集物这类机会记忆也不会污染实时状态。行为节点需要时先查地图知识缓存，缓存没有再发低频查询。
-
-## 当前行为树
-
-```text
-Selector
-├── Sequence("Guard")
-│   └── Defend_Node
-├── Sequence("Route")
-│   ├── OpenDoorNode
-│   ├── SwitchToolNode
-│   ├── ClearObstacleNode
-│   └── RouteNode
-├── Sequence("Chest")
-│   └── ChestNode
-├── Sequence("Farm")
-│   ├── FarmResourceCheckNode
-│   ├── SwitchToolNode
-│   ├── ClearObstacleNode
-│   ├── RefillWateringCanNode
-│   └── FarmNode
-└── Sequence("Think")
-    └── LLM_Node
-```
-
-行为树每个 tick 从高优先级分支开始扫描：
-
-1. `Defend_Node` 预留给紧急安全行为。
-2. `OpenDoorNode`、`SwitchToolNode`、`ClearObstacleNode` 和 `RouteNode` 消费当前路线计划并执行确定性移动、开门和清障动作。
-3. `ChestNode` 当前支持 Chest P0：站到指定箱子旁，通过 SMAPI 结构化动作从箱子取指定物品，并用背包 state 验证数量增加。
-4. `Farm` 分支通过 `FarmResourceCheckNode`、`SwitchToolNode`、`ClearObstacleNode`、`RefillWateringCanNode` 和 `FarmNode` 协作完成农业任务，例如资源前置检查、浇水、清障、锄地、播种，以及水壶没水时去农场水源补水。
-5. `Sequence("Think")` 是最后兜底分支，内部当前只有 `LLM_Node`：当前面节点没有可执行计划时，才在后台生成模拟计划并写入黑板。
-6. 新计划到达后，Selector 重新从高优先级节点扫描。
-
-因此，`Route`、`Chest`、`Farm` 和 `Think` 分支在顶层 Selector 视角是同级概念；`Think` 优先级最低，职责更偏规划兜底。
-
-## 移动与交互站位
-
-项目将移动控制拆成两个尺度：
-
-- 长距离移动由 `RouteNode` 管理跨场景路线、A\* 路径缓存和 `MoveController` 局部跟随。
-- 交互前站位由 `PositioningController` 管理。调用方输入 `candidate_stand_tiles` 和可选 `tool_target_tile`，控制器负责移动到最近可达站位，并在站好后用 `FACE_DIRECTION` 原地转向，直到 `ToolTarget` 对准目标。
-
-这个接口用于 Farm 浇水，也适合后续复用到箱子、树、NPC、商店柜台、门和清障等交互。业务节点只负责求解“可以站哪些格”和“工具目标应该是哪一格”，不重复实现 A\*、路径推进或转向控制。
-
-## Chest / Inventory 结构化动作
-
-Chest P0/P1 不模拟鼠标和 UI 拖拽。Python `ChestNode` 会先用 `QUERY_CHESTS` 低频校验指定箱子坐标；如果指定坐标不存在但当前场景只有一个箱子，会自动改用这个唯一箱子的真实坐标。随后节点复用 `PositioningController` 移动到箱子上下左右相邻格并面向箱子，并在玩家身体稳定进入相邻格后发送 `OPEN_CHEST` 打开箱子界面，等待 0.5 秒，再向 SMAPI Executor 发送结构化批量动作：
-
-```json
-{
-  "action": "TAKE_ITEMS_FROM_CHEST",
-  "location_name": "Farm",
-  "tile": [64, 15],
-  "chest_items": [
-    {"item_name": "Pickaxe", "count": 1},
-    {"item_name": "Parsnip Seeds", "qualified_item_id": "(O)472", "count": 49}
-  ]
-}
-```
-
-C# 端要求玩家位于当前场景、与箱子上下左右相邻且未处于工具动作中，然后直接通过游戏对象模型在 `Chest.Items` 和 `Game1.player.Items` 之间批量转移物品。转移后 Python 会发送 `CLOSE_MENU` 关闭箱子界面，再等待下一帧背包 state 验证目标物品数量变化。`TAKE` 时 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；如果背包里已经全部足够，`ChestNode` 会直接完成，不再强行开箱取物。
-
-存物使用同一套站位、开箱、关箱和验证流程，只是动作换成 `PUT_ITEMS_TO_CHEST`。`PUT` 的语义是把背包中匹配清单的物品尽量放入箱子，并用背包 state 验证数量减少；如果可堆叠物品不足请求数量，允许部分存入并记录实际 `transferred_count`。
-
-## 工具动作等待机制
-
-使用工具不是瞬时动作。挥斧、挥镐、锄地和浇水都会让玩家进入工具动画，期间游戏会锁住移动。当前 SMAPI Observer 会导出 `UsingTool`、`CanMove`、`IsPlayerFree` 和 `CanPlayerMove` 等状态；Python 端节点不能只因为 `USE_TOOL` 命令返回 `SUCCESS` 就判定动作完成。
-
-当前约定是：
-
-- C# Executor 在玩家 `UsingTool=True` 或 `CanMove=False` 时会拒绝新的移动、转向、切工具、使用工具/物品等动作，并返回 `BUSY`。
-- Python 端通过 `ToolActionTracker` 观察“上一轮工具动作开始使用 -> `UsingTool` 回到 `False` 且 `CanMove=True`”的状态变化，确认工具动画已经收招。
-- `ClearObstacleNode` 和 `FarmNode` 都应在工具动作收招后，再用下一帧 state 验证结果，例如障碍是否消失、地块是否变成 HoeDirt、作物是否已浇水。
-- 如果动作结果暂时没有达成，节点进入有限重试；Farm P1 的浇水阶段会把临时失败地块放入浇水重试队列，避免因为一次站位或动画时序问题就提前结束批处理。
-- 任何交互或失败路径需要停止持续移动时，必须显式发送 `IDLE`。
-
-## AgentBlackboard 的角色
-
-`AgentBlackboard` 是跨节点通讯和调度状态中心。它保存宏观计划、当前步骤、LLM 异步状态、节点间信号和恢复上下文。
-
-它不是具体执行节点，也不是替代行为树的 tick driver。当前 tick 仍由 `ValleyAgent` 和 `Selector` 驱动；blackboard 负责让多个节点围绕同一份计划和状态信号协作。
+更细的行为树节点边界、状态机、协议约束和阶段验收见 `AGENTS.md` 与 `docs/current-stage.md`。
 
 ## 目录结构
 
@@ -130,7 +49,7 @@ valley-agent/
 │   ├── base_task.py                # 基础任务类型
 │   ├── behavior_tree/              # 节点、黑板和玩家上下文
 │   ├── action/map/                 # 硬编码场景连通图和跨场景候选路线
-│   ├── action/valley_action/       # 动作模型、A*、局部移动、交互站位和工具目标控制
+│   ├── action/valley_action/       # 动作模型、A*、局部移动和交互站位控制
 │   ├── memory/                     # 运行期地图知识缓存和长期记忆预留接口
 │   └── prompt/                     # Planner 提示词
 ├── server/
@@ -190,6 +109,7 @@ GOOGLE_API_KEY=<Your_Google_API_Key>
 
 - `skills/code-style/SKILL.md`：编码、协议和验证规范。
 - `skills/behavior-tree/SKILL.md`：行为树节点契约、模板和示例。
+- `skills/documentation/SKILL.md`：文档边界、更新流程和 README 粒度规范。
 
 完整的强制加载规则见 `AGENTS.md`。
 
@@ -200,6 +120,6 @@ GOOGLE_API_KEY=<Your_Google_API_Key>
 1. 将 `main.py` 的自然语言任务稳定注入 Planner。
 2. 用类型化 Plan Schema 替换模拟计划。
 3. 接入真实 LLM 进行宏观任务生成和失败恢复。
-4. 扩展时间、金钱、体力、背包、菜单、作物、天气和 NPC 状态。
+4. 扩展时间、金钱、体力、菜单、作物、天气和 NPC 状态。
 5. 完善种植、浇水、收获、采集、购买、战斗和日程管理技能。
 6. 建立离线回放、半实时场景和游戏内端到端 Benchmark。
