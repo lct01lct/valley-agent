@@ -43,6 +43,7 @@ class AStarParser:
         hard_layers = [
             "Wall",
             "Bush",
+            "Object",
             "Stone",
             "Twig",
             "Weeds",

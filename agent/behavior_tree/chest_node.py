@@ -6,6 +6,7 @@ from typing import Literal
 from agent.action.location.location import Location
 from agent.action.valley_action.action_type import ChestItemPayload, StardewAction, StardewCommand
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
+from agent.action.valley_action.tool_targeting import build_tool_target_face_command, is_tool_targeting
 from agent.base_task import BaseTask, TaskType
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
@@ -113,6 +114,7 @@ class ChestNode(BTNode):
         self._has_opened_chest = False
         self._has_closed_chest = False
         self._has_sent_transfer_command = False
+        self._locked_stand_tile: Tile | None = None
         self._last_debug_heartbeat_at = 0.0
         self.chest_debug_logger = ChestDebugLogger()
 
@@ -175,20 +177,27 @@ class ChestNode(BTNode):
             self._fail(context, blackboard, current_task, "背包中没有任何可存入箱子的目标物品")
             return "SUCCESS"
 
-        positioning_result = self._tick_chest_positioning(game_state, context, resolved_chest_tile)
-        if positioning_result.status == "FAILED":
-            self._fail(
-                context,
-                blackboard,
-                current_task,
-                f"无法移动并面向箱子: chest_tile={resolved_chest_tile}, reason={positioning_result.reason}",
-            )
-            return "SUCCESS"
+        if self._locked_stand_tile is None:
+            positioning_result = self._tick_chest_positioning(game_state, context, resolved_chest_tile)
+            if positioning_result.status == "FAILED":
+                self._fail(
+                    context,
+                    blackboard,
+                    current_task,
+                    f"无法移动并面向箱子: chest_tile={resolved_chest_tile}, reason={positioning_result.reason}",
+                )
+                return "SUCCESS"
 
-        if positioning_result.status in ("MOVING", "FACING"):
-            return "RUNNING"
+            if positioning_result.status == "MOVING":
+                return "RUNNING"
 
-        stand_tile = positioning_result.stand_tile or game_state.player_tile
+            if positioning_result.stand_tile is not None:
+                self._locked_stand_tile = positioning_result.stand_tile
+
+            if positioning_result.status == "FACING":
+                return "RUNNING"
+
+        stand_tile = self._locked_stand_tile or game_state.player_tile
         if not self._is_player_at_chest_interaction_position(game_state, stand_tile, resolved_chest_tile):
             command = self._build_move_to_chest_interaction_position_command(
                 game_state,
@@ -201,6 +210,16 @@ class ChestNode(BTNode):
                 f"靠近箱子交互边缘: chest={resolved_chest_tile}, stand_tile={stand_tile}, "
                 f"target_position=({target_position[0]:.1f}, {target_position[1]:.1f}), "
                 f"player_position={game_state.position}, command={command.action}, response={response}"
+            )
+            return "RUNNING"
+
+        if not is_tool_targeting(game_state, resolved_chest_tile):
+            command = build_tool_target_face_command(game_state.player_tile, resolved_chest_tile)
+            response = context.executor_client.send_command(command)
+            self._log(
+                f"打开箱子前最终面向校验: chest={resolved_chest_tile}, stand_tile={stand_tile}, "
+                f"player_tile={game_state.player_tile}, tool_target={game_state.tool_target.tile}, "
+                f"command={command.action}, response={response}"
             )
             return "RUNNING"
 
@@ -229,6 +248,7 @@ class ChestNode(BTNode):
         self._has_opened_chest = False
         self._has_closed_chest = False
         self._has_sent_transfer_command = False
+        self._locked_stand_tile = None
         self._last_debug_heartbeat_at = 0.0
         self.positioning_controller.reset()
         print(
@@ -792,6 +812,7 @@ class ChestNode(BTNode):
             f"location={game_state.location_name}, player_tile={game_state.player_tile}, "
             f"chest_tile={current_task.chest_tile}, resolved_chest_tile={self._resolved_chest_tile}, "
             f"opened={self._has_opened_chest}, closed={self._has_closed_chest}, "
+            f"locked_stand_tile={self._locked_stand_tile}, "
             f"positioning={self.positioning_controller.get_debug_snapshot()}"
         )
 
@@ -809,5 +830,6 @@ class ChestNode(BTNode):
         self._has_opened_chest = False
         self._has_closed_chest = False
         self._has_sent_transfer_command = False
+        self._locked_stand_tile = None
         self._last_debug_heartbeat_at = 0.0
         self.positioning_controller.reset()

@@ -906,6 +906,7 @@ def route_cost_function(
     # 这些格子属于“绝对不可逾越”，哪怕满级工具也破坏不了，直接熔断
     absolute_walls = state.layers.get("Wall", set()).union(
         state.layers.get("Bush", set()),
+        state.layers.get("Object", set()),
         state.layers.get("TreeStump", set()),
     )
     for growth_stage in range(0, 6):

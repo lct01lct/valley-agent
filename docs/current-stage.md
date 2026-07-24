@@ -101,6 +101,7 @@ Selector
 - 后台 A* 结果切换前需要对齐当前玩家位置，避免使用过期起点导致人物回头。
 - 绝路、目标 warp 不存在、路径放弃或交给兜底规划前，RouteNode 必须先发送 `IDLE`，否则 C# 会继续保持旧方向。
 - 可破坏障碍当前包括 `Stone`、`Twig`、`Weeds` 和策略允许后的普通树 `Tree0` ~ `Tree5`。普通树清理成本较高，需要通过清障策略层确认；`FruitTree0` ~ `FruitTree5` 和 `TreeStump` 暂视为不可自动清理障碍。
+- 箱子、机器和其他普通地图对象由 SMAPI Observer 进入 `Object` 层；A* 将 `Object` 作为硬障碍处理。ChestNode 需要交互箱子时，只允许站到箱子上下左右相邻格，不会把箱子 tile 纳入可站立路径。
 - 不允许斜向破坏障碍物。A* 不应斜向进入可破坏障碍格；RouteNode 和 ClearObstacleNode 只有在玩家位于目标上下左右相邻格时才触发/执行清障。
 
 ## 当前交互站位模型
@@ -209,7 +210,7 @@ RouteTask("前往箱子所在场景") -> ChestTask("向指定 chest_tile 批量�
 | 模拟宏观计划 | 已有基础 | `LLM_Node` 异步返回硬编码 `RouteTask` |
 | 跨地图规划 | 已有基础 | `HardcodedStardewMap` 已迁移到 `agent/action/map/map.py`，可枚举候选路线；RouteNode 按传送门距离缓存做路线评分 |
 | SMAPI 结构化感知 | 已有基础 | 导出地点、位置、Warp、局部障碍物、`CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items` |
-| 局部 A* | 已有基础 | 支持格子路径、硬障碍、目标 Warp 和可破坏障碍代价；普通树按高成本清障候选处理；已限制斜向清障路径 |
+| 局部 A* | 已有基础 | 支持格子路径、硬障碍、目标 Warp 和可破坏障碍代价；`Object` 层已作为硬障碍，因此箱子/机器等对象不会被当成可行走 tile；普通树按高成本清障候选处理；已限制斜向清障路径 |
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
 | 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
