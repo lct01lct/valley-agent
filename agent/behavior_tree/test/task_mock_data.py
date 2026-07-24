@@ -57,6 +57,28 @@ TASK_MOCK_DATA: Dict[str, List[BaseTask]] = {
             ],
         ),
     ],
+    "CHEST_P2_P3_1": [  # Chest P2/P3：扫描 Farm 所有箱子缓存内容；回家后再自动选箱取出镰刀。
+        RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
+        ChestTask(
+            task_type="CHEST",
+            desc="扫描 Farm 所有箱子并缓存内容",
+            chest_action="SCAN",
+            target_loc="Farm",
+            chest_tile=None,
+        ),
+        RouteTask(task_type="ROUTE", desc="回到农舍", target_loc="FarmHouse"),
+        RouteTask(task_type="ROUTE", desc="再次前往农场", target_loc="Farm"),
+        ChestTask(
+            task_type="CHEST",
+            desc="自动从 Farm 箱子中取出镰刀",
+            chest_action="TAKE",
+            target_loc="Farm",
+            chest_tile=None,
+            items=[
+                ChestItemRequest(item_name="Scythe", count=1),
+            ],
+        ),
+    ],
     "ROUTE_1": [  # ROUTE 测试数据 1：寻路基础任务
         RouteTask(task_type="ROUTE", desc="前往皮埃尔商店", target_loc="SeedShop"),
     ],

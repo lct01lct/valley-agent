@@ -69,6 +69,7 @@ class StardewAction(Enum):
     # =========================================================================
     QUERY_WATER_SOURCES = "QUERY_WATER_SOURCES"  # 查询当前或指定场景中的可补水水源坐标，用于地图知识缓存
     QUERY_CHESTS = "QUERY_CHESTS"  # 查询当前或指定场景中的箱子坐标，用于 Chest P0 坐标校验和后续箱子缓存
+    QUERY_CHEST_CONTENT = "QUERY_CHEST_CONTENT"  # 查询指定箱子的物品快照，用于 Chest P2/P3 箱子知识缓存
     TAKE_FROM_CHEST = "TAKE_FROM_CHEST"  # 从指定箱子取出指定物品；要求玩家位于箱子上下左右相邻格
     TAKE_ITEMS_FROM_CHEST = "TAKE_ITEMS_FROM_CHEST"  # 从指定箱子批量取出多个物品；要求玩家位于箱子上下左右相邻格
     PUT_ITEMS_TO_CHEST = "PUT_ITEMS_TO_CHEST"  # 向指定箱子批量存入多个物品；要求玩家位于箱子上下左右相邻格

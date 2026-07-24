@@ -107,31 +107,37 @@ Chest P0/P1 已完成最小闭环：指定 `chest_tile`，通过 `QUERY_CHESTS` 
 目标：
 
 ```text
-QUERY_CHEST_CONTENT -> 写入 MapKnowledgeCache
+走到箱子旁 -> 打开箱子 -> QUERY_CHEST_CONTENT -> 写入 MapKnowledgeCache -> 关闭箱子
 ```
 
-需要实现：
+当前已基础接入：
 
-- `QUERY_CHESTS` 已在 Chest P0 中基础接入，用于返回当前地点箱子坐标和基础信息；后续需要把结果写入缓存并处理过期。
-- C# Executor 新增 `QUERY_CHEST_CONTENT`，返回指定箱子的 `Items` 摘要。
-- Python 解析箱子查询结果。
-- `MapKnowledgeCache` 增加箱子位置和箱子内容缓存。
-- 取放成功后更新或失效对应缓存。
+- `QUERY_CHESTS` 返回当前地点箱子坐标和基础信息，并写入 `MapKnowledgeCache` 箱子位置缓存。
+- C# Executor 新增 `QUERY_CHEST_CONTENT`，用于箱子打开后返回指定箱子的 `Items` 摘要。
+- Python 会先移动到箱子旁、打开箱子、等待界面稳定，再读取箱子内容并写入 `MapKnowledgeCache`。
+- 取放成功后将对应箱子内容缓存标记为过期。
+- `MapKnowledgeCache` 已预留箱子语义标签接口，用于未来记录“这个箱子打算存什么”，但当前不参与决策。
 
 #### Chest P3：自动选择箱子
 
 目标：
 
 ```text
-ChestTask 不指定 chest_tile -> 查缓存/低频查询 -> 选择含目标物品且距离近的箱子
+ChestTask 不指定 chest_tile -> 查缓存 -> 缓存缺失时逐个打开箱子查看 -> 选择含目标物品且距离近的箱子
 ```
 
-需要实现：
+当前已基础接入：
 
 - `ChestTask.chest_tile` 允许为空。
-- 优先从 `MapKnowledgeCache` 找含目标物品的箱子。
-- 缓存缺失或疑似过期时调用 `QUERY_CHESTS` / `QUERY_CHEST_CONTENT`。
-- 多个箱子都满足时，优先选择当前玩家到箱子的距离更短者。
+- `TAKE` 不指定 `chest_tile` 时，优先从 `MapKnowledgeCache` 找含目标物品的箱子。
+- 缓存缺失时只用 `QUERY_CHESTS` 获取当前 `target_loc` 场景内箱子坐标，然后按距离逐个走到箱子旁、打开查看、缓存内容。
+- 找到满足目标物品的箱子后停止查看，并在当前打开的箱子中取物。
+
+后续增强：
+
+- 自动存物策略：根据语义标签、已有同类物品、空位和距离选择存物箱。
+- 跨场景搜索策略：由 Planner/LLM 基于记忆生成候选场景，不放入 ChestNode。
+- 箱子内容查询可接入长期记忆，并在新一天、移动箱子、破坏箱子等事件中处理失效。
 
 #### Chest P4：Farm 缺资源恢复联动
 

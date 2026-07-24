@@ -12,6 +12,7 @@ using StardewValley;
 using StardewValley.Menus;
 using StardewModdingAPI.Events;
 using StardewValley.Objects;
+using StardewValley.Tools;
 
 namespace StardewMemoryExporter
 {
@@ -219,6 +220,10 @@ namespace StardewMemoryExporter
                 {
                     string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "Farm";
                     HandleQueryChests(locationName);
+                }
+                else if (actionType.Equals("QUERY_CHEST_CONTENT", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleQueryChestContent(packet);
                 }
                 else if (actionType.Equals("TAKE_FROM_CHEST", StringComparison.OrdinalIgnoreCase))
                 {
@@ -777,9 +782,54 @@ namespace StardewMemoryExporter
             SendResponseToPython(new JObject
             {
                 ["status"] = "SUCCESS",
+                ["action"] = "QUERY_CHESTS",
                 ["location_name"] = locationName,
                 ["chests"] = chests,
             }.ToString(Newtonsoft.Json.Formatting.None));
+        }
+
+        private void HandleQueryChestContent(JObject packet)
+        {
+            ClearHeldMoveButtons();
+
+            string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "Farm";
+            if (!TryReadTile(packet, out Vector2 chestTile))
+            {
+                SendQueryChestContentResponse("FAILURE", "INVALID_TILE", locationName, null, new JArray());
+                return;
+            }
+
+            GameLocation location = Game1.getLocationFromName(locationName);
+            if (location == null)
+            {
+                SendQueryChestContentResponse("FAILURE", "LOCATION_NOT_FOUND", locationName, chestTile, new JArray());
+                return;
+            }
+
+            if (!location.Objects.TryGetValue(chestTile, out StardewValley.Object obj))
+            {
+                SendQueryChestContentResponse("FAILURE", "OBJECT_NOT_FOUND", locationName, chestTile, new JArray());
+                return;
+            }
+
+            if (obj is not Chest chest)
+            {
+                SendQueryChestContentResponse("FAILURE", "NOT_A_CHEST", locationName, chestTile, new JArray());
+                return;
+            }
+
+            JArray items = new JArray();
+            foreach (Item item in chest.Items)
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                items.Add(BuildChestContentItem(item));
+            }
+
+            SendQueryChestContentResponse("SUCCESS", "", locationName, chestTile, items);
         }
 
         private bool TryReadTile(JObject packet, out Vector2 tile)
@@ -1012,6 +1062,44 @@ namespace StardewMemoryExporter
                 ["transferred_count"] = transferredCount,
                 ["inventory_count"] = CountInventoryItems(itemName, qualifiedItemId),
             };
+        }
+
+        private JObject BuildChestContentItem(Item item)
+        {
+            return new JObject
+            {
+                ["Name"] = item.Name ?? "",
+                ["DisplayName"] = item.DisplayName ?? item.Name ?? "",
+                ["QualifiedItemId"] = item.QualifiedItemId ?? "",
+                ["Stack"] = Math.Max(item.Stack, 1),
+                ["Category"] = item.Category,
+                ["IsTool"] = item is Tool,
+            };
+        }
+
+        private void SendQueryChestContentResponse(
+            string status,
+            string reason,
+            string locationName,
+            Vector2? chestTile,
+            JArray items
+        )
+        {
+            JObject response = new JObject
+            {
+                ["status"] = status,
+                ["action"] = "QUERY_CHEST_CONTENT",
+                ["reason"] = reason,
+                ["location_name"] = locationName,
+                ["items"] = items,
+            };
+
+            if (chestTile.HasValue)
+            {
+                response["tile"] = new JArray((int)chestTile.Value.X, (int)chestTile.Value.Y);
+            }
+
+            SendResponseToPython(response.ToString(Newtonsoft.Json.Formatting.None));
         }
 
         private void SendChestBatchTransferResponse(

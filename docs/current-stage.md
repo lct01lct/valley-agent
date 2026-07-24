@@ -180,13 +180,15 @@ Farm 水壶补水闭环：
 4. 节点发送 `USE_TOOL` 接水，使用 `ToolActionTracker` 等待收招，再通过下一帧水壶 state 验证 `WaterLeft > 0`。
 5. 补水成功后清理 blackboard 标记，FarmNode 回到原浇水目标继续执行。
 
-## 当前 Chest P0/P1 模型
+## 当前 Chest P0/P1/P2/P3 模型
 
-`ChestNode` 当前支持指定箱子批量取物和批量存物：
+`ChestNode` 当前支持指定箱子批量取物、批量存物、交互式打开箱子建立内容缓存，以及在当前 `target_loc` 内自动选择满足取物需求的箱子：
 
 ```text
 RouteTask("前往箱子所在场景") -> ChestTask("从指定 chest_tile 批量取 items")
 RouteTask("前往箱子所在场景") -> ChestTask("向指定 chest_tile 批量存 items")
+RouteTask("前往箱子所在场景") -> ChestTask("SCAN 当前场景箱子，逐个打开查看并缓存")
+RouteTask("前往箱子所在场景") -> ChestTask("TAKE 且 chest_tile=None，自动选箱取物")
 ```
 
 执行约束：
@@ -201,7 +203,15 @@ RouteTask("前往箱子所在场景") -> ChestTask("向指定 chest_tile 批量�
 8. C# 端在 `Chest.Items` 和 `Game1.player.Items` 之间批量转移物品，返回每个物品的 `transferred_count`、`status` 和 `reason`。
 9. Python 端发送 `CLOSE_MENU` 关闭箱子界面，再等待下一帧背包 state：`TAKE` 验证数量增加，`PUT` 验证数量减少，验证通过后才推进 `current_step_index`。
 
-当前暂不支持查询箱子内容、自动选择箱子，也暂未把 FarmResourceCheckNode 的缺资源恢复自动转成 ChestTask；这些内容记录在 `docs/next-development-plan.md`。
+Chest P2/P3 约定：
+
+1. `SCAN` 会先低频查询 `target_loc` 当前场景中的箱子坐标，然后逐个移动到箱子旁、打开箱子、查看内容、写入 `MapKnowledgeCache` 并关闭箱子；不要通过底层代码直接遍历所有箱子内容。
+2. `QUERY` 用于打开查看指定箱子内容并写入缓存。
+3. `TAKE` 允许 `chest_tile=None`；此时 `ChestNode` 先查当前运行期缓存，缓存缺失时只在 `target_loc` 当前场景内按距离逐个打开箱子查看，找到满足目标物品的箱子后停止，并在当前打开的箱子中取物。
+4. 跨场景找箱子不属于 ChestNode 职责；应由 Planner/LLM 结合记忆生成 `RouteTask + ChestTask`。
+5. 取放成功后，Python 会保守地把对应箱子内容缓存标记为过期，后续需要时重新查询。
+
+当前暂未把 FarmResourceCheckNode 的缺资源恢复自动转成 ChestTask；这些内容记录在 `docs/next-development-plan.md`。
 
 ## 当前进度
 
@@ -223,7 +233,8 @@ RouteTask("前往箱子所在场景") -> ChestTask("向指定 chest_tile 批量�
 | Farm 水壶补水 | 基础接入 | 水壶没水时触发 RefillWateringCanNode，按需查询并缓存 Farm 水源，站到水源旁接水后继续浇水 |
 | Chest P0 指定取物 | 基础接入 | ChestNode 可用 `QUERY_CHESTS` 校验/恢复唯一箱子坐标，站到箱子旁，调用 SMAPI `TAKE_ITEMS_FROM_CHEST` 结构化动作批量取物，并用背包 state 验证数量增加 |
 | Chest P1 指定存物 | 基础接入 | ChestNode 可调用 SMAPI `PUT_ITEMS_TO_CHEST` 结构化动作批量存物，支持部分存入并用背包 state 验证数量减少 |
-| 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源，采集物/箱子等机会记忆后续接入 |
+| Chest P2/P3 箱子知识 | 基础接入 | 支持打开箱子后 `QUERY_CHEST_CONTENT` 写入缓存、`SCAN` 逐箱交互式查看，以及 `TAKE` 不指定 chest_tile 时基于缓存/按需逐箱查看自动选箱 |
+| 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源和箱子位置/内容，采集物等机会记忆后续接入 |
 | Farm P1 批处理 | 开发中 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线，仍需更多游戏内测试和失败恢复 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |

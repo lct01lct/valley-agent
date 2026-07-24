@@ -65,11 +65,16 @@ Selector
 
 `Chest` 分支内部的职责边界：
 
-- `ChestNode`：当前实现 Chest P0/P1，处理指定箱子批量取物和批量存物。节点先用 `QUERY_CHESTS` 校验箱子坐标；若指定坐标不存在但当前场景只有一个箱子，可自动改用唯一箱子的真实坐标。随后复用 `PositioningController` 站到箱子上下左右相邻格并面向箱子，确认玩家身体稳定进入相邻格后发送 `OPEN_CHEST` 打开箱子界面，等待 0.5 秒，再根据 `ChestTask.chest_action` 发送 SMAPI 结构化动作 `TAKE_ITEMS_FROM_CHEST` 或 `PUT_ITEMS_TO_CHEST`，之后发送 `CLOSE_MENU` 关闭箱子界面，最后用背包 state 验证所有目标物品数量变化。
+- `ChestNode`：当前实现 Chest P0/P1/P2/P3，处理指定箱子批量取物、批量存物、交互式打开箱子建立内容缓存，以及 `TAKE` 不指定 `chest_tile` 时的场景内自动选箱。
+- `ChestKnowledgeService`：不是行为树节点，只负责低频查询箱子位置、在箱子已打开后读取内容、写入 `MapKnowledgeCache`。它不负责推进角色移动，也不应被当成“隔空遍历箱子内容”的执行入口。
 
 箱子和其他不可穿越对象由 SMAPI Observer 导出到 `Object` 障碍层；A* 会把 `Object` 作为硬障碍处理。ChestNode 只能站到目标箱子上下左右相邻格交互，不应把箱子所在 tile 当作可站立路径点。
 
-Chest P0/P1 不使用鼠标或 UI 拖拽。C# Executor 可以直接操作 `Chest.Items` 和 `Game1.player.Items`，但必须保持游戏约束：玩家在当前场景、位于箱子上下左右相邻格、玩家不处于 `UsingTool` / `CanMove=False` 状态。`TAKE` 的 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；若背包已有全部目标物品，ChestNode 应直接完成，不强行开箱取物。`PUT` 表示“把背包中匹配清单的物品尽量放入箱子”，可堆叠物品不足请求数量时允许部分存入并记录实际转移数量。未来查询箱子内容、自动选择箱子和 Farm 缺资源恢复应继续扩展 Chest 分支，不要塞进 FarmNode。
+Chest P0/P1 不使用鼠标或 UI 拖拽。C# Executor 可以直接操作 `Chest.Items` 和 `Game1.player.Items`，但必须保持游戏约束：玩家在当前场景、位于箱子上下左右相邻格、玩家不处于 `UsingTool` / `CanMove=False` 状态。`TAKE` 的 `ChestTask.items` 表示“背包至少需要拥有的物品清单”；若背包已有全部目标物品，ChestNode 应直接完成，不强行开箱取物。`PUT` 表示“把背包中匹配清单的物品尽量放入箱子”，可堆叠物品不足请求数量时允许部分存入并记录实际转移数量。
+
+Chest P2/P3 的查询和自动选箱只在 `current_task.target_loc` 指定场景内进行；跨场景找箱子由 Planner/LLM 结合记忆生成 `RouteTask + ChestTask`，不要让 ChestNode 自己遍历世界。`SCAN` 只允许先低频查询当前场景箱子坐标，再逐个移动到箱子旁、打开、查看内容、写入缓存并关闭；`QUERY` 同样必须走到指定箱子旁打开查看；`TAKE` 且 `chest_tile=None` 时先查 `MapKnowledgeCache`，缓存缺失再按距离逐个打开当前场景箱子查看，找到满足需求的箱子后在已打开的箱子中取物。取放成功后应保守地把对应箱子内容缓存标记为过期，不在 Python 端硬改箱子堆叠数量。
+
+未来 Farm 缺资源恢复应继续扩展 Chest 分支和 Planner，不要塞进 FarmNode。
 
 `Farm` 分支内部的职责边界：
 
