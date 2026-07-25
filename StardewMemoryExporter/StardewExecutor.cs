@@ -234,6 +234,10 @@ namespace StardewMemoryExporter
                 {
                     HandleQueryChestContent(packet);
                 }
+                else if (actionType.Equals("QUERY_LADDER_AT_TILE", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleQueryLadderAtTile(packet);
+                }
                 else if (actionType.Equals("TAKE_FROM_CHEST", StringComparison.OrdinalIgnoreCase))
                 {
                     HandleTakeFromChest(packet);
@@ -923,6 +927,47 @@ namespace StardewMemoryExporter
             }
 
             SendQueryChestContentResponse("SUCCESS", "", locationName, chestTile, items);
+        }
+
+        private void HandleQueryLadderAtTile(JObject packet)
+        {
+            ClearHeldMoveButtons();
+
+            string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "";
+            if (!TryReadTile(packet, out Vector2 targetTile))
+            {
+                SendResponseToPython(new JObject
+                {
+                    ["status"] = "FAILURE",
+                    ["action"] = "QUERY_LADDER_AT_TILE",
+                    ["reason"] = "INVALID_TILE",
+                    ["location_name"] = locationName,
+                    ["has_ladder"] = false,
+                }.ToString(Newtonsoft.Json.Formatting.None));
+                return;
+            }
+
+            GameLocation location = string.IsNullOrWhiteSpace(locationName)
+                ? Game1.currentLocation
+                : Game1.getLocationFromName(locationName) ?? Game1.currentLocation;
+            if (location == null)
+            {
+                SendResponseToPython(new JObject
+                {
+                    ["status"] = "FAILURE",
+                    ["action"] = "QUERY_LADDER_AT_TILE",
+                    ["reason"] = "LOCATION_NOT_FOUND",
+                    ["location_name"] = locationName,
+                    ["has_ladder"] = false,
+                    ["tile"] = new JArray((int)targetTile.X, (int)targetTile.Y),
+                }.ToString(Newtonsoft.Json.Formatting.None));
+                return;
+            }
+
+            JObject response = MineStateScanner.QueryLadderAtTile(location, targetTile);
+            response["action"] = "QUERY_LADDER_AT_TILE";
+            response["location_name"] = location.Name ?? locationName;
+            SendResponseToPython(response.ToString(Newtonsoft.Json.Formatting.None));
         }
 
         private bool TryReadTile(JObject packet, out Vector2 tile)

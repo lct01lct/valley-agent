@@ -169,6 +169,8 @@ Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。
 
 动作层 `PositioningController` 负责从候选站位中选择可达站位、缓存站位路径、调用 `MoveController` 连续移动，并在到达后发送 `FACE_DIRECTION` 原地转向，直到 `state.tool_target.tile` 等于 `tool_target_tile`。业务节点只负责根据自身目标求解这两个输入，不应重复维护 `_tile_path`、`path_index` 或自行用 MOVE 命令模拟转向。
 
+`ToolTarget` 只代表当前朝向/工具目标格已经对准，不等价于交互按钮一定可触发。矿洞入口、矿井梯子、箱子、门、NPC 和商店柜台这类 ActionTile / 交互对象，还需要玩家在相邻格内足够贴近可触发范围；若游戏物理或碰撞使人物停在目标边缘附近，应使用小范围像素容忍区判断“已足够贴近”，不要用单一理想像素点导致持续 MOVE 卡住，也不要仅凭 `ToolTarget` 直接判定 READY。
+
 `MOVE_*` 表示 C# 端持续移动方向；转向必须使用 `FACE_DIRECTION`，不要用 `MOVE_*` 当作单帧转向脉冲。
 
 ### 工具动作必须等待收招并验证结果

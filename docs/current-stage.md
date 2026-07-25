@@ -126,9 +126,12 @@ Selector
 2. 从候选站位中规划最近可达路径。
 3. 使用 `MoveController` 输出连续移动命令。
 4. 到达候选站位后发送 `FACE_DIRECTION` 原地转向。
-5. 只有当 `state.tool_target.tile == tool_target_tile` 时返回 `READY`。
+5. 对普通工具目标，只有当 `state.tool_target.tile == tool_target_tile` 时返回 `READY`。
+6. 对矿洞入口、梯子、箱子等 ActionTile / 交互对象，`ToolTarget` 对准只说明方向正确，不代表交互按钮一定可触发；还必须确认人物在相邻格内足够贴近交互范围。
 
 FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并把作物上下左右相邻格作为 `candidate_stand_tiles`、作物地块作为 `tool_target_tile`。后续箱子、树、NPC、商店柜台、门和清障都应优先复用这套模型，而不是在节点内部重复维护路径缓存和转向逻辑。
+
+Mining P0 实测经验：从 Y 轴进入矿洞入口/梯子时，人物可能因碰撞停在理想贴近点前 1~2 像素。贴近判断应使用 X/Y 轴统一的小范围像素容忍区，避免持续向入口/梯子方向 MOVE；但不能仅因 `ToolTarget` 已对准就跳过贴近判断。
 
 ## 当前工具动作等待模型
 

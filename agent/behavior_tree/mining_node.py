@@ -1,3 +1,4 @@
+import json
 import time
 from typing import Literal
 
@@ -67,9 +68,9 @@ class MineNode(BTNode):
         self._task_signature: tuple[int, int, str] | None = None
         self._started_at: float | None = None
         self._target_tile: Tile | None = None
+        self._detected_ladder_tile: Tile | None = None
         self._active_mine_level: int | None = None
         self._return_prompt_tiles: set[Tile] = set()
-        self._pending_ladder_snapshot_tile: Tile | None = None
         self._stone_attempt_count = 0
         self._broken_stone_count = 0
         self._failed_stone_tiles: set[Tile] = set()
@@ -139,6 +140,7 @@ class MineNode(BTNode):
             self._record_return_prompt_tiles(game_state)
             self.positioning_controller.reset()
             self._target_tile = None
+            self._detected_ladder_tile = None
             self._last_interact_at = 0.0
 
         if self._phase == "ENTER_MINE":
@@ -149,10 +151,22 @@ class MineNode(BTNode):
                 f"return_prompt_tiles={self._format_tiles(self._return_prompt_tiles)}"
             )
 
+        if self._detected_ladder_tile is not None:
+            self._phase = "FIND_LADDER"
+            return self._run_interact_target(
+                context=context,
+                blackboard=blackboard,
+                game_state=game_state,
+                current_task=current_task,
+                target_tile=self._detected_ladder_tile,
+                target_name="破石后出现的梯子",
+                require_tool_target=True,
+                require_close_to_target=True,
+            )
+
         ladder = self._select_next_level_ladder(game_state)
         if ladder is not None:
             self._phase = "FIND_LADDER"
-            self._pending_ladder_snapshot_tile = None
             return self._run_interact_target(
                 context=context,
                 blackboard=blackboard,
@@ -285,18 +299,6 @@ class MineNode(BTNode):
                 f"已达到最大破石数量仍未发现梯子: broken={self._broken_stone_count}",
             )
 
-        if self._pending_ladder_snapshot_tile is not None:
-            if not game_state.has_ladders_snapshot:
-                self._log(f"等待 C# 返回最新梯子快照: target={self._pending_ladder_snapshot_tile}")
-                return "RUNNING"
-            self._log(
-                f"收到 C# 最新梯子快照: target={self._pending_ladder_snapshot_tile}, "
-                f"ladders={self._format_targets(game_state.ladders)}"
-            )
-            self._pending_ladder_snapshot_tile = None
-            self._mark_current_stone_done(game_state)
-            return "RUNNING"
-
         if self._target_tile is None:
             self._target_tile = self._select_nearest_stone_tile(game_state)
             self._stone_attempt_count = 0
@@ -324,7 +326,7 @@ class MineNode(BTNode):
             if tool_status == "FINISHED":
                 self.tool_action_tracker.reset()
                 if self._is_stone_gone_or_ladder_found(game_state, self._target_tile):
-                    self._mark_current_stone_done_when_ladder_snapshot_ready(game_state)
+                    self._mark_current_stone_done_after_tile_query(context, game_state)
                 elif self._stone_attempt_count >= MAX_STONE_ATTEMPTS:
                     self._failed_stone_tiles.add(self._target_tile)
                     self._log(f"石头重试耗尽，加入失败集合: target={self._target_tile}")
@@ -342,7 +344,7 @@ class MineNode(BTNode):
             return "RUNNING"
 
         if self._target_tile is not None and self._is_stone_gone_or_ladder_found(game_state, self._target_tile):
-            self._mark_current_stone_done_when_ladder_snapshot_ready(game_state)
+            self._mark_current_stone_done_after_tile_query(context, game_state)
             return "RUNNING"
 
         positioning_result = self._tick_positioning(game_state, context, self._target_tile)
@@ -511,14 +513,69 @@ class MineNode(BTNode):
         self.positioning_controller.reset()
         self.tool_action_tracker.reset()
 
-    def _mark_current_stone_done_when_ladder_snapshot_ready(self, game_state: StardewState) -> None:
+    def _mark_current_stone_done_after_tile_query(self, context: PlayerContext, game_state: StardewState) -> None:
         if self._target_tile is None:
             return
-        if not game_state.has_ladders_snapshot:
-            self._pending_ladder_snapshot_tile = self._target_tile
-            self._log(f"石头已消失，等待 C# 最新 Ladders 快照后再继续: target={self._target_tile}")
+
+        finished_tile = self._target_tile
+        has_ladder, ladder_tile, reason = self._query_ladder_at_tile(context, game_state, finished_tile)
+        if has_ladder and ladder_tile is not None:
+            self._detected_ladder_tile = ladder_tile
+            self._broken_stone_count += 1
+            print(f"\n⛏️ [MineNode] 破石后发现梯子: target={finished_tile}, ladder={ladder_tile}")
+            self._log(
+                f"破石后单 tile 查询发现梯子: target={finished_tile}, ladder={ladder_tile}, "
+                f"reason={reason}, broken={self._broken_stone_count}"
+            )
+            self._target_tile = None
+            self._stone_attempt_count = 0
+            self.positioning_controller.reset()
+            self.tool_action_tracker.reset()
             return
+
+        if has_ladder is None:
+            self._log(f"破石后单 tile 查询失败，按石头已处理继续: target={finished_tile}, reason={reason}")
+        else:
+            self._log(f"破石后单 tile 查询未发现梯子: target={finished_tile}, reason={reason}")
         self._mark_current_stone_done(game_state)
+
+    def _query_ladder_at_tile(
+        self,
+        context: PlayerContext,
+        game_state: StardewState,
+        tile: Tile,
+    ) -> tuple[bool | None, Tile | None, str]:
+        response = context.executor_client.send_command(
+            StardewCommand(
+                action=StardewAction.QUERY_LADDER_AT_TILE,
+                tile=(tile.x, tile.y),
+            )
+        )
+        if response in (None, "TIMEOUT"):
+            return None, None, str(response)
+
+        try:
+            payload = json.loads(response)
+        except json.JSONDecodeError as exc:
+            return None, None, f"INVALID_JSON:{exc}:{response}"
+
+        status = payload.get("status")
+        if status != "SUCCESS":
+            return None, None, str(payload.get("reason") or status)
+
+        has_ladder = bool(payload.get("has_ladder"))
+        reason = str(payload.get("reason") or "")
+        if not has_ladder:
+            return False, None, reason
+
+        ladder_obj = payload.get("ladder") if isinstance(payload.get("ladder"), dict) else {}
+        raw_tile = ladder_obj.get("Tile") if isinstance(ladder_obj, dict) else None
+        if not isinstance(raw_tile, list) or len(raw_tile) < 2:
+            raw_tile = payload.get("tile")
+        if not isinstance(raw_tile, list) or len(raw_tile) < 2:
+            return True, tile, reason
+
+        return True, Tile(int(raw_tile[0]), int(raw_tile[1])), reason
 
     def _has_reached_target_level(self, game_state: StardewState, current_task: MiningTask) -> bool:
         return game_state.mine_level is not None and game_state.mine_level >= current_task.target_mine_level
@@ -560,9 +617,9 @@ class MineNode(BTNode):
         self._task_signature = None
         self._started_at = None
         self._target_tile = None
+        self._detected_ladder_tile = None
         self._active_mine_level = None
         self._return_prompt_tiles = set()
-        self._pending_ladder_snapshot_tile = None
         self._stone_attempt_count = 0
         self._broken_stone_count = 0
         self._failed_stone_tiles = set()
@@ -596,7 +653,7 @@ class MineNode(BTNode):
             f"心跳: phase={self._phase}, task={current_task.mine_action}, "
             f"loc={game_state.location_name}, mine_level={game_state.mine_level}, "
             f"player={game_state.player_tile}, target={self._target_tile}, "
-            f"pending_ladder_snapshot={self._pending_ladder_snapshot_tile}, "
+            f"detected_ladder={self._detected_ladder_tile}, "
             f"stone_attempt={self._stone_attempt_count}, broken={self._broken_stone_count}, "
             f"ladders={self._format_targets(game_state.ladders)}, "
             f"entrances={self._format_targets(game_state.mine_entrances)}, "
