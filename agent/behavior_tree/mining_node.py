@@ -1,4 +1,3 @@
-import json
 import time
 from typing import Literal
 
@@ -10,6 +9,7 @@ from agent.action.combat.combat_tactical_resolver import (
 )
 from agent.action.location.location import Location
 from agent.action.combat.monster_threat import MonsterThreat, MonsterThreatEvaluator
+from agent.action.tool.tool_aftermath_service import ToolAftermathRequest, ToolAftermathResult, ToolAftermathService
 from agent.action.valley_action.AStar import RouteTile, astar_solver
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
@@ -72,6 +72,7 @@ class MineNode(BTNode):
         self.approach_positioning_controller = PositioningController()
         self.threat_evaluator = MonsterThreatEvaluator()
         self.tactical_resolver = CombatTacticalResolver()
+        self.tool_aftermath_service = ToolAftermathService()
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=MINE_TOOL_START_GRACE_SECONDS,
             finish_timeout_seconds=MINE_TOOL_FINISH_TIMEOUT_SECONDS,
@@ -449,11 +450,15 @@ class MineNode(BTNode):
             )
             if tool_status == "FINISHED":
                 self.tool_action_tracker.reset()
-                if self._is_current_stone_done(game_state, self._target_tile) or self._has_ladder_at_tile(
-                    game_state,
-                    self._target_tile,
-                ):
-                    self._mark_current_stone_done_after_tile_query(context, game_state)
+                aftermath_result = self._inspect_current_stone_aftermath(context, game_state)
+                if aftermath_result.has_blocking_menu:
+                    self._log(
+                        f"挥镐收招后发现阻塞 UI，等待 Guard 处理: target={self._target_tile}, "
+                        f"menu={aftermath_result.blocking_menu_type}, text={aftermath_result.blocking_menu_text}"
+                    )
+                    return "RUNNING"
+                if aftermath_result.target_change_state == "CHANGED" or aftermath_result.generated_ladder_tile is not None:
+                    self._mark_current_stone_done_after_aftermath(game_state, aftermath_result)
                     if self._detected_ladder_tile is None and self._target_tile is None:
                         return self._run_break_stone_phase(context, blackboard, game_state, current_task)
                 elif self._stone_attempt_count >= MAX_STONE_ATTEMPTS:
@@ -478,7 +483,14 @@ class MineNode(BTNode):
             self._is_current_stone_done(game_state, self._target_tile)
             or self._has_ladder_at_tile(game_state, self._target_tile)
         ):
-            self._mark_current_stone_done_after_tile_query(context, game_state)
+            aftermath_result = self._inspect_current_stone_aftermath(context, game_state)
+            if aftermath_result.has_blocking_menu:
+                self._log(
+                    f"目标变化后发现阻塞 UI，等待 Guard 处理: target={self._target_tile}, "
+                    f"menu={aftermath_result.blocking_menu_type}, text={aftermath_result.blocking_menu_text}"
+                )
+                return "RUNNING"
+            self._mark_current_stone_done_after_aftermath(game_state, aftermath_result)
             if self._detected_ladder_tile is None and self._target_tile is None:
                 return self._run_break_stone_phase(context, blackboard, game_state, current_task)
             return "RUNNING"
@@ -1018,19 +1030,54 @@ class MineNode(BTNode):
         self.approach_positioning_controller.reset()
         self.tool_action_tracker.reset()
 
-    def _mark_current_stone_done_after_tile_query(self, context: PlayerContext, game_state: StardewState) -> None:
+    def _inspect_current_stone_aftermath(
+        self,
+        context: PlayerContext,
+        game_state: StardewState,
+    ) -> ToolAftermathResult:
+        target_tile = self._target_tile
+        target_tile_changed = None
+        if target_tile is not None:
+            target_tile_changed = self._is_current_stone_done(game_state, target_tile) or self._has_ladder_at_tile(
+                game_state,
+                target_tile,
+            )
+
+        result = self.tool_aftermath_service.inspect_after_tool_action(
+            context,
+            game_state,
+            ToolAftermathRequest(
+                owner="Mining",
+                action_name="BREAK_STONE",
+                target_tile=target_tile,
+                check_ladder_at_target_tile=target_tile is not None and bool(target_tile_changed),
+                target_tile_changed=target_tile_changed,
+            ),
+        )
+        self._log(
+            f"工具后处理结果: target={target_tile}, target_changed={target_tile_changed}, "
+            f"change_state={result.target_change_state}, generated_ladder={result.generated_ladder_tile}, "
+            f"ladder_query={result.ladder_query_status}, blocking_menu={result.has_blocking_menu}, "
+            f"reason={result.reason}"
+        )
+        return result
+
+    def _mark_current_stone_done_after_aftermath(
+        self,
+        game_state: StardewState,
+        aftermath_result: ToolAftermathResult,
+    ) -> None:
         if self._target_tile is None:
             return
 
         finished_tile = self._target_tile
-        has_ladder, ladder_tile, reason = self._query_ladder_at_tile(context, game_state, finished_tile)
-        if has_ladder and ladder_tile is not None:
-            self._detected_ladder_tile = ladder_tile
+        if aftermath_result.generated_ladder_tile is not None:
+            self._detected_ladder_tile = aftermath_result.generated_ladder_tile
             self._broken_stone_count += 1
-            print(f"\n⛏️ [MineNode] 破石后发现梯子: target={finished_tile}, ladder={ladder_tile}")
+            print(f"\n⛏️ [MineNode] 破石后发现梯子: target={finished_tile}, ladder={self._detected_ladder_tile}")
             self._log(
-                f"破石后单 tile 查询发现梯子: target={finished_tile}, ladder={ladder_tile}, "
-                f"reason={reason}, broken={self._broken_stone_count}"
+                f"破石后工具后处理发现梯子: target={finished_tile}, ladder={self._detected_ladder_tile}, "
+                f"reason={aftermath_result.reason}, broken={self._broken_stone_count}"
             )
             self._target_tile = None
             self._corridor_ladder_tile = None
@@ -1040,49 +1087,11 @@ class MineNode(BTNode):
             self.tool_action_tracker.reset()
             return
 
-        if has_ladder is None:
-            self._log(f"破石后单 tile 查询失败，按石头已处理继续: target={finished_tile}, reason={reason}")
+        if aftermath_result.ladder_query_status is None:
+            self._log(f"破石后梯子查询失败，按石头已处理继续: target={finished_tile}, reason={aftermath_result.reason}")
         else:
-            self._log(f"破石后单 tile 查询未发现梯子: target={finished_tile}, reason={reason}")
+            self._log(f"破石后未发现梯子: target={finished_tile}, reason={aftermath_result.reason}")
         self._mark_current_stone_done(game_state)
-
-    def _query_ladder_at_tile(
-        self,
-        context: PlayerContext,
-        game_state: StardewState,
-        tile: Tile,
-    ) -> tuple[bool | None, Tile | None, str]:
-        response = context.executor_client.send_command(
-            StardewCommand(
-                action=StardewAction.QUERY_LADDER_AT_TILE,
-                tile=(tile.x, tile.y),
-            )
-        )
-        if response in (None, "TIMEOUT"):
-            return None, None, str(response)
-
-        try:
-            payload = json.loads(response)
-        except json.JSONDecodeError as exc:
-            return None, None, f"INVALID_JSON:{exc}:{response}"
-
-        status = payload.get("status")
-        if status != "SUCCESS":
-            return None, None, str(payload.get("reason") or status)
-
-        has_ladder = bool(payload.get("has_ladder"))
-        reason = str(payload.get("reason") or "")
-        if not has_ladder:
-            return False, None, reason
-
-        ladder_obj = payload.get("ladder") if isinstance(payload.get("ladder"), dict) else {}
-        raw_tile = ladder_obj.get("Tile") if isinstance(ladder_obj, dict) else None
-        if not isinstance(raw_tile, list) or len(raw_tile) < 2:
-            raw_tile = payload.get("tile")
-        if not isinstance(raw_tile, list) or len(raw_tile) < 2:
-            return True, tile, reason
-
-        return True, Tile(int(raw_tile[0]), int(raw_tile[1])), reason
 
     def _has_reached_target_level(self, game_state: StardewState, current_task: MiningTask) -> bool:
         return game_state.mine_level is not None and game_state.mine_level >= current_task.target_mine_level

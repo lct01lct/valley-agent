@@ -1,5 +1,6 @@
 import time
 
+from agent.action.tool.tool_aftermath_service import ToolAftermathRequest, ToolAftermathService
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.clearance_policy import ORDINARY_TREE_LAYERS, normalize_obstacle_type
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
@@ -49,6 +50,7 @@ class ClearObstacleNode(BTNode):
         self._last_positioning_position: tuple[float, float] | None = None
         self._positioning_stuck_started_at: float | None = None
         self._blocked_stand_tiles: set[Tile] = set()
+        self.tool_aftermath_service = ToolAftermathService()
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=CLEAR_TOOL_START_GRACE_SECONDS,
             finish_timeout_seconds=CLEAR_TOOL_FINISH_TIMEOUT_SECONDS,
@@ -169,10 +171,31 @@ class ClearObstacleNode(BTNode):
             )
             return "RUNNING"
         if tool_action_status == "FINISHED":
+            aftermath_result = self.tool_aftermath_service.inspect_after_tool_action(
+                context,
+                game_state,
+                ToolAftermathRequest(
+                    owner="Farm" if self.owner == "Farm" else "Route",
+                    action_name="CLEAR_OBSTACLE",
+                    target_tile=target_tile,
+                    check_ladder_at_target_tile=False,
+                    target_tile_changed=not self._obstacle_exists(game_state.layers, target_tile, obstacle_type),
+                ),
+            )
+            if aftermath_result.has_blocking_menu:
+                self._log(
+                    f"清障工具动作收招后发现阻塞 UI，等待 Guard 处理: target={target_tile}, "
+                    f"obstacle={obstacle_type}, menu={aftermath_result.blocking_menu_type}, "
+                    f"text={aftermath_result.blocking_menu_text}"
+                )
+                self.tool_action_tracker.reset()
+                return "RUNNING"
+
             self._log(
                 f"清障工具动作已收招，等待下一帧验证结果: target={target_tile}, obstacle={obstacle_type}, "
                 f"UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
-                f"target_state={self._format_farm_tile_state(game_state, target_tile)}"
+                f"target_state={self._format_farm_tile_state(game_state, target_tile)}, "
+                f"aftermath={aftermath_result.reason}"
             )
             self.tool_action_tracker.reset()
             return "RUNNING"

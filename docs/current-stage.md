@@ -237,6 +237,7 @@ Chest P2/P3 约定：
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
 | 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
+| 工具动作后处理 | 最小版接入 | 已新增 `ToolAftermathService`，当前用于 Mining 破石后的目标变化/梯子查询，以及 ClearObstacle 收招后的目标变化/阻塞 UI 观察；掉落物识别和拾取尚未实现 |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
@@ -293,13 +294,14 @@ Chest P2/P3 约定：
 
 1. 游戏内验证 Mining P0：确认 `TASK_MOCK_DATA["MINING_P0_1"]` 能从 Mine 入口进入第一层，找到/挖出梯子并进入第二层。
 2. 若 P0 实测失败，优先检查 `logs/mining_node_debug.log` 中的 `MineLevel`、`MineEntrances`、`Ladders`、`MiningNodes` 和站位日志。
-3. 第二层开始接入 Defend：识别怪物，先实现躲避和近身攻击，保证 Mining 测试安全。
-4. 扩展 Mining 基础采矿：打碎指定数量 Stone / MiningNode，验证节点消失。
-5. 抽象工具动作后处理底座：优先处理晶球等阻塞菜单，再扩展掉落物识别、拾取策略和 Mining 目标类型。
-6. 在 Mining 中实现资源管理底座：体力检查、背包容量检查、Pickaxe 缺失恢复、掉落/拾取验证、工具归还。
-7. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
-8. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
-9. 增加确定性 Route/Farm/Mining 场景测试与游戏内端到端验收。
+3. 暂缓 Mining / Defend 角色决策架构升级。战术层、怪物风险、绕路、机会目标和冲层/刷矿/刷怪 profile 仍保留为后续大改方向；当前先不把它作为 P0 收尾前置条件。
+4. 抽象工具动作后处理底座：优先处理晶球等阻塞菜单，再扩展掉落物识别、拾取策略和 Mining 目标类型。
+5. 扩展 Mining 基础采矿：打碎指定数量 Stone / MiningNode，验证节点消失。
+6. 第二层开始接入 Defend：识别怪物，先实现躲避和近身攻击，保证 Mining 测试安全。
+7. 在 Mining 中实现资源管理底座：体力检查、背包容量检查、Pickaxe 缺失恢复、掉落/拾取验证、工具归还。
+8. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
+9. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
+10. 增加确定性 Route/Farm/Mining 场景测试与游戏内端到端验收。
 
 ## 第一阶段验收标准
 
@@ -319,6 +321,11 @@ Chest P2/P3 约定：
 - 无障碍跨地图导航。
 - 路径中临时出现硬障碍，Agent 能重新规划绕行。
 - 必经路径被石头、树枝或杂草挡住，Agent 能清除后继续。
+- Mining P0 入口交互：从 Mine 大厅走到矿井入口旁，足够贴近后交互进入第一层；不能只因 `ToolTarget` 对准就提前交互。
+- Mining P0 天然梯子：进入某层后若已有天然梯子，优先走到梯子旁并进入下一层；梯子在局部视野外时，应先稳定接近，不应左右抽搐或反复换中继点。
+- Mining P0 挖石出梯子：没有梯子时打碎 Stone / MiningNode，等待工具收招后只查询被破坏 tile 是否生成梯子；若生成梯子，应立即切回梯子目标。
+- Mining P0 交互边界：梯子/矿井入口目标 tile 不应被当成可站立 tile；玩家必须站在上下左右相邻格，并足够贴近交互边缘。
+- Mining P0 状态切层：进入下一层后必须重置上一层的目标、接近点、破石计数和临时路径，不能沿用过期状态。
 - 规划一片 Farm 区域，包含 Grass、Weeds、Twig、Stone、普通树、果树和树桩，Agent 能清理可处理障碍、跳过果树/TreeStump、锄地、播种并浇水。
 - 工具动作期间连续 tick 验证：Executor 返回 `BUSY` 时 Python 不叠加新动作，动作收招后再验证结果。
 - 建筑门关闭但可进入，Agent 能开门并完成 Warp。

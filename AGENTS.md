@@ -232,6 +232,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。
 - `agent/action/valley_action/positioning_controller.py`：通用交互站位控制，输入候选站位和工具目标地块，输出移动、转向或 READY 状态。
 - `agent/action/valley_action/tool_targeting.py`：工具目标判断、`FACE_DIRECTION` 转向命令和 ToolTarget 日志格式化。
+- `agent/action/tool/tool_aftermath_service.py`：工具动作收招后的通用观察层，检查阻塞 UI、目标地块变化和可选关键副作用，例如 Mining 破石后生成梯子。
 - `agent/behavior_tree/tool_action_tracker.py`：跨帧跟踪工具动作开始、收招和超时，供清障、锄地、浇水等节点复用。
 - `agent/behavior_tree/refill_watering_can_node.py`：Farm 水壶补水节点，按需查询并缓存水源，复用站位控制和工具动作等待。
 - `agent/behavior_tree/mining_resource_check_node.py` / `agent/behavior_tree/mining_node.py`：Mining P0 节点，检查 Pickaxe，交互矿洞入口/梯子，必要时用镐子破坏 Stone / MiningNode 并验证进入目标矿层。
@@ -253,6 +254,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 清障必须验证工具可用、玩家位于上下左右相邻格、朝向正确，并在动作后从新状态确认障碍已经消失；当前不允许斜向破坏障碍物。
 - 工具切换应优先读取 SMAPI state 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items`，不要在 Python 端硬猜当前工具。
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
+- 工具收招后的副作用观察优先复用 `ToolAftermathService`。业务节点仍负责解释结果，例如 Mining 决定是否转向梯子，ClearObstacle 决定是否继续重试；不要把所有工具业务成功判定塞进通用服务。
 - 节点推进应状态驱动优先；固定 tick/秒数等待只能用于短暂防抖、节流和超时兜底，不要用经验等待替代 SMAPI state 验证。
 - 水壶补水属于 Farm 分支的资源恢复能力。FarmNode 发现 `WaterLeft <= 0` 时应通过 blackboard 触发 `RefillWateringCanNode`，不要在 FarmNode 内部直接实现找水源、移动和补水。
 - 水源坐标属于低频地图知识，优先通过 C# `QUERY_WATER_SOURCES` 按需查询并写入 `MapKnowledgeCache`；不要作为每帧 state 高频字段同步。
