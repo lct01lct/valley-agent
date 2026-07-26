@@ -153,6 +153,23 @@ class MiningNodeState:
         self.parent_sheet_index: int = int(raw_mining_node.get("ParentSheetIndex", -1))
 
 
+class DebrisState:
+    def __init__(self, raw_debris: dict):
+        # 以下字段名来自 Stardew Valley Debris state 协议，读取时保持原始大小写。
+        self.name: str = raw_debris.get("Name", "")
+        self.display_name: str = raw_debris.get("DisplayName", "")
+        self.qualified_item_id: str = raw_debris.get("QualifiedItemId", "")
+        self.category: int = int(raw_debris.get("Category", 0))
+        self.stack: int = int(raw_debris.get("Stack", 0))
+
+        raw_position = raw_debris.get("Position", [0.0, 0.0])
+        self.position = Position(float(raw_position[0]), float(raw_position[1]))
+
+        raw_tile = raw_debris.get("Tile", [0, 0])
+        self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
+        self.source: str = raw_debris.get("Source", "")
+
+
 class MonsterState:
     def __init__(self, raw_monster: dict):
         # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
@@ -215,6 +232,7 @@ class StardewState:
         self.can_move: bool = bool(raw_json_data.get("CanMove", True))
         self.is_player_free: bool = bool(raw_json_data.get("IsPlayerFree", True))
         self.can_player_move: bool = bool(raw_json_data.get("CanPlayerMove", self.can_move))
+        self.applied_magnetic_radius: float = float(raw_json_data.get("AppliedMagneticRadius", self.tile_size * 0.5))
         self.menu_state = MenuState(raw_json_data.get("MenuState"))
         self.mine_level: int | None = self._read_optional_int(raw_json_data, "MineLevel")
         self.inventory = InventoryState(
@@ -255,6 +273,13 @@ class StardewState:
         for raw_mine_entrance in (raw_mine_entrances if self.has_mine_entrances_snapshot else []):
             if isinstance(raw_mine_entrance, dict):
                 self.mine_entrances.append(MineInteractTargetState(raw_mine_entrance))
+
+        self.debris: list[DebrisState] = []
+        raw_debris_list = raw_json_data.get("Debris")
+        self.has_debris_snapshot = isinstance(raw_debris_list, list)
+        for raw_debris in (raw_debris_list if self.has_debris_snapshot else []):
+            if isinstance(raw_debris, dict):
+                self.debris.append(DebrisState(raw_debris))
 
         self.farm_tiles: list[FarmTileState] = []
         self.farm_tiles_by_tile: dict[Tile, FarmTileState] = {}
@@ -397,6 +422,17 @@ class StardewState:
 
         if not self.has_mine_entrances_snapshot:
             self.mine_entrances = previous_state.mine_entrances.copy()
+
+        if not self.has_debris_snapshot:
+            self.debris = previous_state.debris.copy()
+        elif self.state_scope != "global" and self.scan_range is not None:
+            previous_debris_by_tile = {debris.tile: debris for debris in self.debris}
+            for previous_debris in previous_state.debris:
+                if previous_debris.tile in previous_debris_by_tile:
+                    continue
+                if self.is_tile_inside_current_scan(previous_debris.tile):
+                    continue
+                self.debris.append(previous_debris)
 
     def is_tile_inside_current_scan(self, tile: Tile) -> bool:
         if self.state_scope == "global":

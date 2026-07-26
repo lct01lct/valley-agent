@@ -457,6 +457,7 @@ class MineNode(BTNode):
                         f"menu={aftermath_result.blocking_menu_type}, text={aftermath_result.blocking_menu_text}"
                     )
                     return "RUNNING"
+                self._request_collect_loot(blackboard, self._target_tile, "Stone", aftermath_result.nearby_loot_tiles)
                 if aftermath_result.target_change_state == "CHANGED" or aftermath_result.generated_ladder_tile is not None:
                     self._mark_current_stone_done_after_aftermath(game_state, aftermath_result)
                     if self._detected_ladder_tile is None and self._target_tile is None:
@@ -490,6 +491,7 @@ class MineNode(BTNode):
                     f"menu={aftermath_result.blocking_menu_type}, text={aftermath_result.blocking_menu_text}"
                 )
                 return "RUNNING"
+            self._request_collect_loot(blackboard, self._target_tile, "Stone", aftermath_result.nearby_loot_tiles)
             self._mark_current_stone_done_after_aftermath(game_state, aftermath_result)
             if self._detected_ladder_tile is None and self._target_tile is None:
                 return self._run_break_stone_phase(context, blackboard, game_state, current_task)
@@ -1093,6 +1095,33 @@ class MineNode(BTNode):
             self._log(f"破石后未发现梯子: target={finished_tile}, reason={aftermath_result.reason}")
         self._mark_current_stone_done(game_state)
 
+    def _request_collect_loot(
+        self,
+        blackboard: AgentBlackboard,
+        source_tile: Tile | None,
+        source_type: str,
+        loot_tiles: list[Tile],
+    ) -> None:
+        if source_tile is None or not loot_tiles:
+            return
+
+        known_tiles = {(tile.x, tile.y) for tile in blackboard.pending_loot_tiles}
+        for loot_tile in loot_tiles:
+            if (loot_tile.x, loot_tile.y) in known_tiles:
+                continue
+            blackboard.pending_loot_tiles.append(loot_tile)
+            known_tiles.add((loot_tile.x, loot_tile.y))
+
+        blackboard.require_collect_loot = bool(blackboard.pending_loot_tiles)
+        blackboard.collect_loot_owner = "Mining"
+        blackboard.collect_loot_source_tile = source_tile
+        blackboard.collect_loot_source_type = source_type
+        self._log(
+            f"发现破石掉落物，触发自动拾取: source={source_tile}, source_type={source_type}, "
+            f"loot_tiles={self._format_tile_list(loot_tiles)}, "
+            f"pending={self._format_tile_list(blackboard.pending_loot_tiles)}"
+        )
+
     def _has_reached_target_level(self, game_state: StardewState, current_task: MiningTask) -> bool:
         return game_state.mine_level is not None and game_state.mine_level >= current_task.target_mine_level
 
@@ -1242,6 +1271,9 @@ class MineNode(BTNode):
     def _format_tiles(self, tiles: set[Tile]) -> str:
         ordered_tiles = sorted(tiles, key=lambda tile: (tile.x, tile.y))
         return "[" + ", ".join(str(tile) for tile in ordered_tiles) + "]"
+
+    def _format_tile_list(self, tiles: list[Tile]) -> str:
+        return "[" + ", ".join(str(tile) for tile in tiles) + "]"
 
     def _format_threat(self, threat: MonsterThreat | None) -> str:
         if threat is None:

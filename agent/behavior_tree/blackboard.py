@@ -4,7 +4,6 @@ from agent.action.location.location import Location
 from agent.base_task import BaseTask
 from server.type import Tile
 
-
 type InteractionOwner = Literal[
     "Route",  # 路线/传送/建筑入口等移动交互
     "Chest",  # 箱子打开、取物、存物等箱子菜单交互
@@ -70,7 +69,7 @@ class BorrowedChestItem:
         count: int,
         qualified_item_id: str | None = None,
     ) -> None:
-        self.location_name = location_name
+        self.location_name: Location = location_name
         self.chest_tile = chest_tile
         self.item_name = item_name
         self.count = count
@@ -114,6 +113,16 @@ class AgentBlackboard:
         self.clear_obstacle_tile: Tile | None = None
         self.clear_obstacle_type: str | None = None
         self.failed_clear_obstacles: set[tuple[int, int]] = set()
+
+        # 工具动作后自动拾取
+        # CollectLootNode 只处理可达的近距离掉落物，不为拾取触发清障。
+        # 普通树掉落物可能弹散到不可达位置，因此允许部分拾取并跳过不可达掉落物。
+        self.require_collect_loot = False
+        self.collect_loot_owner: str | None = None
+        self.collect_loot_source_tile: Tile | None = None
+        self.collect_loot_source_type: str | None = None
+        self.pending_loot_tiles: list[Tile] = []
+        self.skipped_loot_tiles: set[tuple[int, int]] = set()
 
         # 切换工具
         self.require_switch_tool = False

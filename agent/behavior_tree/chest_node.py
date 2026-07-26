@@ -5,7 +5,7 @@ from typing import Literal
 
 from agent.action.chest.chest_knowledge_service import ChestKnowledgeService
 from agent.action.location.location import Location
-from agent.action.valley_action.action_type import ChestItemPayload, StardewAction, StardewCommand
+from agent.action.valley_action.action_type import ChestItemPayload, KeyType, StardewAction, StardewCommand
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
 from agent.action.valley_action.tool_targeting import build_tool_target_face_command, is_tool_targeting
 from agent.base_task import BaseTask, TaskType
@@ -17,7 +17,6 @@ from agent.behavior_tree.tool_selection import count_inventory_items
 from agent.memory.map_knowledge_cache import ChestContentKnowledge
 from server.valley_server import StardewState
 from server.type import Tile
-
 
 type ChestAction = Literal[
     "TAKE",  # 从指定箱子取出指定物品；Chest P0。
@@ -80,7 +79,7 @@ class ChestTask(BaseTask):
     ):
         super().__init__(task_type=task_type, desc=desc)
         self.chest_action = chest_action
-        self.target_loc = target_loc
+        self.target_loc: Location = target_loc
         self.chest_tile = chest_tile
         self.items = items or self._build_single_item_request(item_name, count, qualified_item_id)
         self.item_name = self.items[0].item_name if self.items else item_name or ""
@@ -181,7 +180,9 @@ class ChestNode(BTNode):
         if current_task.chest_action == "QUERY":
             return self._query_chest_content(context, blackboard, game_state, current_task)
 
-        if current_task.chest_action == "TAKE" and self._has_enough_items_in_inventory(game_state, blackboard, current_task):
+        if current_task.chest_action == "TAKE" and self._has_enough_items_in_inventory(
+            game_state, blackboard, current_task
+        ):
             return "SUCCESS"
 
         if current_task.chest_action == "TAKE" and current_task.chest_tile is None:
@@ -392,7 +393,9 @@ class ChestNode(BTNode):
 
         transfer_item_requests = self._get_transfer_item_requests(game_state, current_task)
         if not transfer_item_requests:
-            self._fail(context, blackboard, current_task, f"没有可执行的箱子转移动作: action={current_task.chest_action}")
+            self._fail(
+                context, blackboard, current_task, f"没有可执行的箱子转移动作: action={current_task.chest_action}"
+            )
             return
 
         transfer_action = (
@@ -511,10 +514,7 @@ class ChestNode(BTNode):
 
         if not unverified_items:
             action_desc = "批量取物" if current_task.chest_action == "TAKE" else "批量存物"
-            print(
-                f"\n🟢 [ChestNode] {action_desc}完成: "
-                f"items={self._format_item_requests(current_task.items)}"
-            )
+            print(f"\n🟢 [ChestNode] {action_desc}完成: " f"items={self._format_item_requests(current_task.items)}")
             self._log(
                 f"背包验证通过: before_counts={self._before_counts}, "
                 f"expected_counts={self._expected_after_counts}, current_counts={current_counts}"
@@ -664,7 +664,9 @@ class ChestNode(BTNode):
         if self._resolved_chest_tile != chest_tile:
             self._begin_scan_chest(chest_tile)
 
-        content_result = self._open_and_cache_current_scan_chest(context, blackboard, game_state, current_task, chest_tile)
+        content_result = self._open_and_cache_current_scan_chest(
+            context, blackboard, game_state, current_task, chest_tile
+        )
         if content_result != "READY":
             return content_result
 
@@ -696,15 +698,15 @@ class ChestNode(BTNode):
             self._begin_scan_chest(current_task.chest_tile)
 
         chest_tile = self._scan_chest_tiles[self._scan_index]
-        content_result = self._open_and_cache_current_scan_chest(context, blackboard, game_state, current_task, chest_tile)
+        content_result = self._open_and_cache_current_scan_chest(
+            context, blackboard, game_state, current_task, chest_tile
+        )
         if content_result != "READY":
             return content_result
 
         self._close_chest_menu(context)
         print(f"\n📦 [ChestNode] 打开查看指定箱子完成: chest={current_task.chest_tile}")
-        self._log(
-            f"Chest QUERY 完成: location={current_task.target_loc}, chest={current_task.chest_tile}"
-        )
+        self._log(f"Chest QUERY 完成: location={current_task.target_loc}, chest={current_task.chest_tile}")
         blackboard.current_step_index += 1
         self._reset()
         return "SUCCESS"
@@ -732,7 +734,9 @@ class ChestNode(BTNode):
         if self._resolved_chest_tile != chest_tile:
             self._begin_scan_chest(chest_tile)
 
-        content_result = self._open_and_cache_current_scan_chest(context, blackboard, game_state, current_task, chest_tile)
+        content_result = self._open_and_cache_current_scan_chest(
+            context, blackboard, game_state, current_task, chest_tile
+        )
         if content_result != "READY":
             return content_result
 
@@ -828,15 +832,19 @@ class ChestNode(BTNode):
             else:
                 stale_fallback_tiles.append(chest_tile)
 
-        self._scan_chest_tiles = self._sort_tiles_by_distance(
-            stale_matching_tiles,
-            game_state.player_tile,
-        ) + self._sort_tiles_by_distance(
-            unknown_tiles,
-            game_state.player_tile,
-        ) + self._sort_tiles_by_distance(
-            stale_fallback_tiles,
-            game_state.player_tile,
+        self._scan_chest_tiles = (
+            self._sort_tiles_by_distance(
+                stale_matching_tiles,
+                game_state.player_tile,
+            )
+            + self._sort_tiles_by_distance(
+                unknown_tiles,
+                game_state.player_tile,
+            )
+            + self._sort_tiles_by_distance(
+                stale_fallback_tiles,
+                game_state.player_tile,
+            )
         )
         self._scan_index = 0
         self._scanned_chest_count = 0
@@ -853,10 +861,7 @@ class ChestNode(BTNode):
 
         if self._scan_chest_tiles:
             if skipped_fresh_tiles:
-                print(
-                    f"\n📦 [ChestNode] 跳过已知不匹配箱子: "
-                    f"chests={self._format_tile_list(skipped_fresh_tiles)}"
-                )
+                print(f"\n📦 [ChestNode] 跳过已知不匹配箱子: " f"chests={self._format_tile_list(skipped_fresh_tiles)}")
             return True
 
         self._fail(
@@ -1118,7 +1123,9 @@ class ChestNode(BTNode):
         for borrowed_item in blackboard.borrowed_chest_items:
             if borrowed_item.location_name != current_task.target_loc:
                 continue
-            borrowed_by_tile.setdefault((borrowed_item.chest_tile.x, borrowed_item.chest_tile.y), []).append(borrowed_item)
+            borrowed_by_tile.setdefault((borrowed_item.chest_tile.x, borrowed_item.chest_tile.y), []).append(
+                borrowed_item
+            )
 
         for borrowed_items in borrowed_by_tile.values():
             if self._borrowed_items_satisfy_requests(borrowed_items, current_task.items):
@@ -1131,7 +1138,9 @@ class ChestNode(BTNode):
         game_state: StardewState,
         current_task: ChestTask,
     ) -> Tile | None:
-        if not current_task.items or not all(self._is_borrowable_tool_name(item.item_name) for item in current_task.items):
+        if not current_task.items or not all(
+            self._is_borrowable_tool_name(item.item_name) for item in current_task.items
+        ):
             return None
 
         semantic_chests = context.map_knowledge_cache.find_chest_semantics(
@@ -1197,7 +1206,9 @@ class ChestNode(BTNode):
         normalized_item_name = self._normalize_tool_text(item_name)
         for tool_name in BORROWABLE_TOOL_NAMES:
             normalized_tool_name = self._normalize_tool_text(tool_name)
-            if normalized_item_name == normalized_tool_name or normalized_item_name.endswith(f" {normalized_tool_name}"):
+            if normalized_item_name == normalized_tool_name or normalized_item_name.endswith(
+                f" {normalized_tool_name}"
+            ):
                 return True
         return False
 
@@ -1339,7 +1350,7 @@ class ChestNode(BTNode):
         chest_tile: Tile,
     ) -> StardewCommand:
         target_x, target_y = self._get_chest_interaction_position(game_state, stand_tile, chest_tile)
-        key: list[str] = []
+        key: list[KeyType] = []
 
         if game_state.position.x < target_x - CHEST_INTERACTION_POSITION_TOLERANCE_PX:
             key.append("d")
@@ -1407,10 +1418,7 @@ class ChestNode(BTNode):
         return transfer_item_requests
 
     def _has_any_put_item_in_inventory(self, game_state: StardewState, current_task: ChestTask) -> bool:
-        return any(
-            self._count_inventory_item(game_state, item_request) > 0
-            for item_request in current_task.items
-        )
+        return any(self._count_inventory_item(game_state, item_request) > 0 for item_request in current_task.items)
 
     def _is_acceptable_transfer_result(
         self,
@@ -1437,10 +1445,7 @@ class ChestNode(BTNode):
         return total_count
 
     def _format_item_requests(self, item_requests: list[ChestItemRequest]) -> str:
-        return ", ".join(
-            f"{item.item_name}({item.qualified_item_id or 'name'}):{item.count}"
-            for item in item_requests
-        )
+        return ", ".join(f"{item.item_name}({item.qualified_item_id or 'name'}):{item.count}" for item in item_requests)
 
     def _format_item_results(self, item_results: list[ChestItemActionResult]) -> str:
         return ", ".join(

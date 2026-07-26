@@ -34,7 +34,11 @@
 ```text
 Selector
 ├── Sequence("Guard")
+│   ├── UiGuardNode
+│   ├── SwitchToolNode
 │   └── Defend_Node
+├── Sequence("CollectLoot")
+│   └── CollectLootNode
 ├── Sequence("Route")
 │   ├── OpenDoorNode
 │   ├── SwitchToolNode
@@ -58,7 +62,7 @@ Selector
 
 `ValleyAgent` 在主循环中先刷新 `PlayerContext.state`，再运行行为树。`Selector` 每个 tick 从左到右轮询子节点，遇到 `RUNNING` 或 `SUCCESS` 就停止本轮扫描。
 
-因此，`Guard`、`Route`、`Chest`、`Farm`、`Mining` 和 `Think` 是顶层 Selector 下的同级候选分支。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+因此，`Guard`、`CollectLoot`、`Route`、`Chest`、`Farm`、`Mining` 和 `Think` 是顶层 Selector 下的同级候选分支。`CollectLoot` 负责工具动作后近距离自动拾取可达掉落物，不为拾取触发清障；`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
 
 `Route` 分支内部的职责边界：
 
@@ -119,6 +123,8 @@ Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。
 4. `PersistentMemoryStore`：长期记忆预留接口，当前不实现、不调用；未来用于跨运行保存稳定线索。
 
 不要把低变化地图知识塞进每帧 state。水源这类资源应优先走“按需查询 -> 写入 MapKnowledgeCache -> 后续复用”的模式。
+
+`Debris` 属于工具动作后可能快速出现/消失的动态掉落物 state，应由 Observer 轻量高频同步，供 `ToolAftermathService` 判断目标附近是否出现可拾取掉落物；它不等同于长期机会记忆，也不应由业务节点直接当成必须拾取目标。
 
 箱子记忆要区分“内容事实”和“语义记忆”：`ChestContentKnowledge` 来自实际打开箱子后的内容快照，可能过期；`ChestSemanticMemory` 描述工具箱、种子箱等用途倾向，只能影响候选排序或兜底选择，不能直接当成箱子真实内容。
 
@@ -232,12 +238,13 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。
 - `agent/action/valley_action/positioning_controller.py`：通用交互站位控制，输入候选站位和工具目标地块，输出移动、转向或 READY 状态。
 - `agent/action/valley_action/tool_targeting.py`：工具目标判断、`FACE_DIRECTION` 转向命令和 ToolTarget 日志格式化。
-- `agent/action/tool/tool_aftermath_service.py`：工具动作收招后的通用观察层，检查阻塞 UI、目标地块变化和可选关键副作用，例如 Mining 破石后生成梯子。
+- `agent/action/tool/tool_aftermath_service.py`：工具动作收招后的通用观察层，检查阻塞 UI、目标地块变化、目标附近掉落物和可选关键副作用，例如 Mining 破石后生成梯子。
+- `agent/behavior_tree/collect_loot_node.py`：工具动作后的近距离自动拾取节点，消费 blackboard 中的掉落物请求，复用 `PositioningController` 移动到可达拾取点。
 - `agent/behavior_tree/tool_action_tracker.py`：跨帧跟踪工具动作开始、收招和超时，供清障、锄地、浇水等节点复用。
 - `agent/behavior_tree/refill_watering_can_node.py`：Farm 水壶补水节点，按需查询并缓存水源，复用站位控制和工具动作等待。
 - `agent/behavior_tree/mining_resource_check_node.py` / `agent/behavior_tree/mining_node.py`：Mining P0 节点，检查 Pickaxe，交互矿洞入口/梯子，必要时用镐子破坏 Stone / MiningNode 并验证进入目标矿层。
 - `server/valley_server.py`：Python 侧 SMAPI Observer/Executor TCP 客户端和状态解析。
-- `StardewMemoryExporter/`：SMAPI Mod，导出结构化状态并执行移动、开门、关闭对话和使用工具等命令。
+- `StardewMemoryExporter/`：SMAPI Mod，导出结构化状态并执行移动、开门、关闭对话和使用工具等命令；其中 `DebrisStateScanner` 负责导出当前场景掉落物快照。
 - `skills/`：项目内 Codex Skills。若 Codex 无法自动发现，必须通过本文件显式说明。
 - `docs/current-stage.md`：当前阶段目标、进度、缺口、验收和开发顺序。
 
@@ -249,12 +256,13 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 未来战术层推荐采用“LLM / Planner 做战略，Utility Tactical Resolver 做战术权衡，行为树做确定性执行”的分层方案；不要把冲层、刷矿、刷怪、机会目标和撤退等多目标权衡长期散落在单个执行节点里。
 - 每个任务和节点都应有前置条件、执行逻辑、成功判定、超时和恢复策略。
 - 寻路需要区分硬障碍、可绕行障碍、可破坏障碍和交互式门。
-- 普通树 `Tree0` ~ `Tree5` 属于“策略允许后可清理”的高成本障碍；当前 Route 和 Farm 规划区域默认允许砍普通树。`FruitTree0` ~ `FruitTree5` 和 `TreeStump` 暂不自动清理。
+- 普通树 `Tree0` ~ `Tree5` 属于“策略允许后可清理”的高成本障碍；当前 Route 和 Farm 规划区域默认允许砍普通树。砍普通树时，如果同一目标地块残留普通树桩，`ClearObstacleNode` 会继续砍完后再触发拾取。`FruitTree0` ~ `FruitTree5` 和独立规划目标中的 `TreeStump` 暂不自动清理。
 - 涉及普通树、未来高价值资源或长期收益的清障判断应通过 `clearance_policy` 一类策略层完成；执行节点只负责站位、切工具、使用工具和验证结果，不负责判断资源是否值得破坏。
 - 清障必须验证工具可用、玩家位于上下左右相邻格、朝向正确，并在动作后从新状态确认障碍已经消失；当前不允许斜向破坏障碍物。
 - 工具切换应优先读取 SMAPI state 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items`，不要在 Python 端硬猜当前工具。
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
 - 工具收招后的副作用观察优先复用 `ToolAftermathService`。业务节点仍负责解释结果，例如 Mining 决定是否转向梯子，ClearObstacle 决定是否继续重试；不要把所有工具业务成功判定塞进通用服务。
+- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。拾取节点只尝试可达掉落物，不触发清障；普通树掉落物会在树和残留树桩都砍完后统一拾取，允许部分拾取并跳过不可达位置。
 - 节点推进应状态驱动优先；固定 tick/秒数等待只能用于短暂防抖、节流和超时兜底，不要用经验等待替代 SMAPI state 验证。
 - 水壶补水属于 Farm 分支的资源恢复能力。FarmNode 发现 `WaterLeft <= 0` 时应通过 blackboard 触发 `RefillWateringCanNode`，不要在 FarmNode 内部直接实现找水源、移动和补水。
 - 水源坐标属于低频地图知识，优先通过 C# `QUERY_WATER_SOURCES` 按需查询并写入 `MapKnowledgeCache`；不要作为每帧 state 高频字段同步。

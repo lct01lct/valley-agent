@@ -36,7 +36,11 @@ Farm P1 当前暂停继续扩展资源管理细节。已有 Farm 模块保留为
 ```text
 Selector
 ├── Sequence("Guard")
+│   ├── UiGuardNode
+│   ├── SwitchToolNode
 │   └── Defend_Node
+├── Sequence("CollectLoot")
+│   └── CollectLootNode
 ├── Sequence("Route")
 │   ├── OpenDoorNode
 │   ├── SwitchToolNode
@@ -50,11 +54,15 @@ Selector
 │   ├── ClearObstacleNode
 │   ├── RefillWateringCanNode
 │   └── FarmNode
+├── Sequence("Mining")
+│   ├── MiningResourceCheckNode
+│   ├── SwitchToolNode
+│   └── MineNode
 └── Sequence("Think")
     └── LLM_Node
 ```
 
-`Route`、`Chest`、`Farm` 和 `Think` 分支都是顶层 Selector 下的候选分支。`Think` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
+`CollectLoot`、`Route`、`Chest`、`Farm`、`Mining` 和 `Think` 分支都是顶层 Selector 下的候选分支。`CollectLoot` 在工具动作后消费 blackboard 中的近距离掉落物请求，只捡可达目标，不为拾取触发清障。`Think` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
 
 `AgentBlackboard` 是跨节点通讯和调度状态中心，当前至少保存：
 
@@ -92,6 +100,8 @@ Selector
 
 当前水源不作为每帧 state 高频字段同步。Farm 需要补水时，`RefillWateringCanNode` 先查 `MapKnowledgeCache`，没有缓存时通过 C# `QUERY_WATER_SOURCES` 低频查询一次，并把结果写回缓存。
 
+`Debris` 是工具动作后可能快速变化的动态掉落物事实，当前由 C# Observer 轻量高频同步到 Python `state.debris`。它用于工具动作后处理层判断目标附近是否出现掉落物；是否拾取、何时拾取仍留给后续 Loot/Collect 能力或 Mining 战术层决定。
+
 箱子相关知识分为三类：`ChestContentKnowledge` 是打开箱子后得到的内容事实；`ChestSemanticMemory` 是“工具箱/种子箱”等用途倾向，只能作为候选推荐；`borrowed_chest_items` 是本轮任务级借用账本，用来把借出的工具还回原箱子。
 
 ## 当前寻路与移动模型
@@ -109,7 +119,7 @@ Selector
 - Town 等大场景未来路径被阻挡时，优先启动后台 A*；旧路径继续执行，只有障碍已经接近才停下等待。
 - 后台 A* 结果切换前需要对齐当前玩家位置，避免使用过期起点导致人物回头。
 - 绝路、目标 warp 不存在、路径放弃或交给兜底规划前，RouteNode 必须先发送 `IDLE`，否则 C# 会继续保持旧方向。
-- 可破坏障碍当前包括 `Stone`、`Twig`、`Weeds` 和策略允许后的普通树 `Tree0` ~ `Tree5`。普通树清理成本较高，需要通过清障策略层确认；`FruitTree0` ~ `FruitTree5` 和 `TreeStump` 暂视为不可自动清理障碍。
+- 可破坏障碍当前包括 `Stone`、`Twig`、`Weeds` 和策略允许后的普通树 `Tree0` ~ `Tree5`。普通树清理成本较高，需要通过清障策略层确认；砍普通树时同一目标地块残留的普通树桩会继续清理，独立规划目标中的 `TreeStump` 仍暂视为不可自动清理障碍。
 - 箱子、机器和其他普通地图对象由 SMAPI Observer 进入 `Object` 层；A* 将 `Object` 作为硬障碍处理。ChestNode 需要交互箱子时，只允许站到箱子上下左右相邻格，不会把箱子 tile 纳入可站立路径。
 - 不允许斜向破坏障碍物。A* 不应斜向进入可破坏障碍格；RouteNode 和 ClearObstacleNode 只有在玩家位于目标上下左右相邻格时才触发/执行清障。
 
@@ -143,6 +153,8 @@ Mining P0 实测经验：从 Y 轴进入矿洞入口/梯子时，人物可能因
 
 当前 C# Observer 已同步 `UsingTool`、`CanMove`、`IsPlayerFree` 和 `CanPlayerMove`。C# Executor 在玩家忙碌时会对移动、转向、切工具、使用工具/物品返回 `BUSY`，避免 Python 在动画期间叠加输入。
 
+当前 C# Observer 也已同步当前场景 `Debris` 快照，Python 端解析为 `state.debris`。`ToolAftermathService` 会在工具收招后记录目标附近的掉落物 tile，作为后续拾取策略的输入。
+
 Python 端原则：
 
 - `ClearObstacleNode` 和 `FarmNode` 使用 `ToolActionTracker` 等待工具动作从开始到收招。
@@ -168,7 +180,7 @@ CLEAR_OBSTACLES -> HOE_TILES -> PLANT_SEEDS -> WATER_TILES -> DONE
 当前障碍策略：
 
 - 普通树 `Tree0` ~ `Tree5`：Farm 规划区域默认视为 Agent 已授权，可使用 Axe 清理，并在清理后继续锄地、播种、浇水。
-- `FruitTree0` ~ `FruitTree5`、`TreeStump`：跳过该格，不纳入种植。
+- `FruitTree0` ~ `FruitTree5`、独立规划目标中的 `TreeStump`：跳过该格，不纳入种植；普通树砍倒后同一地块残留的树桩会作为当前清树动作的一部分继续砍完。
 - `Grass`：使用 `Scythe`。
 - `Weeds` / `Twig`：使用 `Axe`。
 - `Stone`：使用 `Pickaxe`。
@@ -237,7 +249,7 @@ Chest P2/P3 约定：
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
 | 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
-| 工具动作后处理 | 最小版接入 | 已新增 `ToolAftermathService`，当前用于 Mining 破石后的目标变化/梯子查询，以及 ClearObstacle 收招后的目标变化/阻塞 UI 观察；掉落物识别和拾取尚未实现 |
+| 工具动作后处理 | 最小版接入 | 已新增 `ToolAftermathService`，当前用于 Mining 破石后的目标变化/梯子查询，以及 ClearObstacle 收招后的目标变化/阻塞 UI 观察；已接入 `Debris` 掉落物感知，并通过 `CollectLootNode` 支持工具动作后的近距离可达掉落物自动拾取 |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
@@ -280,7 +292,7 @@ Chest P2/P3 约定：
 - `ClearObstacleNode` 已能验证当前工具并使用工具，但体力检查、工具等级、背包掉落容量和失败恢复仍需完善。
 - 工具动作等待已经接入，但仍需要更多真实场景验证：不同工具、不同动画长度、体力耗尽、命中失败和背包拾取等状态都可能影响结果判断。
 - `PositioningController` 目前已接入 FarmNode 和 ChestNode；清障、NPC、商店柜台等交互还需要逐步迁移到同一模型。
-- 普通树已纳入策略允许后的可清障目标；`FruitTree` 和 `TreeStump` 暂不纳入自动清障目标。
+- 普通树已纳入策略允许后的可清障目标；普通树砍倒后同一地块残留的树桩会继续清理；`FruitTree` 和独立 `TreeStump` 暂不纳入自动清障目标。
 - `OpenDoorNode` 仍有异步路径使用 `time.sleep()`、结果验证不足等问题。
 - `StardewExecutorClient.send_command()` 是阻塞式等待响应，缺少可靠超时和结构化 Action Result。
 - Python 端当前仍会每 tick 重发当前移动方向；未来可优化为仅在方向变化、IDLE 或交互动作时发送，但必须保证安全停机语义不变。
@@ -310,7 +322,7 @@ Chest P2/P3 约定：
 - 固定障碍场景中，Agent 能绕开硬障碍并在动态阻塞后重新计算路径。
 - 可破坏障碍挡住必要路径时，Agent 能完成“识别障碍 -> 切换正确工具 -> 执行动作 -> 验证障碍消失 -> 继续移动”。
 - 工具动作必须通过 state 确认收招和结果变化，不能仅凭 Executor 返回 `SUCCESS` 判定完成。
-- Farm P1 测试中，规划区域内可种植地块能完成“清障 -> 锄地 -> 播种 -> 浇水”；普通树会被清理，果树和 TreeStump 等不可处理地块会被明确跳过。
+- Farm P1 测试中，规划区域内可种植地块能完成“清障 -> 锄地 -> 播种 -> 浇水”；普通树会被清理并连同残留树桩处理完后统一拾取掉落物，果树和独立 TreeStump 等不可处理地块会被明确跳过。
 - 关闭但可进入的门能被打开；打烊或上锁能产生明确失败或恢复信号。
 - 任务成功由最新 SMAPI 状态验证，不能仅以命令已发送或路径列表为空作为成功依据。
 - 绝路、目标 warp 不存在或需要兜底恢复时，必须先发送 `IDLE`，人物不能继续保持旧方向移动。
@@ -326,7 +338,7 @@ Chest P2/P3 约定：
 - Mining P0 挖石出梯子：没有梯子时打碎 Stone / MiningNode，等待工具收招后只查询被破坏 tile 是否生成梯子；若生成梯子，应立即切回梯子目标。
 - Mining P0 交互边界：梯子/矿井入口目标 tile 不应被当成可站立 tile；玩家必须站在上下左右相邻格，并足够贴近交互边缘。
 - Mining P0 状态切层：进入下一层后必须重置上一层的目标、接近点、破石计数和临时路径，不能沿用过期状态。
-- 规划一片 Farm 区域，包含 Grass、Weeds、Twig、Stone、普通树、果树和树桩，Agent 能清理可处理障碍、跳过果树/TreeStump、锄地、播种并浇水。
+- 规划一片 Farm 区域，包含 Grass、Weeds、Twig、Stone、普通树、果树和独立树桩，Agent 能清理可处理障碍、普通树连同残留树桩处理完后再拾取掉落物、跳过果树/独立 TreeStump、锄地、播种并浇水。
 - 工具动作期间连续 tick 验证：Executor 返回 `BUSY` 时 Python 不叠加新动作，动作收招后再验证结果。
 - 建筑门关闭但可进入，Agent 能开门并完成 Warp。
 - 门打烊或上锁，Agent 能停止并提供明确失败原因。

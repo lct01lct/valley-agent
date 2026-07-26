@@ -8,6 +8,7 @@ from agent.behavior_tree.route_node import RouteNode
 from agent.behavior_tree.behavior_tree import Selector, Sequence
 from agent.behavior_tree.defend_node import Defend_Node
 from agent.behavior_tree.chest_node import ChestNode
+from agent.behavior_tree.collect_loot_node import CollectLootNode
 from agent.behavior_tree.clear_obstacle_node import ClearObstacleNode
 from agent.behavior_tree.farm_resource_check_node import FarmResourceCheckNode
 from agent.behavior_tree.farm_node import FarmNode
@@ -41,6 +42,12 @@ class ValleyAgent:
                         UiGuardNode(),
                         SwitchToolNode(owner="Guard"),
                         Defend_Node(),
+                    ],
+                ),
+                Sequence(
+                    node_name="CollectLoot",
+                    children=[
+                        CollectLootNode(),
                     ],
                 ),
                 Sequence(

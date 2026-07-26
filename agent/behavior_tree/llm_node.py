@@ -46,17 +46,17 @@ class Agent_Model:
 
     async def run(self, prompt: str, ctx: PlayerContext) -> List[BaseTask]:
         TEST_MODE: TaskType = "ROUTE"
-        TEST_MODE: TaskType = "FARM"
-        TEST_MODE: TaskType = "CHEST"
-        TEST_MODE: TaskType = "MINE"
+        # TEST_MODE: TaskType = "FARM"
+        # TEST_MODE: TaskType = "CHEST"
+        # TEST_MODE: TaskType = "MINE"
 
         if self.is_mock_data:
             await asyncio.sleep(2.0)
             if TEST_MODE == "ROUTE":
-                if not self._is_route_unavailable_prompt(prompt):
-                    return TASK_MOCK_DATA["ROUTE_1"]
-                return TASK_MOCK_DATA["ROUTE_BACKUP"]
-                # return TASK_MOCK_DATA["ROUTE_3"]
+                # if not self._is_route_unavailable_prompt(prompt):
+                #     return TASK_MOCK_DATA["ROUTE_1"]
+                # return TASK_MOCK_DATA["ROUTE_BACKUP"]
+                return TASK_MOCK_DATA["ROUTE_3"]
                 # return TASK_MOCK_DATA["ROUTE_4"]
             elif TEST_MODE == "CHEST":
                 return TASK_MOCK_DATA["CHEST_P2_P3_1"]

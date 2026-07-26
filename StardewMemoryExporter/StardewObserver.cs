@@ -249,6 +249,7 @@ namespace StardewMemoryExporter
                     CanMove = player.CanMove,
                     IsPlayerFree = Context.IsPlayerFree,
                     CanPlayerMove = Context.CanPlayerMove,
+                    AppliedMagneticRadius = player.GetAppliedMagneticRadius(),
                     MenuState = CreateMenuStateSnapshot(),
                     MineLevel = location is MineShaft mineShaft ? mineShaft.mineLevel : (int?)null,
                     Items = CreateItemsSnapshot(player),
@@ -259,6 +260,7 @@ namespace StardewMemoryExporter
                     Ladders = shouldRefreshHeavyState ? _cachedLadders : null,
                     MiningNodes = shouldRefreshHeavyState ? _cachedMiningNodes : null,
                     MineEntrances = shouldRefreshHeavyState ? _cachedMineEntrances : null,
+                    Debris = DebrisStateScanner.CreateDebrisSnapshot(location),
                     warps = _cachedWarpDataList,
                     obstacles = shouldRefreshHeavyState ? _cachedObstacleList : null,
                 };

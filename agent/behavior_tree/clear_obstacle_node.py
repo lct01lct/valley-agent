@@ -10,7 +10,7 @@ from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.clear_obstacle_debug_logger import ClearObstacleDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_action_tracker import ToolActionTracker
-from agent.behavior_tree.tool_selection import has_scythe_tree_seed_risk, is_current_tool, select_required_tool_for_obstacle
+from agent.behavior_tree.tool_selection import has_tool_area_tree1_risk, is_current_tool, select_required_tool_for_obstacle
 from server.type import Tile
 
 
@@ -23,8 +23,8 @@ CLEARABLE_OBSTACLE_LAYERS: dict[str, tuple[str, ...]] = {
     "Weeds": ("Weeds",),
     "grass": ("Grass",),
     "Grass": ("Grass",),
-    "tree": ORDINARY_TREE_LAYERS,
-    "Tree": ORDINARY_TREE_LAYERS,
+    "tree": (*ORDINARY_TREE_LAYERS, "TreeStump"),
+    "Tree": (*ORDINARY_TREE_LAYERS, "TreeStump"),
 }
 CLEAR_OBSTACLE_TIMEOUT_SECONDS = 8.0
 TREE_CLEAR_OBSTACLE_TIMEOUT_SECONDS = 18.0
@@ -50,6 +50,7 @@ class ClearObstacleNode(BTNode):
         self._last_positioning_position: tuple[float, float] | None = None
         self._positioning_stuck_started_at: float | None = None
         self._blocked_stand_tiles: set[Tile] = set()
+        self._deferred_loot_tiles: list[Tile] = []
         self.tool_aftermath_service = ToolAftermathService()
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=CLEAR_TOOL_START_GRACE_SECONDS,
@@ -79,10 +80,7 @@ class ClearObstacleNode(BTNode):
         self._log_debug_heartbeat(blackboard, game_state, target_tile, obstacle_type)
 
         if not self._obstacle_exists(game_state.layers, target_tile, obstacle_type):
-            print(f"\n🟢 [ClearObstacleNode:{self.owner}] 障碍物已清除: {obstacle_type} @ {target_tile}")
-            self._log(f"障碍物已清除: obstacle={obstacle_type}, target={target_tile}, player={game_state.player_tile}")
-            self._finish(blackboard)
-            return "SUCCESS"
+            return self._handle_cleared_obstacle(context, blackboard, game_state, target_tile, obstacle_type)
 
         if self._started_at is not None and time.time() - self._started_at > self._get_clear_timeout_seconds(obstacle_type):
             context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
@@ -138,7 +136,7 @@ class ClearObstacleNode(BTNode):
             self._log(
                 f"等待切换工具: required_tool={required_tool}, current_tool={self._get_current_tool_name(game_state)}, "
                 f"target={target_tile}, obstacle={obstacle_type}, "
-                f"scythe_tree_seed_risk={has_scythe_tree_seed_risk(game_state, target_tile)}"
+                f"tool_area_tree1_risk={has_tool_area_tree1_risk(game_state, target_tile, required_tool)}"
             )
             return "RUNNING"
 
@@ -191,6 +189,10 @@ class ClearObstacleNode(BTNode):
                 self.tool_action_tracker.reset()
                 return "RUNNING"
 
+            if self._is_tree_obstacle(obstacle_type):
+                self._defer_tree_loot(target_tile, aftermath_result.nearby_loot_tiles)
+            else:
+                self._request_collect_loot(blackboard, target_tile, obstacle_type, aftermath_result.nearby_loot_tiles)
             self._log(
                 f"清障工具动作已收招，等待下一帧验证结果: target={target_tile}, obstacle={obstacle_type}, "
                 f"UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
@@ -219,20 +221,22 @@ class ClearObstacleNode(BTNode):
             self._fail(blackboard, f"清障重试次数耗尽: {obstacle_type} @ {target_tile}")
             return "SUCCESS"
 
+        clear_command = self._build_clear_command(required_tool)
         print(f"\n🧹 [ClearObstacleNode:{self.owner}] 使用当前工具清理障碍物: {obstacle_type} @ {target_tile}")
-        response = context.executor_client.send_command(StardewCommand(action=StardewAction.USE_TOOL, key=["c"]))
+        response = context.executor_client.send_command(clear_command)
         if response == "BUSY":
             self._attempt_count -= 1
             self._log(
-                f"C# Executor 忙碌，清障 USE_TOOL 未执行，等待下一帧: target={target_tile}, "
-                f"obstacle={obstacle_type}, UsingTool={game_state.using_tool}, CanMove={game_state.can_move}"
+                f"C# Executor 忙碌，清障命令未执行，等待下一帧: target={target_tile}, "
+                f"obstacle={obstacle_type}, command={clear_command.action}, "
+                f"UsingTool={game_state.using_tool}, CanMove={game_state.can_move}"
             )
             return "RUNNING"
 
         self.tool_action_tracker.start()
         self._log(
-            f"发送 USE_TOOL 清障: target={target_tile}, obstacle={obstacle_type}, attempt={self._attempt_count}, "
-            f"response={response}, tool_target={format_tool_target(game_state.tool_target)}, "
+            f"发送清障命令: target={target_tile}, obstacle={obstacle_type}, attempt={self._attempt_count}, "
+            f"command={clear_command.action}, response={response}, tool_target={format_tool_target(game_state.tool_target)}, "
             f"UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
             f"target_state={self._format_farm_tile_state(game_state, target_tile)}, "
             f"tracker={self.tool_action_tracker.get_debug_snapshot()}"
@@ -285,6 +289,7 @@ class ClearObstacleNode(BTNode):
         self.tool_action_tracker.reset()
         self._last_debug_heartbeat_at = 0.0
         self._blocked_stand_tiles = set()
+        self._deferred_loot_tiles = []
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
         print(f"\n🟡 [ClearObstacleNode:{self.owner}] 准备清理必要障碍物: {obstacle_type} @ {target_tile}")
@@ -305,6 +310,133 @@ class ClearObstacleNode(BTNode):
         blackboard.required_tool_owner = None
         blackboard.required_tool = None
         self._reset()
+
+    def _request_collect_loot(
+        self,
+        blackboard: AgentBlackboard,
+        source_tile: Tile,
+        source_type: str,
+        loot_tiles: list[Tile],
+    ) -> None:
+        if self._should_skip_loot_check(source_type):
+            self._log(f"该障碍类型不会产生掉落物，跳过自动拾取: source={source_tile}, source_type={source_type}")
+            return
+
+        if not loot_tiles and not self._should_probe_dynamic_loot(source_type):
+            return
+
+        should_replace_pending_loot = self._should_replace_pending_loot(source_type)
+        if should_replace_pending_loot:
+            blackboard.pending_loot_tiles = []
+            blackboard.skipped_loot_tiles = set()
+
+        known_tiles = {(tile.x, tile.y) for tile in blackboard.pending_loot_tiles}
+        for loot_tile in loot_tiles:
+            if (loot_tile.x, loot_tile.y) in known_tiles:
+                continue
+            blackboard.pending_loot_tiles.append(loot_tile)
+            known_tiles.add((loot_tile.x, loot_tile.y))
+
+        blackboard.require_collect_loot = True
+        blackboard.collect_loot_owner = self.owner
+        self._merge_collect_loot_source(blackboard, source_tile, source_type)
+        self._log(
+            f"发现工具掉落物，触发自动拾取: source={source_tile}, source_type={source_type}, "
+            f"active_source={blackboard.collect_loot_source_tile}, active_source_type={blackboard.collect_loot_source_type}, "
+            f"replace_pending={should_replace_pending_loot}, loot_tiles={self._format_tile_list(loot_tiles)}, "
+            f"pending={self._format_tile_list(blackboard.pending_loot_tiles)}"
+        )
+
+    def _merge_collect_loot_source(
+        self,
+        blackboard: AgentBlackboard,
+        source_tile: Tile,
+        source_type: str,
+    ) -> None:
+        normalized_new_source_type = normalize_obstacle_type(source_type) or source_type
+        normalized_current_source_type = normalize_obstacle_type(blackboard.collect_loot_source_type or "")
+        if normalized_new_source_type == "tree" or normalized_current_source_type != "tree":
+            blackboard.collect_loot_source_tile = source_tile
+            blackboard.collect_loot_source_type = source_type
+
+    def _should_probe_dynamic_loot(self, source_type: str) -> bool:
+        normalized_source_type = normalize_obstacle_type(source_type) or source_type
+        return normalized_source_type in {"weeds", "tree"}
+
+    def _should_skip_loot_check(self, source_type: str) -> bool:
+        normalized_source_type = normalize_obstacle_type(source_type) or source_type
+        return normalized_source_type == "grass"
+
+    def _should_replace_pending_loot(self, source_type: str) -> bool:
+        normalized_source_type = normalize_obstacle_type(source_type) or source_type
+        return normalized_source_type == "tree"
+
+    def _handle_cleared_obstacle(
+        self,
+        context: PlayerContext,
+        blackboard: AgentBlackboard,
+        game_state,
+        target_tile: Tile,
+        obstacle_type: str,
+    ) -> NodeStatus:
+        if self.tool_action_tracker.is_idle():
+            print(f"\n🟢 [ClearObstacleNode:{self.owner}] 障碍物已清除: {obstacle_type} @ {target_tile}")
+            self._log(f"障碍物已清除: obstacle={obstacle_type}, target={target_tile}, player={game_state.player_tile}")
+            self._request_deferred_tree_loot(blackboard, target_tile, obstacle_type)
+            should_collect_loot = self._has_pending_collect_loot(blackboard)
+            self._finish(blackboard)
+            if should_collect_loot:
+                self._log(
+                    f"清障后存在待拾取掉落物，本轮返回 RUNNING 阻止业务节点同 tick 继续发布下一项清障: "
+                    f"target={target_tile}, obstacle={obstacle_type}, pending={self._format_tile_list(blackboard.pending_loot_tiles)}"
+                )
+                return "RUNNING"
+            return "SUCCESS"
+
+        tool_action_status = self.tool_action_tracker.tick(game_state)
+        if tool_action_status in ("WAITING_STARTED", "WAITING_FINISHED"):
+            self._log(
+                f"障碍已消失，等待清障工具动作收招后再观察掉落物: target={target_tile}, "
+                f"obstacle={obstacle_type}, UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
+                f"tracker={self.tool_action_tracker.get_debug_snapshot()}"
+            )
+            return "RUNNING"
+
+        if tool_action_status in ("FINISHED", "TIMEOUT"):
+            aftermath_result = self.tool_aftermath_service.inspect_after_tool_action(
+                context,
+                game_state,
+                ToolAftermathRequest(
+                    owner="Farm" if self.owner == "Farm" else "Route",
+                    action_name="CLEAR_OBSTACLE",
+                    target_tile=target_tile,
+                    check_ladder_at_target_tile=False,
+                    target_tile_changed=True,
+                ),
+            )
+            if self._is_tree_obstacle(obstacle_type):
+                self._defer_tree_loot(target_tile, aftermath_result.nearby_loot_tiles)
+                self._request_deferred_tree_loot(blackboard, target_tile, obstacle_type)
+            else:
+                self._request_collect_loot(blackboard, target_tile, obstacle_type, aftermath_result.nearby_loot_tiles)
+
+            self._log(
+                f"障碍已消失且工具动作已结束，完成清障后处理: target={target_tile}, obstacle={obstacle_type}, "
+                f"tool_action_status={tool_action_status}, aftermath={aftermath_result.reason}"
+            )
+            self.tool_action_tracker.reset()
+            print(f"\n🟢 [ClearObstacleNode:{self.owner}] 障碍物已清除: {obstacle_type} @ {target_tile}")
+            should_collect_loot = self._has_pending_collect_loot(blackboard)
+            self._finish(blackboard)
+            if should_collect_loot:
+                self._log(
+                    f"清障后存在待拾取掉落物，本轮返回 RUNNING 阻止业务节点同 tick 继续发布下一项清障: "
+                    f"target={target_tile}, obstacle={obstacle_type}, pending={self._format_tile_list(blackboard.pending_loot_tiles)}"
+                )
+                return "RUNNING"
+            return "SUCCESS"
+
+        return "RUNNING"
 
     def _fail(self, blackboard: AgentBlackboard, reason: str) -> None:
         print(f"\n🔴 [ClearObstacleNode:{self.owner}] {reason}")
@@ -336,6 +468,7 @@ class ClearObstacleNode(BTNode):
         self.tool_action_tracker.reset()
         self._last_debug_heartbeat_at = 0.0
         self._blocked_stand_tiles = set()
+        self._deferred_loot_tiles = []
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
 
@@ -345,6 +478,43 @@ class ClearObstacleNode(BTNode):
             if target_tile in layers.get(layer_name, set()):
                 return True
         return False
+
+    def _is_tree_obstacle(self, obstacle_type: str | None) -> bool:
+        return normalize_obstacle_type(obstacle_type) == "tree"
+
+    def _has_pending_collect_loot(self, blackboard: AgentBlackboard) -> bool:
+        return blackboard.require_collect_loot and blackboard.collect_loot_owner == self.owner
+
+    def _defer_tree_loot(self, source_tile: Tile, loot_tiles: list[Tile]) -> None:
+        if not loot_tiles:
+            return
+
+        known_tiles = {(tile.x, tile.y) for tile in self._deferred_loot_tiles}
+        added_tiles: list[Tile] = []
+        for loot_tile in loot_tiles:
+            if (loot_tile.x, loot_tile.y) in known_tiles:
+                continue
+            self._deferred_loot_tiles.append(loot_tile)
+            added_tiles.append(loot_tile)
+            known_tiles.add((loot_tile.x, loot_tile.y))
+
+        if added_tiles:
+            self._log(
+                f"树木清理过程中暂存掉落物，等待树和树桩完全清理后再拾取: "
+                f"source={source_tile}, added={self._format_tile_list(added_tiles)}, "
+                f"deferred={self._format_tile_list(self._deferred_loot_tiles)}"
+            )
+
+    def _request_deferred_tree_loot(self, blackboard: AgentBlackboard, source_tile: Tile, source_type: str) -> None:
+        if not self._is_tree_obstacle(source_type) or not self._deferred_loot_tiles:
+            return
+
+        self._request_collect_loot(blackboard, source_tile, source_type, self._deferred_loot_tiles)
+        self._log(
+            f"树和树桩已完全清理，触发暂存掉落物拾取: source={source_tile}, "
+            f"loot_tiles={self._format_tile_list(self._deferred_loot_tiles)}"
+        )
+        self._deferred_loot_tiles = []
 
     def _get_max_clear_attempts(self, obstacle_type: str) -> int:
         if normalize_obstacle_type(obstacle_type) == "tree":
@@ -435,6 +605,9 @@ class ClearObstacleNode(BTNode):
     def _format_tile_set(self, tiles: set[Tile]) -> str:
         return str(sorted(tiles, key=lambda tile: (tile.x, tile.y)))
 
+    def _format_tile_list(self, tiles: list[Tile]) -> str:
+        return str([(tile.x, tile.y) for tile in tiles])
+
     def _log(self, message: str) -> None:
         self.clear_obstacle_debug_logger.log(f"[ClearObstacleNode:{self.owner}] {message}")
 
@@ -466,6 +639,18 @@ class ClearObstacleNode(BTNode):
             f"clear_obstacle_owner={blackboard.clear_obstacle_owner}, required_tool={blackboard.required_tool}, "
             f"required_tool_owner={blackboard.required_tool_owner}, require_switch_tool={blackboard.require_switch_tool}, "
             f"positioning={self.positioning_controller.get_debug_snapshot()}"
+        )
+
+    def _build_clear_command(self, required_tool: str) -> StardewCommand:
+        if self._is_weapon_tool(required_tool):
+            return StardewCommand(action=StardewAction.ATTACK_WEAPON, key=["c"])
+        return StardewCommand(action=StardewAction.USE_TOOL, key=["c"])
+
+    def _is_weapon_tool(self, tool_name: str) -> bool:
+        normalized_tool_name = tool_name.strip().lower()
+        return any(
+            keyword in normalized_tool_name
+            for keyword in ("sword", "blade", "saber", "cutlass", "katana", "claymore", "rapier", "slasher")
         )
 
     def _get_current_tool_name(self, game_state) -> str:

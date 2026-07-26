@@ -338,7 +338,7 @@ Selector
 
 #### ToolAftermathService
 
-当前状态：已新增最小版轻量服务层，不是一开始就做复杂节点。当前接入 Mining 和 ClearObstacle，用于工具收招后观察阻塞 UI、目标地块变化，以及 Mining 可选的破石后梯子查询。掉落物识别、拾取策略、采集物分类和更复杂的 aftermath checker 仍待后续扩展。
+当前状态：已新增最小版轻量服务层，不是一开始就做复杂节点。当前接入 Mining 和 ClearObstacle，用于工具收招后观察阻塞 UI、目标地块变化，以及 Mining 可选的破石后梯子查询。C# Observer 已同步当前场景 `Debris`，Python `state.debris` 已可被 `ToolAftermathService` 用于记录目标附近掉落物。`CollectLootNode` 已支持工具动作后的近距离可达掉落物自动拾取；采集物分类、批量拾取策略和更复杂的 aftermath checker 仍待后续扩展。
 
 职责：
 
@@ -364,8 +364,8 @@ ToolAftermathResult(
 
 掉落物管理建议分成两层：
 
-1. `LootAwarenessService`：识别当前场景掉落物、位置和可拾取状态。
-2. `CollectLootNode`：根据 blackboard 中的拾取请求移动并捡起。
+1. `LootAwarenessService`：基于 `state.debris` 识别当前场景掉落物、位置和可拾取状态。
+2. `CollectLootNode`：根据 blackboard 中的拾取请求移动并捡起；当前只捡可达目标，不为拾取触发清障，树掉落物允许部分跳过。
 
 拾取策略不要写死在节点里，应由业务模块或战术层决定：
 
@@ -411,7 +411,7 @@ MineTarget
 3. 设计 C# Observer 如何暴露矿井采集物、矿石节点、木箱/木桶和掉落物。
 4. 抽象 `MineTarget` 与 Mining 目标选择器，先支持 Collectible / MiningNode / Stone / BreakableBox / Ladder 的基础分类。
 5. 设计 `ToolAftermathService`，先用于 Mining 和 ClearObstacle，避免每个节点重复处理菜单、掉落物和 Ladder 查询。
-6. 实现 `CollectLootNode` 的最小版本，先支持附近掉落物拾取，再扩展批量拾取。
+6. 扩展 `CollectLootNode`：在当前最小版附近拾取基础上，继续支持批量拾取、价值过滤和战术 profile 控制。
 7. 将稳定后的工具后处理能力逐步回流 Route 清障、Farm 清障、砍树和未来战斗掉落。
 
 ### Mining P2：基础采矿与资源节点选择

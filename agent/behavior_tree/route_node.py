@@ -11,7 +11,7 @@ from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.route_debug_logger import RouteDebugLogger
-from agent.behavior_tree.tool_selection import has_scythe_tree_seed_risk, select_required_tool_for_obstacle
+from agent.behavior_tree.tool_selection import has_tool_area_tree1_risk, select_required_tool_for_obstacle
 from agent.base_task import BaseTask, TaskType
 from agent.action.valley_action.move_controller import MoveController
 from agent.action.valley_action.AStar import RouteActionType, RouteTile, astar_solver
@@ -256,7 +256,7 @@ class RouteNode(BTNode):
                         self._log_clear_obstacle_debug(
                             f"触发清障节点: tile={clear_obstacle_tile}, type={clear_obstacle_tile.type}, "
                             f"required_tool={required_tool}, player={game_state.player_tile}, "
-                            f"scythe_tree_seed_risk={has_scythe_tree_seed_risk(game_state, target_tile)}, "
+                            f"tool_area_tree1_risk={has_tool_area_tree1_risk(game_state, target_tile, required_tool)}, "
                             f"path_index={self.path_index}, path_len={len(self.global_current_path)}, "
                             f"CurrentToolIndex={game_state.inventory.current_tool_index}, "
                             f"CurrentToolbarIndex={game_state.inventory.current_toolbar_index}"
@@ -634,7 +634,7 @@ class RouteNode(BTNode):
         self.last_clear_obstacle_debug_signature = signature
         self._log_clear_obstacle_debug(
             f"清障候选: tile={route_tile}, type={route_tile.type}, required_tool={required_tool}, "
-            f"scythe_tree_seed_risk={has_scythe_tree_seed_risk(game_state, target_tile)}, "
+            f"tool_area_tree1_risk={has_tool_area_tree1_risk(game_state, target_tile, required_tool)}, "
             f"is_reachable={is_reachable}, reason={reason}, player={game_state.player_tile}, "
             f"path_index={self.path_index}, lookahead_end={look_ahead_end}, "
             f"path_len={len(self.global_current_path)}, CurrentToolIndex={game_state.inventory.current_tool_index}, "

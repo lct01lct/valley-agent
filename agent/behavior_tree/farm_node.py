@@ -18,7 +18,7 @@ from agent.behavior_tree.farm_debug_logger import FarmDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_action_tracker import ToolActionTracker
 from agent.behavior_tree.tool_selection import (
-    has_scythe_tree_seed_risk,
+    has_tool_area_tree1_risk,
     is_current_tool,
     select_required_tool_for_obstacle,
 )
@@ -795,7 +795,8 @@ class FarmNode(BTNode):
         blackboard.required_tool = required_tool
         self._log(
             f"P1 批量清障请求: target={target_tile}, obstacle={clear_obstacle_type}, "
-            f"required_tool={required_tool}, scythe_tree_seed_risk={has_scythe_tree_seed_risk(game_state, target_tile)}"
+            f"required_tool={required_tool}, "
+            f"tool_area_tree1_risk={has_tool_area_tree1_risk(game_state, target_tile, required_tool)}"
         )
         print(f"\n🟡 [FarmNode] P1 批量清障: {clear_obstacle_type} @ {target_tile}")
         return "RUNNING"
