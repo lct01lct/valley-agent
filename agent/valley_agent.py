@@ -16,6 +16,7 @@ from agent.behavior_tree.mining_resource_check_node import MiningResourceCheckNo
 from agent.behavior_tree.open_door_node import OpenDoorNode
 from agent.behavior_tree.refill_watering_can_node import RefillWateringCanNode
 from agent.behavior_tree.switch_tool_node import SwitchToolNode
+from agent.behavior_tree.ui_guard_node import UiGuardNode
 from agent.behavior_tree.llm_node import Agent_Model, LLM_Node
 from agent.behavior_tree.player_context import PlayerContext
 from utils.logger import valley_logger
@@ -37,6 +38,7 @@ class ValleyAgent:
                 Sequence(
                     node_name="Guard",
                     children=[
+                        UiGuardNode(),
                         SwitchToolNode(owner="Guard"),
                         Defend_Node(),
                     ],

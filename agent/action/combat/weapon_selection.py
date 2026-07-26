@@ -28,6 +28,12 @@ class WeaponSelector:
             return None
         return max(weapons, key=self._weapon_score)
 
+    def select_best_sword(self, state: StardewState) -> InventoryItem | None:
+        swords = [item for item in state.inventory.items if self._is_weapon(item) and self._is_sword(item)]
+        if not swords:
+            return None
+        return max(swords, key=self._weapon_score)
+
     def _is_weapon(self, item: InventoryItem) -> bool:
         if item.is_weapon:
             return True

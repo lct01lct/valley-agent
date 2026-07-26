@@ -345,9 +345,14 @@ class RouteNode(BTNode):
         anchor_index = max(0, self.path_index - 1)
         anchor_tile = self.global_current_path[anchor_index]
 
-        if not self.move_controller.is_player_inside_tile(game_state, anchor_tile):
+        is_at_door_anchor_tile = game_state.player_tile == anchor_tile
+        if not is_at_door_anchor_tile and not self.move_controller.is_player_inside_tile(game_state, anchor_tile):
             return self.move_controller.build_move_command_to_tile(game_state, anchor_tile), False
 
+        self._log_route_debug(
+            f"门前站位完成，触发开门: anchor={anchor_tile}, door={door_tile}, "
+            f"player_tile={game_state.player_tile}, player_position={game_state.position}"
+        )
         print(f"\n🏁 [Door] 已站到门前格，面向门 {door_tile} 并触发开门节点。")
         return build_tool_target_face_command(anchor_tile, door_tile), True
 

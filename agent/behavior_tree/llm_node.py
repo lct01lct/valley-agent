@@ -53,7 +53,7 @@ class Agent_Model:
         if self.is_mock_data:
             await asyncio.sleep(2.0)
             if TEST_MODE == "ROUTE":
-                if not "打烊" in prompt:
+                if not self._is_route_unavailable_prompt(prompt):
                     return TASK_MOCK_DATA["ROUTE_1"]
                 return TASK_MOCK_DATA["ROUTE_BACKUP"]
                 # return TASK_MOCK_DATA["ROUTE_3"]
@@ -77,6 +77,9 @@ class Agent_Model:
                 return []
         else:
             return []
+
+    def _is_route_unavailable_prompt(self, prompt: str) -> bool:
+        return any(keyword in prompt for keyword in ("打烊", "关门", "营业时间", "上锁", "锁住"))
 
 
 class LLM_Node(BTNode):
@@ -105,7 +108,9 @@ class LLM_Node(BTNode):
             blackboard.new_plan_received = False
 
             async def async_worker():
-                tasks = self._build_mock_farm_resource_recovery_plan(blackboard)
+                tasks = self._build_mock_route_recovery_plan(blackboard)
+                if tasks is None:
+                    tasks = self._build_mock_farm_resource_recovery_plan(blackboard)
                 if tasks is None:
                     tasks = await self.agent.models.run(blackboard.prompt, ctx)
                 blackboard.macro_plan = tasks
@@ -120,6 +125,25 @@ class LLM_Node(BTNode):
             return "RUNNING"
 
         return "FAILURE"  # 还有计划在干，放行控制流
+
+    def _build_mock_route_recovery_plan(self, blackboard: AgentBlackboard) -> list[BaseTask] | None:
+        if not self.agent.models.is_mock_data:
+            return None
+
+        feedback_event = blackboard.action_feedback_event
+        if feedback_event is None:
+            return None
+        if not feedback_event.should_replan:
+            return None
+        if feedback_event.event_type not in ("LOCATION_CLOSED", "LOCKED_DOOR"):
+            return None
+
+        print(
+            "\n🟢 [LLM_Node] Route 入口交互失败，生成 ROUTE_BACKUP mock 恢复计划："
+            f"type={feedback_event.event_type}, text={feedback_event.text}"
+        )
+        blackboard.action_feedback_event = None
+        return TASK_MOCK_DATA["ROUTE_BACKUP"]
 
     def _build_mock_farm_resource_recovery_plan(self, blackboard: AgentBlackboard) -> list[BaseTask] | None:
         if not self.agent.models.is_mock_data:

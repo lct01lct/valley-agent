@@ -83,6 +83,7 @@ class MineNode(BTNode):
         self._target_tile: Tile | None = None
         self._detected_ladder_tile: Tile | None = None
         self._ladder_pursuit_tile: Tile | None = None
+        self._approach_stand_tile: Tile | None = None
         self._corridor_ladder_tile: Tile | None = None
         self._active_mine_level: int | None = None
         self._return_prompt_tiles: set[Tile] = set()
@@ -159,6 +160,7 @@ class MineNode(BTNode):
             self._target_tile = None
             self._detected_ladder_tile = None
             self._ladder_pursuit_tile = None
+            self._approach_stand_tile = None
             self._corridor_ladder_tile = None
             self._last_interact_at = 0.0
 
@@ -262,6 +264,7 @@ class MineNode(BTNode):
             self.positioning_controller.reset()
             if self._ladder_pursuit_tile != target_tile:
                 self.approach_positioning_controller.reset()
+                self._approach_stand_tile = None
             self._last_interact_at = 0.0
             print(f"\n⛏️ [MineNode] 准备交互{target_name}: target={target_tile}")
             stand_tiles_text = (
@@ -290,15 +293,25 @@ class MineNode(BTNode):
         if target_name in ("梯子", "破石后出现的梯子") and self._ladder_pursuit_tile == target_tile:
             if self._should_approach_distant_target(game_state, target_tile):
                 approach_result = self._tick_approach_distant_target(game_state, context, target_tile)
-                if approach_result.status != "FAILED":
+                if approach_result.status == "READY":
+                    self._ladder_pursuit_tile = None
+                    self._approach_stand_tile = None
+                    self.approach_positioning_controller.reset()
+                elif approach_result.status != "FAILED":
                     self._log(
                         f"延续梯子接近意图: target={target_tile}, "
                         f"approach_status={approach_result.status}, reason={approach_result.reason}"
                     )
                     return "RUNNING"
+                else:
+                    self._ladder_pursuit_tile = None
+                    self._approach_stand_tile = None
+                    self.approach_positioning_controller.reset()
 
-            self._ladder_pursuit_tile = None
-            self.approach_positioning_controller.reset()
+            else:
+                self._ladder_pursuit_tile = None
+                self._approach_stand_tile = None
+                self.approach_positioning_controller.reset()
 
         positioning_result = self._tick_positioning(
             game_state,
@@ -319,16 +332,26 @@ class MineNode(BTNode):
                 target_tile,
             ):
                 approach_result = self._tick_approach_distant_target(game_state, context, target_tile)
+                if approach_result.status == "READY":
+                    self._ladder_pursuit_tile = None
+                    self._approach_stand_tile = None
+                    self.approach_positioning_controller.reset()
+                    return "RUNNING"
                 if approach_result.status != "FAILED":
-                    self._ladder_pursuit_tile = target_tile
                     self._log(
                         f"梯子较远且当前视野无法直接规划站位，先接近目标: target={target_tile}, "
                         f"approach_status={approach_result.status}, reason={approach_result.reason}"
                     )
+                    self._ladder_pursuit_tile = target_tile
                     return "RUNNING"
+
+            self._ladder_pursuit_tile = None
+            self._approach_stand_tile = None
+            self.approach_positioning_controller.reset()
 
             if target_name in ("梯子", "破石后出现的梯子"):
                 self._ladder_pursuit_tile = None
+                self._approach_stand_tile = None
                 self.approach_positioning_controller.reset()
                 corridor_stone = self._select_corridor_stone_toward_tile(game_state, target_tile)
                 if corridor_stone is not None:
@@ -353,10 +376,12 @@ class MineNode(BTNode):
 
         if positioning_result.status in ("MOVING", "FACING"):
             self._ladder_pursuit_tile = None
+            self._approach_stand_tile = None
             self.approach_positioning_controller.reset()
             return "RUNNING"
 
         self._ladder_pursuit_tile = None
+        self._approach_stand_tile = None
         self.approach_positioning_controller.reset()
 
         now = time.time()
@@ -583,28 +608,74 @@ class MineNode(BTNode):
         context: PlayerContext,
         target_tile: Tile,
     ) -> PositioningResult:
+        if self._approach_stand_tile == game_state.player_tile:
+            return PositioningResult(status="READY", stand_tile=self._approach_stand_tile, reason="已到达锁定接近点")
+
         candidate_tiles = self._build_approach_candidate_tiles(game_state, target_tile)
         if not candidate_tiles:
             return PositioningResult(status="FAILED", reason="没有可用接近点")
 
         threat_snapshot = self.threat_evaluator.evaluate(game_state)
+        extra_blocked_tiles = self._get_tactical_blocked_tiles(game_state, threat_snapshot)
+        if self._approach_stand_tile is None:
+            self._approach_stand_tile = self._select_approach_stand_tile(
+                game_state,
+                target_tile,
+                candidate_tiles,
+                extra_blocked_tiles,
+            )
+            self.approach_positioning_controller.reset()
+
+        if self._approach_stand_tile is None:
+            return PositioningResult(status="FAILED", reason="无法规划到任何接近点")
+
         positioning_result = self.approach_positioning_controller.tick(
             game_state,
             PositioningGoal(
-                candidate_stand_tiles=candidate_tiles,
+                candidate_stand_tiles={self._approach_stand_tile},
                 tool_target_tile=None,
-                extra_blocked_tiles=self._get_tactical_blocked_tiles(game_state, threat_snapshot),
+                extra_blocked_tiles=extra_blocked_tiles,
             ),
         )
+        if positioning_result.status == "FAILED":
+            self._log(
+                f"锁定接近点不可达，等待下一帧重选: target={target_tile}, "
+                f"locked={self._approach_stand_tile}, reason={positioning_result.reason}"
+            )
+            self._approach_stand_tile = None
+            self.approach_positioning_controller.reset()
+
         if positioning_result.command is not None:
             context.executor_client.send_command(positioning_result.command)
 
         self._log(
-            f"远距离接近目标: target={target_tile}, candidates={self._format_tiles(candidate_tiles)}, "
-            f"status={positioning_result.status}, stand={positioning_result.stand_tile}, "
+            f"远距离接近目标: target={target_tile}, candidate_count={len(candidate_tiles)}, "
+            f"locked={self._approach_stand_tile}, status={positioning_result.status}, "
+            f"stand={positioning_result.stand_tile}, "
             f"reason={positioning_result.reason}, positioning={self.approach_positioning_controller.get_debug_snapshot()}"
         )
         return positioning_result
+
+    def _select_approach_stand_tile(
+        self,
+        game_state: StardewState,
+        target_tile: Tile,
+        candidate_tiles: set[Tile],
+        extra_blocked_tiles: set[Tile],
+    ) -> Tile | None:
+        sorted_candidates = sorted(
+            candidate_tiles,
+            key=lambda tile: (
+                self._tile_distance(tile, target_tile),
+                self._tile_distance(game_state.player_tile, tile),
+                tile.y,
+                tile.x,
+            ),
+        )
+        for tile in sorted_candidates:
+            if self._build_path_to_tiles(game_state, {tile}, extra_blocked_tiles):
+                return tile
+        return None
 
     def _build_approach_candidate_tiles(self, game_state: StardewState, target_tile: Tile) -> set[Tile]:
         scan_range = game_state.scan_range or 10
@@ -1056,6 +1127,7 @@ class MineNode(BTNode):
         self._target_tile = None
         self._detected_ladder_tile = None
         self._ladder_pursuit_tile = None
+        self._approach_stand_tile = None
         self._corridor_ladder_tile = None
         self._active_mine_level = None
         self._return_prompt_tiles = set()
@@ -1136,6 +1208,7 @@ class MineNode(BTNode):
             f"player={game_state.player_tile}, target={self._target_tile}, "
             f"detected_ladder={self._detected_ladder_tile}, "
             f"ladder_pursuit={self._ladder_pursuit_tile}, "
+            f"approach_stand={self._approach_stand_tile}, "
             f"corridor_ladder={self._corridor_ladder_tile}, "
             f"stone_attempt={self._stone_attempt_count}, broken={self._broken_stone_count}, "
             f"ladders={self._format_targets(game_state.ladders)}, "

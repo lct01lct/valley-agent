@@ -249,6 +249,7 @@ namespace StardewMemoryExporter
                     CanMove = player.CanMove,
                     IsPlayerFree = Context.IsPlayerFree,
                     CanPlayerMove = Context.CanPlayerMove,
+                    MenuState = CreateMenuStateSnapshot(),
                     MineLevel = location is MineShaft mineShaft ? mineShaft.mineLevel : (int?)null,
                     Items = CreateItemsSnapshot(player),
                     Monsters = CombatStateScanner.CreateMonstersSnapshot(location, player),
@@ -388,6 +389,35 @@ namespace StardewMemoryExporter
                 target_location = targetLocation,
                 tile_x = tileX,
                 tile_y = tileY,
+            };
+        }
+
+        private object CreateMenuStateSnapshot()
+        {
+            IClickableMenu activeMenu = Game1.activeClickableMenu;
+            if (activeMenu == null)
+            {
+                return new
+                {
+                    IsMenuOpen = false,
+                    MenuType = (string)null,
+                    Text = "",
+                    HasText = false,
+                };
+            }
+
+            string text = "";
+            if (activeMenu is DialogueBox dialogueBox)
+            {
+                text = dialogueBox.getCurrentString() ?? "";
+            }
+
+            return new
+            {
+                IsMenuOpen = true,
+                MenuType = activeMenu.GetType().Name,
+                Text = text,
+                HasText = !string.IsNullOrWhiteSpace(text),
             };
         }
 

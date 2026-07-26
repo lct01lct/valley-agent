@@ -1,5 +1,6 @@
 from typing import Literal, Sequence
 
+from agent.action.combat.weapon_selection import WeaponSelector
 from agent.action.valley_action.action_type import KeyType
 from agent.action.valley_action.clearance_policy import normalize_obstacle_type
 from server.valley_server import InventoryItem, StardewState
@@ -10,6 +11,7 @@ type ClearObstacleOwner = Literal["Route", "Farm", "Mining", "Guard"]
 TOOLBAR_SIZE = 12
 TOOLBAR_KEYS: tuple[KeyType, ...] = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=")
 SCYTHE_TREE_SEED_RISK_LAYERS: tuple[str, ...] = ("Tree1", "FruitTree1")
+weapon_selector = WeaponSelector()
 
 CLEAR_OBSTACLE_REQUIRED_TOOLS: dict[str, str] = {
     "stone": "Pickaxe",
@@ -102,6 +104,10 @@ def matches_inventory_item(item: InventoryItem, aliases: Sequence[str]) -> bool:
 
 
 def _select_tool_for_weeds(state: StardewState, target_tile: Tile, owner: ClearObstacleOwner) -> str | None:
+    sword = weapon_selector.select_best_sword(state)
+    if sword is not None:
+        return sword.name
+
     has_tree_seed_risk = has_scythe_tree_seed_risk(state, target_tile)
 
     if owner == "Route":
