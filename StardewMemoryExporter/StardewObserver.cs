@@ -251,6 +251,7 @@ namespace StardewMemoryExporter
                     CanPlayerMove = Context.CanPlayerMove,
                     MineLevel = location is MineShaft mineShaft ? mineShaft.mineLevel : (int?)null,
                     Items = CreateItemsSnapshot(player),
+                    Monsters = CombatStateScanner.CreateMonstersSnapshot(location, player),
                     ToolTarget = CreateToolTargetSnapshot(player),
                     // 轻量帧不重复发送重扫描数据；Python 端会沿用上一份 obstacles/FarmTiles。
                     FarmTiles = shouldRefreshHeavyState ? _cachedFarmTiles : null,
@@ -408,6 +409,11 @@ namespace StardewMemoryExporter
                     Category = item.Category,
                     Stack = item.Stack,
                     IsTool = item is Tool,
+                    IsWeapon = item is MeleeWeapon,
+                    TypeDefinitionId = item.TypeDefinitionId ?? "",
+                    MinDamage = item is MeleeWeapon meleeWeapon ? ReadOptionalIntMember(meleeWeapon, "minDamage") : null,
+                    MaxDamage = item is MeleeWeapon meleeWeaponMax ? ReadOptionalIntMember(meleeWeaponMax, "maxDamage") : null,
+                    WeaponType = item is MeleeWeapon meleeWeaponType ? ReadOptionalIntMember(meleeWeaponType, "type") : null,
                     WaterLeft = item is WateringCan wateringCan ? ReadOptionalIntMember(wateringCan, "WaterLeft") : null,
                     WaterCapacity = item is WateringCan wateringCanCapacity ? ReadOptionalIntMember(wateringCanCapacity, "waterCanMax") : null,
                 });

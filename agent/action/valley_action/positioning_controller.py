@@ -24,6 +24,8 @@ class PositioningGoal:
     extra_blocked_tiles: set[Tile] | None = None
     allowed_blocked_tiles: set[Tile] | None = None
     require_close_to_target: bool = False
+    close_edge_margin: float = 2.0
+    close_edge_dead_zone: float = 4.0
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,8 @@ class PositioningController:
             tuple[int, int] | None,
             tuple[tuple[int, int], ...],
             bool,
+            float,
+            float,
         ] | None = None
 
     def reset(self) -> None:
@@ -64,7 +68,8 @@ class PositioningController:
             f"goal_key={self._goal_key}, "
             f"path_len={len(self._tile_path)}, "
             f"path_index={self._path_index}, "
-            f"path_end={self._get_path_end_tile()}"
+            f"path_end={self._get_path_end_tile()}, "
+            f"target_edge={self.move_controller.get_target_edge_debug_snapshot()}"
         )
 
     def tick(self, state: StardewState, goal: PositioningGoal) -> PositioningResult:
@@ -87,6 +92,8 @@ class PositioningController:
                 state.player_tile,
                 goal.tool_target_tile,
                 goal.require_close_to_target,
+                goal.close_edge_margin,
+                goal.close_edge_dead_zone,
             )
 
         goal_key = self._build_goal_key(
@@ -94,6 +101,8 @@ class PositioningController:
             goal.tool_target_tile,
             allowed_blocked_tiles,
             goal.require_close_to_target,
+            goal.close_edge_margin,
+            goal.close_edge_dead_zone,
         )
         if self._goal_key != goal_key:
             self._goal_key = goal_key
@@ -133,6 +142,8 @@ class PositioningController:
         stand_tile: Tile,
         tool_target_tile: Tile | None,
         require_close_to_target: bool,
+        close_edge_margin: float,
+        close_edge_dead_zone: float,
     ) -> PositioningResult:
         if tool_target_tile is None:
             return PositioningResult(status="READY", stand_tile=stand_tile)
@@ -141,11 +152,15 @@ class PositioningController:
             state,
             stand_tile,
             tool_target_tile,
+            edge_margin=close_edge_margin,
+            edge_dead_zone=close_edge_dead_zone,
         ):
             command = self.move_controller.build_move_command_to_target_edge(
                 state,
                 stand_tile,
                 tool_target_tile,
+                edge_margin=close_edge_margin,
+                edge_dead_zone=close_edge_dead_zone,
             )
             return PositioningResult(
                 status="MOVING",
@@ -215,8 +230,17 @@ class PositioningController:
         tool_target_tile: Tile | None,
         allowed_blocked_tiles: set[Tile],
         require_close_to_target: bool,
-    ) -> tuple[tuple[tuple[int, int], ...], tuple[int, int] | None, tuple[tuple[int, int], ...], bool]:
+        close_edge_margin: float,
+        close_edge_dead_zone: float,
+    ) -> tuple[
+        tuple[tuple[int, int], ...],
+        tuple[int, int] | None,
+        tuple[tuple[int, int], ...],
+        bool,
+        float,
+        float,
+    ]:
         stand_key = tuple(sorted((tile.x, tile.y) for tile in candidate_stand_tiles))
         target_key = None if tool_target_tile is None else (tool_target_tile.x, tool_target_tile.y)
         allowed_key = tuple(sorted((tile.x, tile.y) for tile in allowed_blocked_tiles))
-        return stand_key, target_key, allowed_key, require_close_to_target
+        return stand_key, target_key, allowed_key, require_close_to_target, close_edge_margin, close_edge_dead_zone

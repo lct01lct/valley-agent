@@ -149,6 +149,269 @@ P1 验收标准：
 - 低血或非必要战斗时优先躲避。
 - 威胁解除后 Mining 可以继续。
 
+### Mining / Defend 战术层长期方案
+
+推荐采用“LLM / Planner 做战略，Utility AI 做战术，行为树做执行”的组合架构。
+
+```text
+LLM / Planner
+-> 生成宏观任务和 TacticalProfile
+-> Utility Tactical Resolver 根据当前 state 计算最值得做的战术目标
+-> Behavior Tree 执行确定性动作并验证结果
+```
+
+这套方案适合《星露谷物语》这类多目标场景：冲层、刷矿、刷怪、采集、撤退和顺手机会目标经常互相冲突，不能只靠固定 `if/else`，也不应让 LLM 每 tick 直接判断按键。
+
+#### 目标分层
+
+战术层需要把目标分成三类：
+
+- `Primary Objective`：主目标，决定当前任务是否成功，例如冲到目标层、收集指定矿石、击杀指定怪物。
+- `Blocking Objective`：阻挡主目标的问题，例如怪物堵住梯子、石头挡住通路、障碍物阻挡交互站位。
+- `Opportunity Objective`：顺手目标，例如路线旁边的矿石、宝石、低风险怪物或未来可记忆的资源点。
+
+例如“冲层但顺手挖容易拿到的矿石”不是 `RUSH_LEVEL` 和 `RESOURCE_FARM` 二选一，而是：
+
+```text
+Primary Objective: RUSH_LEVEL
+Blocking Policy: HANDLE_IF_BLOCKING
+Opportunity Policy: EASY_ORE_ONLY
+```
+
+机会目标必须有预算，否则 Agent 容易从“冲层”退化成“看到什么都想做”：
+
+- 最大绕路格数。
+- 最大机会动作次数。
+- 最大额外耗时。
+- 最大风险分数。
+- 是否只处理当前路径附近目标。
+
+#### TacticalProfile
+
+未来 AI / Planner 不应该直接返回每帧动作，而应返回宏观任务和战术倾向参数，例如：
+
+```python
+TacticalProfile(
+    primary_objective="RUSH_LEVEL",
+    risk_tolerance=0.4,
+    opportunity_policy=OpportunityPolicy(
+        enabled=True,
+        targets=["Ore Node", "Gem Node"],
+        max_detour_tiles=2,
+        max_actions=3,
+        max_extra_seconds=6.0,
+        max_risk_score=0.2,
+        only_if_on_path=True,
+    ),
+)
+```
+
+不同任务通过参数改变倾向，而不是复制多套节点：
+
+- 冲层：下楼优先；怪物只有挡路或贴脸才处理；机会矿石只允许低风险、低绕路。
+- 刷矿：目标资源优先；梯子可以作为机会目标；允许更大绕路和更多机会动作。
+- 刷怪：怪物是主目标；资源采集降级为机会目标。
+- 撤退：生存和离开矿洞优先；非必要战斗和采矿全部降级。
+
+#### Utility Tactical Resolver
+
+战术层应抽象成 `Utility Tactical Resolver`，输入当前任务、TacticalProfile、游戏 state、候选目标、怪物威胁、地形和资源状态，输出结构化决策：
+
+```python
+TacticalDecision(
+    decision_type="CONTINUE_PRIMARY"
+    | "BREAK_BLOCKING_STONE"
+    | "COLLECT_OPPORTUNITY"
+    | "ENGAGE_THREAT"
+    | "REROUTE"
+    | "DEFER_OBJECTIVE"
+    | "RETREAT",
+    reason="铜矿在当前路线旁 1 格，风险低，机会预算充足",
+)
+```
+
+第一版评分可以保持简单：
+
+```text
+score = 主目标收益
+      + 阻挡解除收益
+      + 机会收益
+      - 距离成本
+      - 绕路成本
+      - 风险成本
+      - 时间成本
+      - 资源成本
+      - 机会预算消耗
+```
+
+示例：
+
+- 冲层时梯子已出现：`进入梯子` 分数最高。
+- 怪物堵住梯子：`ENGAGE_THREAT` 或 `REROUTE` 取决于风险和绕路成本。
+- 路线旁 1 格有铜矿且无怪物：`COLLECT_OPPORTUNITY` 可以短暂抢占。
+- 铜矿离路线 8 格：绕路成本超过预算，继续主目标。
+- 低血或时间过晚：`RETREAT` 分数上升。
+
+#### 与行为树的职责边界
+
+- LLM / Planner：生成宏观任务、TacticalProfile 和失败后的补计划。
+- Tactical Resolver：决定当前 tick 最值得推进的战术目标；不直接按键。
+- DefendNode：只执行战斗动作，例如切武器、接近、面向、攻击和验证威胁解除；不要自己决定长期是否恋战。
+- MineNode：只执行采矿/下楼/破石等确定性目标；遇到怪物、机会矿石或目标冲突时询问战术层。
+- Behavior Tree：继续负责节点优先级、跨节点抢占、动作发送、状态验证、失败重试和安全 `IDLE`。
+
+#### 推荐落地顺序
+
+1. 在 Mining 内先实现最小 `TacticalProfile` 和 `TacticalDecision` 数据结构。
+2. 把现有 Mining / Defend 中散落的怪物风险、换石头、绕路和贴脸攻击判断收束到 `MiningTacticalResolver`。
+3. 先支持三个 profile：
+   - `RUSH_LEVEL`：冲层，允许低成本机会矿石。
+   - `RESOURCE_FARM`：刷矿，允许更高机会预算。
+   - `COMBAT_FARM`：刷怪，主动选择目标怪物。
+4. 先只让机会目标支持矿石 / 宝石节点，不急着接入所有采集物。
+5. 当 Mining 稳定后，再把通用战术层扩展给 Route、Farm、Chest 和未来交易/制作模块。
+
+### 工具动作后处理通用方案
+
+目标：把挖矿、清障、砍树、锄地、浇水、打木箱等“使用工具后可能产生副作用”的问题抽成通用底座，而不是只在 MiningNode 内补丁式处理。
+
+这类问题不只存在于 Mining：
+
+- Mining 挥镐可能打碎 Stone / MiningNode，生成 Ladder、矿石、晶球或掉落物。
+- Route / Farm 清障打碎 Stone、砍树、清 Twig / Weeds 时，也可能产生掉落物。
+- Farm 锄地、浇水、清障会遇到工具动作收招、结果验证、背包容量和掉落物拾取问题。
+- 打木箱/木桶需要用武器或工具破坏，并处理掉落物。
+- 挖到晶球或触发提示框时，阻塞菜单可能暂停后续所有动作。
+
+推荐边界：
+
+```text
+业务节点（MineNode / FarmNode / ClearObstacleNode / 未来 BreakContainerNode）
+-> 发送 USE_TOOL / USE_ITEM / ATTACK
+-> ToolActionTracker 等待 UsingTool / CanMove 完成
+-> ToolAftermathService 处理工具动作后的副作用
+-> 业务节点继续用最新 state 验证自己的目标结果
+```
+
+不要把这些能力合并成一个巨大 `UseToolNode`。原因是不同业务的成功判定不同：
+
+- 挖石头：Stone / MiningNode 消失，或目标 tile 出现 Ladder。
+- 砍树：Tree 阶段变化、倒下或消失。
+- 锄地：目标地块出现 HoeDirt。
+- 浇水：目标作物或地块变为 watered。
+- 打木箱/木桶：容器消失并可能产生掉落物。
+
+通用层只处理“工具动作之后系统层面的副作用”，业务节点仍负责判断“我的目标是否完成”。
+
+#### UiGuardNode
+
+优先实现一个高优先级通用节点，用于分类并处理非预期阻塞 UI。
+
+建议挂载位置：
+
+```text
+Selector
+├── Sequence("Guard")
+│   ├── UiGuardNode
+│   └── DefendNode
+├── Route
+├── Chest
+├── Farm
+├── Mining
+└── Think
+```
+
+职责：
+
+- 读取 C# Observer 暴露的菜单/阻塞状态。
+- 如果存在晶球提示、拾取提示、打烊、上锁或其他会阻塞玩家行动的 DialogueBox，先分类为结构化 UI 事件，再按策略关闭。
+- 只处理“解除阻塞”和“事件归一化”，不消费业务任务，不判断采矿、清障、Farm、NPC 或商店目标是否完成。
+- 关闭后把 `ActionFeedbackEvent` 写入 blackboard；若是打烊/上锁等业务失败事件，则触发重新规划，若只是晶球提示等普通阻塞事件，则让原任务下一 tick 继续。
+
+短期验收：
+
+- 挖矿过程中触发晶球提示后，Agent 能自动关闭提示并继续当前 MiningTask。
+- Route / Farm 清障触发类似提示时，也不会卡住行为树。
+- 没有菜单时节点快速返回 `FAILURE`，不干扰其他分支；遇到 NPC、商店、箱子等业务节点登记的 `InteractionSession` 时，不误关预期 UI。
+
+#### ToolAftermathService
+
+建议新增轻量服务层，而不是一开始就做复杂节点。
+
+职责：
+
+- 在工具动作收招后读取最新 state。
+- 检查是否有阻塞菜单，需要时写入 blackboard 或直接让 `UiGuardNode` 抢占。
+- 检查是否产生新掉落物、新采集物或关键结果，例如 Ladder。
+- 生成结构化 aftermath 结果，供业务节点决定下一步。
+
+示例结构：
+
+```python
+ToolAftermathResult(
+    has_blocking_menu=True,
+    new_ladder_tile=Tile(12, 20),
+    loot_tiles=[Tile(13, 20), Tile(14, 20)],
+    should_collect_loot=True,
+)
+```
+
+短期只需要支持 Mining / ClearObstacle 的最小信息；不要一开始就追求完整物品分类。
+
+#### 掉落物与拾取策略
+
+掉落物管理建议分成两层：
+
+1. `LootAwarenessService`：识别当前场景掉落物、位置和可拾取状态。
+2. `CollectLootNode`：根据 blackboard 中的拾取请求移动并捡起。
+
+拾取策略不要写死在节点里，应由业务模块或战术层决定：
+
+- Mining 冲层：只捡路径旁、距离很近、低风险的掉落物；主目标仍是下楼。
+- Mining 刷矿：可批量挖完一片区域后统一拾取。
+- Route 清障：只顺路拾取，不为掉落物绕远路。
+- Farm 清障：可在清完规划区域后批量拾取木材、石头、纤维等。
+- Combat / Defend：战斗结束且安全后再拾取。
+
+短期建议先实现两种模式：
+
+- `IMMEDIATE`：工具动作后立刻尝试拾取附近掉落物。
+- `BATCH`：业务阶段结束后统一拾取已记录的掉落物。
+
+#### Mining 目标类型扩展
+
+Mining P2 不应只理解 Stone / MiningNode。后续需要把矿井内目标抽象成结构化 `MineTarget`：
+
+```text
+MineTarget
+├── Collectible      徒手拾取：地晶、石英、火水晶等
+├── MiningNode       镐子挖：铜矿、铁矿、宝石矿等
+├── Stone            镐子挖：普通石头
+├── BreakableBox     武器打破：木箱 / 木桶
+└── Ladder           交互：进入下一层
+```
+
+不同目标绑定不同执行方式：
+
+- `Collectible`：移动到可拾取范围，使用交互或直接走近拾取，并验证物品进入背包或地图目标消失。
+- `MiningNode` / `Stone`：切 Pickaxe，站到相邻格，面向目标，挥镐，等待收招，验证目标消失或资源变化。
+- `BreakableBox`：切武器，站到相邻格，面向目标，攻击，等待动作结束，验证容器消失并处理掉落物。
+- `Ladder`：站到可交互位置，足够贴近并交互，验证 `MineLevel` 变化。
+
+目标选择由 Mining 目标选择器或战术层决定，不应散落在 MineNode 的各个分支里。
+
+#### 推荐讨论和开发顺序
+
+后续按以下顺序逐项商讨和实现：
+
+1. 先设计 C# Observer 如何暴露 `MenuState`，以及 Python 如何把 DialogueBox 文本分类为结构化 UI 事件。
+2. 实现 `UiGuardNode`，优先解决晶球提示框导致的全局卡顿，同时保留打烊/上锁触发重新规划的语义。
+3. 设计 C# Observer 如何暴露矿井采集物、矿石节点、木箱/木桶和掉落物。
+4. 抽象 `MineTarget` 与 Mining 目标选择器，先支持 Collectible / MiningNode / Stone / BreakableBox / Ladder 的基础分类。
+5. 设计 `ToolAftermathService`，先用于 Mining 和 ClearObstacle，避免每个节点重复处理菜单、掉落物和 Ladder 查询。
+6. 实现 `CollectLootNode` 的最小版本，先支持附近掉落物拾取，再扩展批量拾取。
+7. 将稳定后的工具后处理能力逐步回流 Route 清障、Farm 清障、砍树和未来战斗掉落。
+
 ### Mining P2：基础采矿与资源节点选择
 
 目标：从“找下一层”扩展到“打碎指定数量资源节点”。

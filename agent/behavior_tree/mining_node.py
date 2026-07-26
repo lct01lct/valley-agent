@@ -2,7 +2,15 @@ import json
 import time
 from typing import Literal
 
+from agent.action.combat.combat_tactical_resolver import (
+    CombatTacticalResolver,
+    MiningObjectiveContext,
+    MiningObjectiveType,
+    TacticalDecision,
+)
 from agent.action.location.location import Location
+from agent.action.combat.monster_threat import MonsterThreat, MonsterThreatEvaluator
+from agent.action.valley_action.AStar import RouteTile, astar_solver
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
 from agent.base_task import BaseTask, TaskType
@@ -33,6 +41,8 @@ MINE_INTERACT_RETRY_INTERVAL_SECONDS = 0.45
 MINE_TOOL_START_GRACE_SECONDS = 0.35
 MINE_TOOL_FINISH_TIMEOUT_SECONDS = 3.0
 MAX_STONE_ATTEMPTS = 8
+MINE_INTERACT_CLOSE_EDGE_MARGIN = 0.0
+MINE_INTERACT_CLOSE_EDGE_DEAD_ZONE = 4.0
 
 
 class MiningTask(BaseTask):
@@ -59,6 +69,9 @@ class MineNode(BTNode):
 
     def __init__(self) -> None:
         self.positioning_controller = PositioningController()
+        self.approach_positioning_controller = PositioningController()
+        self.threat_evaluator = MonsterThreatEvaluator()
+        self.tactical_resolver = CombatTacticalResolver()
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=MINE_TOOL_START_GRACE_SECONDS,
             finish_timeout_seconds=MINE_TOOL_FINISH_TIMEOUT_SECONDS,
@@ -69,11 +82,14 @@ class MineNode(BTNode):
         self._started_at: float | None = None
         self._target_tile: Tile | None = None
         self._detected_ladder_tile: Tile | None = None
+        self._ladder_pursuit_tile: Tile | None = None
+        self._corridor_ladder_tile: Tile | None = None
         self._active_mine_level: int | None = None
         self._return_prompt_tiles: set[Tile] = set()
         self._stone_attempt_count = 0
         self._broken_stone_count = 0
         self._failed_stone_tiles: set[Tile] = set()
+        self._deferred_stone_tiles: set[Tile] = set()
         self._last_interact_at = 0.0
         self._has_logged_task = False
         self._last_debug_heartbeat_at = 0.0
@@ -139,8 +155,11 @@ class MineNode(BTNode):
             self._active_mine_level = game_state.mine_level
             self._record_return_prompt_tiles(game_state)
             self.positioning_controller.reset()
+            self.approach_positioning_controller.reset()
             self._target_tile = None
             self._detected_ladder_tile = None
+            self._ladder_pursuit_tile = None
+            self._corridor_ladder_tile = None
             self._last_interact_at = 0.0
 
         if self._phase == "ENTER_MINE":
@@ -163,6 +182,12 @@ class MineNode(BTNode):
                 require_tool_target=True,
                 require_close_to_target=True,
             )
+
+        if self._phase == "BREAK_STONE" and self._target_tile is not None and self._is_stone_tile(
+            game_state,
+            self._target_tile,
+        ):
+            return self._run_break_stone_phase(context, blackboard, game_state, current_task)
 
         ladder = self._select_next_level_ladder(game_state)
         if ladder is not None:
@@ -235,6 +260,8 @@ class MineNode(BTNode):
         if self._target_tile != target_tile:
             self._target_tile = target_tile
             self.positioning_controller.reset()
+            if self._ladder_pursuit_tile != target_tile:
+                self.approach_positioning_controller.reset()
             self._last_interact_at = 0.0
             print(f"\n⛏️ [MineNode] 准备交互{target_name}: target={target_tile}")
             stand_tiles_text = (
@@ -243,6 +270,35 @@ class MineNode(BTNode):
                 else ""
             )
             self._log(f"准备交互{target_name}: target={target_tile}, player={game_state.player_tile}{stand_tiles_text}")
+
+        candidate_stand_tiles = self._build_candidate_stand_tiles(
+            target_tile=target_tile,
+            allow_standing_on_target=allow_standing_on_target,
+            stand_on_target_only=stand_on_target_only,
+            forced_stand_tiles=forced_stand_tiles,
+        )
+        tactical_decision = self._resolve_mining_tactical_decision(
+            blackboard=blackboard,
+            game_state=game_state,
+            objective_type=self._get_interact_objective_type(target_name),
+            target_tile=target_tile,
+            candidate_stand_tiles=candidate_stand_tiles,
+        )
+        if tactical_decision.decision_type in ("ENGAGE", "AVOID"):
+            return "RUNNING"
+
+        if target_name in ("梯子", "破石后出现的梯子") and self._ladder_pursuit_tile == target_tile:
+            if self._should_approach_distant_target(game_state, target_tile):
+                approach_result = self._tick_approach_distant_target(game_state, context, target_tile)
+                if approach_result.status != "FAILED":
+                    self._log(
+                        f"延续梯子接近意图: target={target_tile}, "
+                        f"approach_status={approach_result.status}, reason={approach_result.reason}"
+                    )
+                    return "RUNNING"
+
+            self._ladder_pursuit_tile = None
+            self.approach_positioning_controller.reset()
 
         positioning_result = self._tick_positioning(
             game_state,
@@ -254,8 +310,40 @@ class MineNode(BTNode):
             stand_on_target_only=stand_on_target_only,
             forced_stand_tiles=forced_stand_tiles,
             require_close_to_target=require_close_to_target,
+            close_edge_margin=MINE_INTERACT_CLOSE_EDGE_MARGIN,
+            close_edge_dead_zone=MINE_INTERACT_CLOSE_EDGE_DEAD_ZONE,
         )
         if positioning_result.status == "FAILED":
+            if target_name in ("梯子", "破石后出现的梯子") and self._should_approach_distant_target(
+                game_state,
+                target_tile,
+            ):
+                approach_result = self._tick_approach_distant_target(game_state, context, target_tile)
+                if approach_result.status != "FAILED":
+                    self._ladder_pursuit_tile = target_tile
+                    self._log(
+                        f"梯子较远且当前视野无法直接规划站位，先接近目标: target={target_tile}, "
+                        f"approach_status={approach_result.status}, reason={approach_result.reason}"
+                    )
+                    return "RUNNING"
+
+            if target_name in ("梯子", "破石后出现的梯子"):
+                self._ladder_pursuit_tile = None
+                self.approach_positioning_controller.reset()
+                corridor_stone = self._select_corridor_stone_toward_tile(game_state, target_tile)
+                if corridor_stone is not None:
+                    self._phase = "BREAK_STONE"
+                    self._target_tile = corridor_stone
+                    self._corridor_ladder_tile = target_tile
+                    self._stone_attempt_count = 0
+                    self.positioning_controller.reset()
+                    self.tool_action_tracker.reset()
+                    self._log(
+                        f"梯子不可达，先挖通路石头: ladder={target_tile}, "
+                        f"stone={corridor_stone}, player={game_state.player_tile}"
+                    )
+                    return "RUNNING"
+
             return self._fail(
                 context,
                 blackboard,
@@ -264,10 +352,16 @@ class MineNode(BTNode):
             )
 
         if positioning_result.status in ("MOVING", "FACING"):
+            self._ladder_pursuit_tile = None
+            self.approach_positioning_controller.reset()
             return "RUNNING"
+
+        self._ladder_pursuit_tile = None
+        self.approach_positioning_controller.reset()
 
         now = time.time()
         if now - self._last_interact_at < MINE_INTERACT_RETRY_INTERVAL_SECONDS:
+            context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             return "RUNNING"
 
         self._last_interact_at = now
@@ -300,14 +394,19 @@ class MineNode(BTNode):
             )
 
         if self._target_tile is None:
+            select_started_at = time.time()
             self._target_tile = self._select_nearest_stone_tile(game_state)
+            select_elapsed = time.time() - select_started_at
             self._stone_attempt_count = 0
             self.positioning_controller.reset()
             self.tool_action_tracker.reset()
             if self._target_tile is None:
                 return self._fail(context, blackboard, current_task, "当前矿层没有发现可挖 Stone / MiningNode")
             print(f"\n⛏️ [MineNode] 没有发现梯子，准备破坏石头: target={self._target_tile}")
-            self._log(f"选择破坏石头: target={self._target_tile}, player={game_state.player_tile}")
+            self._log(
+                f"选择破坏石头: target={self._target_tile}, player={game_state.player_tile}, "
+                f"elapsed={select_elapsed:.3f}s"
+            )
 
         if not is_current_tool(game_state, PICKAXE_TOOL_NAME):
             blackboard.require_switch_tool = True
@@ -325,12 +424,18 @@ class MineNode(BTNode):
             )
             if tool_status == "FINISHED":
                 self.tool_action_tracker.reset()
-                if self._is_stone_gone_or_ladder_found(game_state, self._target_tile):
+                if self._is_current_stone_done(game_state, self._target_tile) or self._has_ladder_at_tile(
+                    game_state,
+                    self._target_tile,
+                ):
                     self._mark_current_stone_done_after_tile_query(context, game_state)
+                    if self._detected_ladder_tile is None and self._target_tile is None:
+                        return self._run_break_stone_phase(context, blackboard, game_state, current_task)
                 elif self._stone_attempt_count >= MAX_STONE_ATTEMPTS:
                     self._failed_stone_tiles.add(self._target_tile)
                     self._log(f"石头重试耗尽，加入失败集合: target={self._target_tile}")
                     self._target_tile = None
+                    self._corridor_ladder_tile = None
                     self.positioning_controller.reset()
                 return "RUNNING"
             if tool_status == "TIMEOUT":
@@ -339,12 +444,52 @@ class MineNode(BTNode):
                     self._failed_stone_tiles.add(self._target_tile)
                 self._log(f"挥镐等待超时，换下一个石头: target={self._target_tile}")
                 self._target_tile = None
+                self._corridor_ladder_tile = None
                 self.positioning_controller.reset()
                 return "RUNNING"
             return "RUNNING"
 
-        if self._target_tile is not None and self._is_stone_gone_or_ladder_found(game_state, self._target_tile):
+        if self._target_tile is not None and (
+            self._is_current_stone_done(game_state, self._target_tile)
+            or self._has_ladder_at_tile(game_state, self._target_tile)
+        ):
             self._mark_current_stone_done_after_tile_query(context, game_state)
+            if self._detected_ladder_tile is None and self._target_tile is None:
+                return self._run_break_stone_phase(context, blackboard, game_state, current_task)
+            return "RUNNING"
+
+        interrupt_stone = None
+        if self._corridor_ladder_tile is None:
+            interrupt_stone = self._select_nearby_interrupt_stone(game_state, self._target_tile)
+        if interrupt_stone is not None:
+            self._log(
+                f"移动途中发现更近可挖石头，切换目标: old={self._target_tile}, "
+                f"new={interrupt_stone}, player={game_state.player_tile}"
+            )
+            self._target_tile = interrupt_stone
+            self._corridor_ladder_tile = None
+            self._stone_attempt_count = 0
+            self.positioning_controller.reset()
+            self.tool_action_tracker.reset()
+        tactical_decision = self._resolve_mining_tactical_decision(
+            blackboard=blackboard,
+            game_state=game_state,
+            objective_type="STONE",
+            target_tile=self._target_tile,
+            candidate_stand_tiles=self._build_cardinal_neighbor_tiles(self._target_tile),
+        )
+        if tactical_decision.decision_type in ("ENGAGE", "AVOID"):
+            return "RUNNING"
+        if tactical_decision.decision_type == "DEFER_OBJECTIVE":
+            self._deferred_stone_tiles.add(self._target_tile)
+            self._log(
+                f"战术层暂缓当前石头，换下一个目标: target={self._target_tile}, "
+                f"reason={tactical_decision.reason}"
+            )
+            self._target_tile = None
+            self._corridor_ladder_tile = None
+            self.positioning_controller.reset()
+            self.tool_action_tracker.reset()
             return "RUNNING"
 
         positioning_result = self._tick_positioning(game_state, context, self._target_tile)
@@ -352,6 +497,7 @@ class MineNode(BTNode):
             self._failed_stone_tiles.add(self._target_tile)
             self._log(f"石头站位失败，换下一个: target={self._target_tile}, reason={positioning_result.reason}")
             self._target_tile = None
+            self._corridor_ladder_tile = None
             self.positioning_controller.reset()
             return "RUNNING"
 
@@ -388,23 +534,29 @@ class MineNode(BTNode):
         stand_on_target_only: bool = False,
         forced_stand_tiles: set[Tile] | None = None,
         require_close_to_target: bool = False,
+        close_edge_margin: float = 2.0,
+        close_edge_dead_zone: float = 4.0,
     ) -> PositioningResult:
-        if forced_stand_tiles is not None:
-            candidate_stand_tiles = forced_stand_tiles
-        elif stand_on_target_only:
-            candidate_stand_tiles = {target_tile}
-        else:
-            candidate_stand_tiles = self._build_cardinal_neighbor_tiles(target_tile)
-            if allow_standing_on_target:
-                candidate_stand_tiles.add(target_tile)
+        candidate_stand_tiles = self._build_candidate_stand_tiles(
+            target_tile=target_tile,
+            allow_standing_on_target=allow_standing_on_target,
+            stand_on_target_only=stand_on_target_only,
+            forced_stand_tiles=forced_stand_tiles,
+        )
+        extra_blocked_tiles = {target_tile} if block_target else set()
+        extra_blocked_tiles.update(self._get_tactical_blocked_tiles(game_state))
+        extra_blocked_tiles.discard(game_state.player_tile)
+
         positioning_result = self.positioning_controller.tick(
             game_state,
             PositioningGoal(
                 candidate_stand_tiles=candidate_stand_tiles,
                 tool_target_tile=target_tile if require_tool_target else None,
-                extra_blocked_tiles={target_tile} if block_target else set(),
+                extra_blocked_tiles=extra_blocked_tiles,
                 allowed_blocked_tiles={target_tile} if allow_standing_on_target else set(),
                 require_close_to_target=require_close_to_target,
+                close_edge_margin=close_edge_margin,
+                close_edge_dead_zone=close_edge_dead_zone,
             ),
         )
 
@@ -419,6 +571,93 @@ class MineNode(BTNode):
         )
         return positioning_result
 
+    def _should_approach_distant_target(self, game_state: StardewState, target_tile: Tile) -> bool:
+        scan_range = game_state.scan_range or 0
+        if scan_range <= 0:
+            return False
+        return self._tile_distance(game_state.player_tile, target_tile) > max(6, scan_range // 2)
+
+    def _tick_approach_distant_target(
+        self,
+        game_state: StardewState,
+        context: PlayerContext,
+        target_tile: Tile,
+    ) -> PositioningResult:
+        candidate_tiles = self._build_approach_candidate_tiles(game_state, target_tile)
+        if not candidate_tiles:
+            return PositioningResult(status="FAILED", reason="没有可用接近点")
+
+        threat_snapshot = self.threat_evaluator.evaluate(game_state)
+        positioning_result = self.approach_positioning_controller.tick(
+            game_state,
+            PositioningGoal(
+                candidate_stand_tiles=candidate_tiles,
+                tool_target_tile=None,
+                extra_blocked_tiles=self._get_tactical_blocked_tiles(game_state, threat_snapshot),
+            ),
+        )
+        if positioning_result.command is not None:
+            context.executor_client.send_command(positioning_result.command)
+
+        self._log(
+            f"远距离接近目标: target={target_tile}, candidates={self._format_tiles(candidate_tiles)}, "
+            f"status={positioning_result.status}, stand={positioning_result.stand_tile}, "
+            f"reason={positioning_result.reason}, positioning={self.approach_positioning_controller.get_debug_snapshot()}"
+        )
+        return positioning_result
+
+    def _build_approach_candidate_tiles(self, game_state: StardewState, target_tile: Tile) -> set[Tile]:
+        scan_range = game_state.scan_range or 10
+        map_width, map_height = game_state.map_size
+        player_tile = game_state.player_tile
+        dx = target_tile.x - player_tile.x
+        dy = target_tile.y - player_tile.y
+        max_axis_distance = max(abs(dx), abs(dy))
+        if max_axis_distance == 0:
+            return set()
+
+        candidates: set[Tile] = set()
+        current_distance_to_target = self._tile_distance(player_tile, target_tile)
+        max_approach_distance = max(3, min(scan_range - 3, max_axis_distance - 2))
+        approach_distances = sorted(
+            {
+                3,
+                max_approach_distance,
+                max(3, max_approach_distance // 3),
+                max(3, (max_approach_distance * 2) // 3),
+            }
+        )
+
+        for approach_distance in approach_distances:
+            approach_ratio = approach_distance / max_axis_distance
+            center_tile = Tile(
+                player_tile.x + round(dx * approach_ratio),
+                player_tile.y + round(dy * approach_ratio),
+            )
+
+            for offset_x in (-2, -1, 0, 1, 2):
+                for offset_y in (-2, -1, 0, 1, 2):
+                    tile = Tile(center_tile.x + offset_x, center_tile.y + offset_y)
+                    if tile.x < 0 or tile.y < 0 or tile.x >= map_width or tile.y >= map_height:
+                        continue
+                    if tile == player_tile:
+                        continue
+                    if tile == target_tile:
+                        continue
+                    if self._tile_distance(tile, target_tile) >= current_distance_to_target:
+                        continue
+                    candidates.add(tile)
+        return candidates
+
+    def _get_tactical_blocked_tiles(self, game_state: StardewState, threat_snapshot=None) -> set[Tile]:
+        snapshot = threat_snapshot or self.threat_evaluator.evaluate(game_state)
+        blocked_tiles = set(snapshot.blocking_tiles)
+        for tile, risk_score in snapshot.risk_tiles.items():
+            if risk_score >= 2.0:
+                blocked_tiles.add(tile)
+        blocked_tiles.discard(game_state.player_tile)
+        return blocked_tiles
+
     def _build_cardinal_neighbor_tiles(self, target_tile: Tile) -> set[Tile]:
         return {
             Tile(target_tile.x + 1, target_tile.y),
@@ -426,6 +665,23 @@ class MineNode(BTNode):
             Tile(target_tile.x, target_tile.y + 1),
             Tile(target_tile.x, target_tile.y - 1),
         }
+
+    def _build_candidate_stand_tiles(
+        self,
+        target_tile: Tile,
+        allow_standing_on_target: bool = False,
+        stand_on_target_only: bool = False,
+        forced_stand_tiles: set[Tile] | None = None,
+    ) -> set[Tile]:
+        if forced_stand_tiles is not None:
+            return forced_stand_tiles
+        if stand_on_target_only:
+            return {target_tile}
+
+        candidate_stand_tiles = self._build_cardinal_neighbor_tiles(target_tile)
+        if allow_standing_on_target:
+            candidate_stand_tiles.add(target_tile)
+        return candidate_stand_tiles
 
     def _build_mine_entrance_stand_tiles(self, entrance_tile: Tile) -> set[Tile]:
         return self._build_cardinal_neighbor_tiles(entrance_tile)
@@ -482,18 +738,194 @@ class MineNode(BTNode):
         )
 
     def _select_nearest_stone_tile(self, game_state: StardewState) -> Tile | None:
-        stone_tiles: set[Tile] = {node.tile for node in game_state.mining_nodes if node.tile not in self._failed_stone_tiles}
-        stone_tiles.update(tile for tile in game_state.layers.get("Stone", set()) if tile not in self._failed_stone_tiles)
+        excluded_tiles = self._failed_stone_tiles | self._deferred_stone_tiles
+        stone_tiles = self._get_candidate_stone_tiles(game_state, excluded_tiles)
+        if not stone_tiles and self._deferred_stone_tiles:
+            self._log(f"没有非暂缓石头，清空暂缓集合后重新选择: deferred={self._format_tiles(self._deferred_stone_tiles)}")
+            self._deferred_stone_tiles = set()
+            return self._select_nearest_stone_tile(game_state)
+
+        threat_snapshot = self.threat_evaluator.evaluate(game_state)
+        stone_tiles = {tile for tile in stone_tiles if tile not in threat_snapshot.blocking_tiles}
         if not stone_tiles:
             return None
-        return min(stone_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
 
-    def _is_stone_gone_or_ladder_found(self, game_state: StardewState, target_tile: Tile) -> bool:
-        if self._has_next_level_ladder(game_state):
-            return True
-        if target_tile not in game_state.mining_nodes_by_tile and target_tile not in game_state.layers.get("Stone", set()):
-            return True
-        return False
+        reachable_stone = self._select_reachable_stone_with_single_astar(game_state, stone_tiles, threat_snapshot)
+        if reachable_stone is None:
+            return min(
+                stone_tiles,
+                key=lambda tile: (
+                    threat_snapshot.risk_tiles.get(tile, 0.0),
+                    self._tile_distance(game_state.player_tile, tile),
+                ),
+            )
+
+        return reachable_stone
+
+    def _select_reachable_stone_with_single_astar(
+        self,
+        game_state: StardewState,
+        stone_tiles: set[Tile],
+        threat_snapshot: MonsterThreat,
+    ) -> Tile | None:
+        """
+        用一次多目标 A* 选择最近可挖石头。
+
+        旧逻辑会对每块石头分别跑一次 A*；矿层较大时，破坏一块石头后会明显卡顿。
+        这里把所有石头的上下左右候选站位合并成目标集合，只跑一次 A*，再反查该站位对应的石头。
+        """
+        map_width, map_height = game_state.map_size
+        tactical_blocked_tiles = self._get_tactical_blocked_tiles(game_state, threat_snapshot)
+        blocked_tiles = astar_solver._get_blocked_tiles(game_state) | tactical_blocked_tiles
+        blocked_tiles.discard(game_state.player_tile)
+
+        stand_to_stones: dict[Tile, list[Tile]] = {}
+        for stone_tile in stone_tiles:
+            for stand_tile in self._build_cardinal_neighbor_tiles(stone_tile):
+                if not 0 <= stand_tile.x < map_width or not 0 <= stand_tile.y < map_height:
+                    continue
+                if stand_tile in blocked_tiles:
+                    continue
+                stand_to_stones.setdefault(stand_tile, []).append(stone_tile)
+
+        if not stand_to_stones:
+            return None
+
+        path = self._build_path_to_tiles(
+            game_state,
+            set(stand_to_stones),
+            tactical_blocked_tiles,
+        )
+        if not path:
+            return None
+
+        reached_stand_tile = Tile(path[-1].x, path[-1].y)
+        candidate_stones = stand_to_stones.get(reached_stand_tile, [])
+        if not candidate_stones:
+            return None
+
+        return min(
+            candidate_stones,
+            key=lambda tile: (
+                threat_snapshot.risk_tiles.get(tile, 0.0),
+                self._tile_distance(reached_stand_tile, tile),
+                self._tile_distance(game_state.player_tile, tile),
+            ),
+        )
+
+    def _select_nearby_interrupt_stone(self, game_state: StardewState, current_target: Tile | None) -> Tile | None:
+        if current_target is None:
+            return None
+        if self._tile_distance(game_state.player_tile, current_target) <= 2:
+            return None
+
+        excluded_tiles = self._failed_stone_tiles | self._deferred_stone_tiles | {current_target}
+        nearby_stones = [
+            tile
+            for tile in self._build_cardinal_neighbor_tiles(game_state.player_tile)
+            if tile not in excluded_tiles and self._is_stone_tile(game_state, tile)
+        ]
+        if not nearby_stones:
+            return None
+
+        threat_snapshot = self.threat_evaluator.evaluate(game_state)
+        safe_nearby_stones = [tile for tile in nearby_stones if tile not in threat_snapshot.blocking_tiles]
+        if not safe_nearby_stones:
+            return None
+
+        return min(
+            safe_nearby_stones,
+            key=lambda tile: (
+                threat_snapshot.risk_tiles.get(tile, 0.0),
+                self._tile_distance(tile, current_target),
+            ),
+        )
+
+    def _select_corridor_stone_toward_tile(self, game_state: StardewState, target_tile: Tile) -> Tile | None:
+        excluded_tiles = self._failed_stone_tiles | self._deferred_stone_tiles | {target_tile}
+        stone_tiles = self._get_candidate_stone_tiles(game_state, excluded_tiles)
+        if not stone_tiles:
+            return None
+
+        threat_snapshot = self.threat_evaluator.evaluate(game_state)
+        current_distance_to_target = self._tile_distance(game_state.player_tile, target_tile)
+        scored_stones: list[tuple[tuple[float, int, int, int], Tile]] = []
+        for stone_tile in stone_tiles:
+            if stone_tile in threat_snapshot.blocking_tiles:
+                continue
+            path = self._build_path_to_stone_stand_tiles(game_state, stone_tile, threat_snapshot)
+            if not path:
+                continue
+
+            stone_distance_to_target = self._tile_distance(stone_tile, target_tile)
+            opens_toward_target = stone_distance_to_target < current_distance_to_target
+            score = (
+                threat_snapshot.risk_tiles.get(stone_tile, 0.0),
+                0 if opens_toward_target else 1,
+                len(path),
+                stone_distance_to_target,
+            )
+            scored_stones.append((score, stone_tile))
+
+        if not scored_stones:
+            return None
+
+        return min(scored_stones, key=lambda item: item[0])[1]
+
+    def _get_candidate_stone_tiles(self, game_state: StardewState, excluded_tiles: set[Tile]) -> set[Tile]:
+        stone_tiles: set[Tile] = {node.tile for node in game_state.mining_nodes if node.tile not in excluded_tiles}
+        stone_tiles.update(tile for tile in game_state.layers.get("Stone", set()) if tile not in excluded_tiles)
+        return stone_tiles
+
+    def _is_stone_tile(self, game_state: StardewState, tile: Tile) -> bool:
+        return tile in game_state.mining_nodes_by_tile or tile in game_state.layers.get("Stone", set())
+
+    def _build_path_to_stone_stand_tiles(self, game_state: StardewState, stone_tile: Tile, threat_snapshot=None) -> list[RouteTile]:
+        candidate_stand_tiles = self._build_cardinal_neighbor_tiles(stone_tile)
+        extra_blocked_tiles = {stone_tile}
+        extra_blocked_tiles.update(self._get_tactical_blocked_tiles(game_state, threat_snapshot))
+        extra_blocked_tiles.discard(game_state.player_tile)
+        return self._build_path_to_tiles(game_state, candidate_stand_tiles, extra_blocked_tiles)
+
+    def _build_path_to_tiles(
+        self,
+        game_state: StardewState,
+        candidate_tiles: set[Tile],
+        extra_blocked_tiles: set[Tile] | None = None,
+    ) -> list[RouteTile]:
+        map_width, map_height = game_state.map_size
+        extra_blocked_tiles = extra_blocked_tiles or set()
+        blocked_tiles = astar_solver._get_blocked_tiles(game_state) | extra_blocked_tiles
+        goal_tiles = {
+            RouteTile(tile.x, tile.y, type="walk")
+            for tile in candidate_tiles
+            if 0 <= tile.x < map_width
+            if 0 <= tile.y < map_height
+            if tile not in blocked_tiles
+        }
+        if not goal_tiles:
+            return []
+
+        start = RouteTile(*game_state.player_tile, type="walk")
+
+        def mining_positioning_cost_func(curr, neigh, st, base_c):
+            if neigh != start and neigh in blocked_tiles:
+                return False, float("inf"), "blocked"
+            return True, base_c, "walk"
+
+        path = astar_solver.find_path_to_warp_zone(
+            game_state,
+            start,
+            goal_tiles,
+            cost_function=mining_positioning_cost_func,
+        )
+        return path or []
+
+    def _is_current_stone_done(self, game_state: StardewState, target_tile: Tile) -> bool:
+        return target_tile not in game_state.mining_nodes_by_tile and target_tile not in game_state.layers.get("Stone", set())
+
+    def _has_ladder_at_tile(self, game_state: StardewState, target_tile: Tile) -> bool:
+        return any(ladder.tile == target_tile for ladder in game_state.ladders)
 
     def _has_next_level_ladder(self, game_state: StardewState) -> bool:
         return any(ladder.tile not in self._return_prompt_tiles for ladder in game_state.ladders)
@@ -509,8 +941,10 @@ class MineNode(BTNode):
             f"ladders={self._format_targets(game_state.ladders)}"
         )
         self._target_tile = None
+        self._corridor_ladder_tile = None
         self._stone_attempt_count = 0
         self.positioning_controller.reset()
+        self.approach_positioning_controller.reset()
         self.tool_action_tracker.reset()
 
     def _mark_current_stone_done_after_tile_query(self, context: PlayerContext, game_state: StardewState) -> None:
@@ -528,8 +962,10 @@ class MineNode(BTNode):
                 f"reason={reason}, broken={self._broken_stone_count}"
             )
             self._target_tile = None
+            self._corridor_ladder_tile = None
             self._stone_attempt_count = 0
             self.positioning_controller.reset()
+            self.approach_positioning_controller.reset()
             self.tool_action_tracker.reset()
             return
 
@@ -612,20 +1048,65 @@ class MineNode(BTNode):
 
     def _reset(self) -> None:
         self.positioning_controller.reset()
+        self.approach_positioning_controller.reset()
         self.tool_action_tracker.reset()
         self._phase = None
         self._task_signature = None
         self._started_at = None
         self._target_tile = None
         self._detected_ladder_tile = None
+        self._ladder_pursuit_tile = None
+        self._corridor_ladder_tile = None
         self._active_mine_level = None
         self._return_prompt_tiles = set()
         self._stone_attempt_count = 0
         self._broken_stone_count = 0
         self._failed_stone_tiles = set()
+        self._deferred_stone_tiles = set()
         self._last_interact_at = 0.0
         self._has_logged_task = False
         self._last_debug_heartbeat_at = 0.0
+
+    def _resolve_mining_tactical_decision(
+        self,
+        blackboard: AgentBlackboard,
+        game_state: StardewState,
+        objective_type: MiningObjectiveType,
+        target_tile: Tile,
+        candidate_stand_tiles: set[Tile],
+    ) -> TacticalDecision:
+        threat_snapshot = self.threat_evaluator.evaluate(game_state)
+        decision = self.tactical_resolver.resolve_for_mining(
+            game_state,
+            threat_snapshot,
+            MiningObjectiveContext(
+                objective_type=objective_type,
+                target_tile=target_tile,
+                candidate_stand_tiles=candidate_stand_tiles,
+            ),
+        )
+
+        if decision.decision_type in ("ENGAGE", "AVOID"):
+            blackboard.combat_tactical_decision = decision
+            context_text = (
+                f"objective={objective_type}, target={target_tile}, decision={decision.decision_type}, "
+                f"reason={decision.reason}, threat={self._format_threat(decision.target_threat)}"
+            )
+            self._log(f"写入战术决策并让 Guard 接管: {context_text}")
+        elif decision.decision_type in ("REROUTE", "DEFER_OBJECTIVE"):
+            blackboard.combat_tactical_decision = None
+            self._log(
+                f"战术层调整采矿目标: objective={objective_type}, target={target_tile}, "
+                f"decision={decision.decision_type}, reason={decision.reason}, "
+                f"threat={self._format_threat(decision.target_threat)}"
+            )
+
+        return decision
+
+    def _get_interact_objective_type(self, target_name: str) -> MiningObjectiveType:
+        if target_name == "矿洞入口":
+            return "MINE_ENTRANCE"
+        return "LADDER"
 
     def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:
         return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
@@ -654,6 +1135,8 @@ class MineNode(BTNode):
             f"loc={game_state.location_name}, mine_level={game_state.mine_level}, "
             f"player={game_state.player_tile}, target={self._target_tile}, "
             f"detected_ladder={self._detected_ladder_tile}, "
+            f"ladder_pursuit={self._ladder_pursuit_tile}, "
+            f"corridor_ladder={self._corridor_ladder_tile}, "
             f"stone_attempt={self._stone_attempt_count}, broken={self._broken_stone_count}, "
             f"ladders={self._format_targets(game_state.ladders)}, "
             f"entrances={self._format_targets(game_state.mine_entrances)}, "
@@ -677,6 +1160,16 @@ class MineNode(BTNode):
     def _format_tiles(self, tiles: set[Tile]) -> str:
         ordered_tiles = sorted(tiles, key=lambda tile: (tile.x, tile.y))
         return "[" + ", ".join(str(tile) for tile in ordered_tiles) + "]"
+
+    def _format_threat(self, threat: MonsterThreat | None) -> str:
+        if threat is None:
+            return "None"
+        monster = threat.monster
+        return (
+            f"name={monster.name}, tile={monster.tile}, focused={monster.focused_on_farmer}, "
+            f"search={monster.search_array_size}, health={monster.health}, damage={monster.damage_to_farmer}, "
+            f"distance={threat.distance_to_player}, score={threat.threat_score:.2f}, level={threat.threat_level}"
+        )
 
     def _log(self, message: str) -> None:
         self.mining_debug_logger.log(f"[MineNode] {message}")

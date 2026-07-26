@@ -41,6 +41,11 @@ class InventoryItem:
         self.category: int = int(raw_item.get("Category", 0))
         self.stack: int = int(raw_item.get("Stack", 0))
         self.is_tool: bool = bool(raw_item.get("IsTool", False))
+        self.is_weapon: bool = bool(raw_item.get("IsWeapon", False))
+        self.type_definition_id: str = raw_item.get("TypeDefinitionId", "")
+        self.min_damage: int | None = self._read_optional_int(raw_item, "MinDamage")
+        self.max_damage: int | None = self._read_optional_int(raw_item, "MaxDamage")
+        self.weapon_type: int | None = self._read_optional_int(raw_item, "WeaponType")
         self.water_left: int | None = self._read_optional_int(raw_item, "WaterLeft")
         self.water_capacity: int | None = self._read_optional_int(raw_item, "WaterCapacity")
 
@@ -148,6 +153,48 @@ class MiningNodeState:
         self.parent_sheet_index: int = int(raw_mining_node.get("ParentSheetIndex", -1))
 
 
+class MonsterState:
+    def __init__(self, raw_monster: dict):
+        # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
+        self.name: str = raw_monster.get("Name", "")
+        self.display_name: str = raw_monster.get("DisplayName", "")
+
+        raw_position = raw_monster.get("Position", [0.0, 0.0])
+        self.position = Position(float(raw_position[0]), float(raw_position[1]))
+
+        raw_tile = raw_monster.get("Tile", [0, 0])
+        self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
+
+        self.health: int = int(raw_monster.get("Health", 0))
+        self.max_health: int | None = self._read_optional_int(raw_monster, "MaxHealth")
+        self.damage_to_farmer: int | None = self._read_optional_int(raw_monster, "DamageToFarmer")
+        self.search_array_size: int = int(raw_monster.get("SearchArraySize", 0))
+        self.focused_on_farmer: bool = bool(raw_monster.get("FocusedOnFarmer", False))
+        self.is_invisible: bool = bool(raw_monster.get("IsInvisible", False))
+        self.is_dead: bool = bool(raw_monster.get("IsDead", False))
+        self.distance_to_player: float = float(raw_monster.get("DistanceToPlayer", 0.0))
+
+    @property
+    def key(self) -> tuple[str, int, int]:
+        return (self.name, self.tile.x, self.tile.y)
+
+    def _read_optional_int(self, raw_monster: dict, key: str) -> int | None:
+        value = raw_monster.get(key)
+        if value is None:
+            return None
+        return int(value)
+
+
+class MenuState:
+    def __init__(self, raw_menu_state: dict | None):
+        raw_menu_state = raw_menu_state or {}
+        # 以下字段名来自 C# Observer 的 MenuState 协议，读取时保持原始大小写。
+        self.is_menu_open: bool = bool(raw_menu_state.get("IsMenuOpen", False))
+        self.menu_type: str | None = raw_menu_state.get("MenuType")
+        self.text: str = str(raw_menu_state.get("Text") or "")
+        self.has_text: bool = bool(raw_menu_state.get("HasText", bool(self.text)))
+
+
 class StardewState:
     def __init__(self, raw_json_data: dict):
         self.location_name: Location = raw_json_data.get("location_name", "UnknownScene")
@@ -168,6 +215,7 @@ class StardewState:
         self.can_move: bool = bool(raw_json_data.get("CanMove", True))
         self.is_player_free: bool = bool(raw_json_data.get("IsPlayerFree", True))
         self.can_player_move: bool = bool(raw_json_data.get("CanPlayerMove", self.can_move))
+        self.menu_state = MenuState(raw_json_data.get("MenuState"))
         self.mine_level: int | None = self._read_optional_int(raw_json_data, "MineLevel")
         self.inventory = InventoryState(
             {
@@ -177,6 +225,11 @@ class StardewState:
             }
         )
         self.tool_target = ToolTargetState(raw_json_data.get("ToolTarget"))
+
+        self.monsters: list[MonsterState] = []
+        for raw_monster in raw_json_data.get("Monsters", []):
+            if isinstance(raw_monster, dict):
+                self.monsters.append(MonsterState(raw_monster))
 
         self.ladders: list[MineInteractTargetState] = []
         raw_ladders = raw_json_data.get("Ladders")

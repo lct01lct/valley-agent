@@ -1,8 +1,64 @@
-from typing import List
+from typing import Any, List, Literal
 
 from agent.action.location.location import Location
 from agent.base_task import BaseTask
 from server.type import Tile
+
+
+type InteractionOwner = Literal[
+    "Route",  # 路线/传送/建筑入口等移动交互
+    "Chest",  # 箱子打开、取物、存物等箱子菜单交互
+    "Farm",  # 农业模块主动触发的工具/物品/确认菜单交互
+    "Mining",  # 采矿模块主动触发的矿洞入口、梯子、工具动作反馈
+    "Npc",  # 未来 NPC 对话、送礼和任务对话
+    "Shop",  # 未来商店购买/出售菜单
+    "Guard",  # Guard 自身发起的保护性 UI 处理
+]
+
+type FeedbackEventType = Literal[
+    "LOCATION_CLOSED",  # 建筑或地点打烊，当前 Route/交互任务需要重新规划
+    "LOCKED_DOOR",  # 门、建筑或入口上锁，当前交互无法继续
+    "TOOL_REWARD_NOTICE",  # 使用工具后出现的奖励/提示，例如挖到晶球
+    "BLOCKING_DIALOG",  # 普通阻塞对话或提示框，关闭后通常可继续原任务
+    "UNKNOWN_BLOCKING_UI",  # 未分类阻塞 UI，保守关闭并记录上下文
+]
+
+
+class InteractionSession:
+    def __init__(
+        self,
+        owner: InteractionOwner,
+        intent: str,
+        target_name: str | None = None,
+        target_tile: Tile | None = None,
+        expected_menu_types: set[str] | None = None,
+    ) -> None:
+        self.owner = owner
+        self.intent = intent
+        self.target_name = target_name
+        self.target_tile = target_tile
+        self.expected_menu_types = expected_menu_types or set()
+
+    def matches_menu_type(self, menu_type: str | None) -> bool:
+        return bool(menu_type) and menu_type in self.expected_menu_types
+
+
+class ActionFeedbackEvent:
+    def __init__(
+        self,
+        event_type: FeedbackEventType,
+        source_owner: InteractionOwner | None = None,
+        text: str = "",
+        target_name: str | None = None,
+        target_tile: Tile | None = None,
+        should_replan: bool = False,
+    ) -> None:
+        self.event_type = event_type
+        self.source_owner = source_owner
+        self.text = text
+        self.target_name = target_name
+        self.target_tile = target_tile
+        self.should_replan = should_replan
 
 
 class BorrowedChestItem:
@@ -46,6 +102,12 @@ class AgentBlackboard:
         self.is_opening_door = False
         self.should_reset_route = False
 
+        # 全局 UI / 交互反馈
+        # InteractionSession 用于标记“当前菜单属于哪个业务节点”，避免 Guard 误关 NPC/商店/箱子等预期 UI。
+        self.pending_interaction: InteractionSession | None = None
+        # ActionFeedbackEvent 用于把打烊、上锁、晶球提示等 UI 文本转换为结构化事件。
+        self.action_feedback_event: ActionFeedbackEvent | None = None
+
         # 清理可破坏障碍物
         self.require_clear_obstacle = False
         self.clear_obstacle_owner: str | None = None
@@ -75,3 +137,8 @@ class AgentBlackboard:
         # 记录本轮计划中“从哪个箱子取出了哪些工具”，用于 Farm 结束后把工具放回原箱子。
         # 这是临时调度事实，不等同于长期 ChestSemanticMemory。
         self.borrowed_chest_items: list[BorrowedChestItem] = []
+
+        # 战术决策
+        # 由 Mining 等业务节点写入，Guard/DefendNode 消费。
+        # 这里用 Any 避免 blackboard 与 combat action 层形成强耦合。
+        self.combat_tactical_decision: Any | None = None

@@ -37,6 +37,7 @@ class ValleyAgent:
                 Sequence(
                     node_name="Guard",
                     children=[
+                        SwitchToolNode(owner="Guard"),
                         Defend_Node(),
                     ],
                 ),

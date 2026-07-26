@@ -199,13 +199,13 @@ TASK_MOCK_DATA: Dict[
         ),
     ],
     "MINING_P0_1": [  # Mining P0：前往矿洞，进入第一层，找到/挖出梯子并进入第二层。
-        RouteTask(task_type="ROUTE", desc="前往矿洞", target_loc="Mine"),
+        # RouteTask(task_type="ROUTE", desc="前往矿洞", target_loc="Mine"),
         MiningTask(
             task_type="MINE",
             desc="进入矿洞第一层并找到下一层",
             mine_action="FIND_NEXT_LEVEL",
             target_loc="Mine",
-            target_mine_level=4,
+            target_mine_level=10,
         ),
     ],
 }

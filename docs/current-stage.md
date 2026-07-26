@@ -295,10 +295,11 @@ Chest P2/P3 约定：
 2. 若 P0 实测失败，优先检查 `logs/mining_node_debug.log` 中的 `MineLevel`、`MineEntrances`、`Ladders`、`MiningNodes` 和站位日志。
 3. 第二层开始接入 Defend：识别怪物，先实现躲避和近身攻击，保证 Mining 测试安全。
 4. 扩展 Mining 基础采矿：打碎指定数量 Stone / MiningNode，验证节点消失。
-5. 在 Mining 中实现资源管理底座：体力检查、背包容量检查、Pickaxe 缺失恢复、掉落/拾取验证、工具归还。
-6. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
-7. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
-8. 增加确定性 Route/Farm/Mining 场景测试与游戏内端到端验收。
+5. 抽象工具动作后处理底座：优先处理晶球等阻塞菜单，再扩展掉落物识别、拾取策略和 Mining 目标类型。
+6. 在 Mining 中实现资源管理底座：体力检查、背包容量检查、Pickaxe 缺失恢复、掉落/拾取验证、工具归还。
+7. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
+8. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
+9. 增加确定性 Route/Farm/Mining 场景测试与游戏内端到端验收。
 
 ## 第一阶段验收标准
 

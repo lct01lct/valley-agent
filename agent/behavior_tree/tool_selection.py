@@ -5,7 +5,7 @@ from agent.action.valley_action.clearance_policy import normalize_obstacle_type
 from server.valley_server import InventoryItem, StardewState
 from server.type import Tile
 
-type ClearObstacleOwner = Literal["Route", "Farm", "Mining"]
+type ClearObstacleOwner = Literal["Route", "Farm", "Mining", "Guard"]
 
 TOOLBAR_SIZE = 12
 TOOLBAR_KEYS: tuple[KeyType, ...] = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=")

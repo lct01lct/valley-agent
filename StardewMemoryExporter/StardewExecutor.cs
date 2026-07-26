@@ -212,6 +212,10 @@ namespace StardewMemoryExporter
                 {
                     HandleUseTool(pressedKeys);
                 }
+                else if (actionType.Equals("ATTACK_WEAPON", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleAttackWeapon();
+                }
                 else if (actionType.Equals("USE_ITEM", StringComparison.OrdinalIgnoreCase) && pressedKeys.Contains("x"))
                 {
                     HandleUseItem(pressedKeys);
@@ -519,6 +523,19 @@ namespace StardewMemoryExporter
             _helper.Input.Press(SButton.C);
             SendResponseToPython("SUCCESS");
             return;
+        }
+
+        private void HandleAttackWeapon()
+        {
+            ClearHeldMoveButtons();
+            if (IsPlayerBusyForImmediateCommand())
+            {
+                SendResponseToPython("BUSY");
+                return;
+            }
+
+            _helper.Input.Press(SButton.C);
+            SendResponseToPython("SUCCESS");
         }
 
         private void HandleUseItem(List<string> pressedKeys)

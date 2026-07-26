@@ -14,6 +14,7 @@ class MoveController:
 
     def __init__(self):
         self._last_primary_axis: str | None = None
+        self._last_target_edge_debug: str = ""
 
     def get_next_move_command(
         self,
@@ -126,12 +127,14 @@ class MoveController:
         stand_tile: Tile,
         target_tile: Tile,
         edge_margin: float = 2.0,
+        edge_dead_zone: float = 4.0,
     ) -> bool:
         return self.build_move_command_to_target_edge(
             state,
             stand_tile,
             target_tile,
             edge_margin=edge_margin,
+            edge_dead_zone=edge_dead_zone,
         ).action == StardewAction.IDLE
 
     def build_move_command_to_target_edge(
@@ -187,6 +190,14 @@ class MoveController:
         elif state.position.y > max_y + edge_dead_zone:
             pressed_keys.add("w")
 
+        self._last_target_edge_debug = (
+            f"stand={stand_tile}, target={target_tile}, "
+            f"player_pos=({state.position.x:.1f},{state.position.y:.1f}), "
+            f"range_x=({min_x:.1f},{max_x:.1f}), range_y=({min_y:.1f},{max_y:.1f}), "
+            f"delta=({delta_x},{delta_y}), edge_margin={edge_margin}, "
+            f"edge_dead_zone={edge_dead_zone}, keys={sorted(pressed_keys)}"
+        )
+
         if "w" in pressed_keys and "d" in pressed_keys:
             return self._build_diagonal_move_command(StardewAction.MOVE_UP_RIGHT, "w", "d")
         if "w" in pressed_keys and "a" in pressed_keys:
@@ -210,6 +221,9 @@ class MoveController:
 
         return StardewCommand(action=StardewAction.IDLE)
 
+    def get_target_edge_debug_snapshot(self) -> str:
+        return self._last_target_edge_debug
+
     def build_face_command(self, player_tile: Tile, target_tile: Tile) -> StardewCommand:
         if target_tile.x > player_tile.x:
             return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
@@ -223,6 +237,7 @@ class MoveController:
 
     def reset(self) -> None:
         self._last_primary_axis = None
+        self._last_target_edge_debug = ""
 
     def _build_diagonal_move_command(
         self,
