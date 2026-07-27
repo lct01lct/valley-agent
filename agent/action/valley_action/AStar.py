@@ -48,7 +48,6 @@ class AStarParser:
             "Twig",
             "Weeds",
             "TreeStump",
-            "Tree0",
             "Tree5",
             "Tree4",
             "Tree3",

@@ -1,7 +1,9 @@
 import time
+from collections import deque
 from typing import Literal
 
 from agent.action.location.location import Location
+from agent.action.valley_action.AStar import astar_solver
 from agent.action.valley_action.clearance_policy import (
     FRUIT_TREE_LAYERS,
     decide_clear_obstacle,
@@ -107,6 +109,7 @@ class FarmNode(BTNode):
         self._completed_plant_tiles: set[Tile] = set()
         self._failed_plant_tiles: set[Tile] = set()
         self._ignored_plant_tiles: set[Tile] = set()
+        self._temporarily_unreachable_clear_tiles: set[Tile] = set()
         self._target_phase: FarmWorkPhase | None = None
         self._batch_phase: FarmBatchPhase | None = None
         self._planned_plant_tiles: list[Tile] = []
@@ -542,6 +545,7 @@ class FarmNode(BTNode):
         self._completed_plant_tiles = set()
         self._failed_plant_tiles = set()
         self._ignored_plant_tiles = set()
+        self._temporarily_unreachable_clear_tiles = set()
         self._watered_tiles = set()
         self._planned_plant_tiles = self._build_batch_plan_tiles(game_state, current_task)
         self._batch_phase = "CLEAR_OBSTACLES"
@@ -632,27 +636,103 @@ class FarmNode(BTNode):
         blackboard: AgentBlackboard,
     ) -> Tile | None:
         candidates: list[tuple[str, Tile]] = []
+        unreachable_candidates: list[tuple[str, Tile]] = []
+        blocked_tiles = astar_solver._get_blocked_tiles(game_state)
+        reachable_tiles = self._get_reachable_tiles(game_state, blocked_tiles)
         for target_tile in self._planned_plant_tiles:
             if target_tile in self._failed_plant_tiles or target_tile in self._ignored_plant_tiles:
                 continue
             obstacle_type = self._get_clearable_obstacle_type(game_state, target_tile)
             if obstacle_type is None:
+                self._temporarily_unreachable_clear_tiles.discard(target_tile)
                 continue
             if (target_tile.x, target_tile.y) in blackboard.failed_clear_obstacles:
-                self._mark_plant_tile_failed(target_tile, f"清障节点已确认失败: obstacle={obstacle_type}")
+                self._temporarily_unreachable_clear_tiles.add(target_tile)
+                unreachable_candidates.append((obstacle_type, target_tile))
+                self._log(
+                    f"P1 清障候选暂缓，因为清障节点刚确认失败: target={target_tile}, obstacle={obstacle_type}"
+                )
                 continue
+            if not self._has_reachable_clear_obstacle_stand_tile(game_state, target_tile, blocked_tiles, reachable_tiles):
+                self._temporarily_unreachable_clear_tiles.add(target_tile)
+                unreachable_candidates.append((obstacle_type, target_tile))
+                self._log(
+                    f"P1 清障候选暂不可达，先尝试其他目标: target={target_tile}, obstacle={obstacle_type}, "
+                    f"player={game_state.player_tile}"
+                )
+                continue
+            self._temporarily_unreachable_clear_tiles.discard(target_tile)
             candidates.append((obstacle_type, target_tile))
 
         if not candidates:
+            for obstacle_type, target_tile in unreachable_candidates:
+                self._mark_plant_tile_failed(target_tile, f"当前无法移动到清障站位: obstacle={obstacle_type}")
             return None
 
-        def sort_key(item: tuple[str, Tile]) -> tuple[int, int]:
+        def sort_key(item: tuple[str, Tile]) -> tuple[int, int, int]:
             obstacle_type, target_tile = item
-            return self._get_obstacle_tool_group_order(obstacle_type), self._get_tile_distance(
-                game_state.player_tile, target_tile
+            return (
+                self._get_obstacle_tool_group_order(obstacle_type),
+                0 if self._is_preferred_area_clear_target(game_state, obstacle_type, target_tile) else 1,
+                self._get_tile_distance(game_state.player_tile, target_tile),
             )
 
         return sorted(candidates, key=sort_key)[0][1]
+
+    def _has_reachable_clear_obstacle_stand_tile(
+        self,
+        game_state: StardewState,
+        target_tile: Tile,
+        blocked_tiles: set[Tile],
+        reachable_tiles: set[Tile],
+    ) -> bool:
+        map_width, map_height = game_state.map_size
+
+        for stand_tile in self._get_cardinal_neighbor_tiles(target_tile):
+            if stand_tile.x < 0 or stand_tile.y < 0 or stand_tile.x >= map_width or stand_tile.y >= map_height:
+                continue
+            if stand_tile == game_state.player_tile:
+                return True
+            if stand_tile in blocked_tiles:
+                continue
+            if stand_tile in reachable_tiles:
+                return True
+
+        return False
+
+    def _get_reachable_tiles(self, game_state: StardewState, blocked_tiles: set[Tile]) -> set[Tile]:
+        map_width, map_height = game_state.map_size
+        start_tile = game_state.player_tile
+        reachable_tiles: set[Tile] = {start_tile}
+        queue: deque[Tile] = deque([start_tile])
+        directions = (
+            (0, 1),
+            (0, -1),
+            (1, 0),
+            (-1, 0),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+        )
+
+        while queue:
+            current_tile = queue.popleft()
+            for dx, dy in directions:
+                next_tile = Tile(current_tile.x + dx, current_tile.y + dy)
+                if next_tile.x < 0 or next_tile.y < 0 or next_tile.x >= map_width or next_tile.y >= map_height:
+                    continue
+                if next_tile in reachable_tiles or next_tile in blocked_tiles:
+                    continue
+                if dx != 0 and dy != 0:
+                    side_tile_1 = Tile(current_tile.x + dx, current_tile.y)
+                    side_tile_2 = Tile(current_tile.x, current_tile.y + dy)
+                    if side_tile_1 in blocked_tiles or side_tile_2 in blocked_tiles:
+                        continue
+                reachable_tiles.add(next_tile)
+                queue.append(next_tile)
+
+        return reachable_tiles
 
     def _select_next_hoe_tile(self, game_state: StardewState, current_task: FarmTask) -> Tile | None:
         candidates: list[Tile] = []
@@ -994,6 +1074,31 @@ class FarmNode(BTNode):
         if normalized_obstacle_type == "tree":
             return 3
         return 9
+
+    def _is_preferred_area_clear_target(
+        self,
+        game_state: StardewState,
+        obstacle_type: str,
+        target_tile: Tile,
+    ) -> bool:
+        normalized_obstacle_type = normalize_obstacle_type(obstacle_type)
+        if normalized_obstacle_type not in ("grass", "weeds"):
+            return False
+
+        return target_tile in self._get_current_area_clear_focus_tiles(game_state)
+
+    def _get_current_area_clear_focus_tiles(self, game_state: StardewState) -> set[Tile]:
+        focus_centers = {game_state.player_tile}
+        tool_target_tile = game_state.tool_target.tile
+        if tool_target_tile is not None:
+            focus_centers.add(tool_target_tile)
+
+        focus_tiles: set[Tile] = set()
+        for center_tile in focus_centers:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    focus_tiles.add(Tile(center_tile.x + dx, center_tile.y + dy))
+        return focus_tiles
 
     def _select_next_plant_target(self, game_state: StardewState, current_task: FarmTask) -> Tile | None:
         if self._has_reached_plant_count(current_task):
@@ -1607,6 +1712,7 @@ class FarmNode(BTNode):
         self._completed_plant_tiles = set()
         self._failed_plant_tiles = set()
         self._ignored_plant_tiles = set()
+        self._temporarily_unreachable_clear_tiles = set()
         self._target_phase = None
         self._batch_phase = None
         self._planned_plant_tiles = []

@@ -34,6 +34,7 @@ namespace StardewMemoryExporter
             string source = ReadOptionalStringMember(debris, "debrisType")
                 ?? ReadOptionalStringMember(debris, "chunkType")
                 ?? debris.GetType().Name;
+            bool isCollectible = IsCollectibleDebris(item, source);
 
             return new
             {
@@ -45,7 +46,26 @@ namespace StardewMemoryExporter
                 Position = new[] { Math.Round((double)position.X, 1), Math.Round((double)position.Y, 1) },
                 Tile = new[] { (int)(position.X / Game1.tileSize), (int)(position.Y / Game1.tileSize) },
                 Source = source,
+                IsCollectible = isCollectible,
             };
+        }
+
+        private static bool IsCollectibleDebris(Item item, string source)
+        {
+            if (item != null && !string.IsNullOrEmpty(item.QualifiedItemId))
+            {
+                return true;
+            }
+
+            // CHUNKS 是碎石/挥砍等纯视觉碎屑，不应触发 Python 端自动拾取。
+            if (string.Equals(source, "CHUNKS", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // 树木等掉落在 SMAPI Debris 中可能表现为 RESOURCE / OBJECT，且反射读不到 item。
+            return string.Equals(source, "RESOURCE", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(source, "OBJECT", StringComparison.OrdinalIgnoreCase);
         }
 
         private static Vector2 ReadDebrisPosition(Debris debris)

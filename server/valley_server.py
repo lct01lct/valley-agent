@@ -161,13 +161,23 @@ class DebrisState:
         self.qualified_item_id: str = raw_debris.get("QualifiedItemId", "")
         self.category: int = int(raw_debris.get("Category", 0))
         self.stack: int = int(raw_debris.get("Stack", 0))
+        self.source: str = raw_debris.get("Source", "")
+        self.is_collectible: bool = self._build_is_collectible(raw_debris)
 
         raw_position = raw_debris.get("Position", [0.0, 0.0])
         self.position = Position(float(raw_position[0]), float(raw_position[1]))
 
         raw_tile = raw_debris.get("Tile", [0, 0])
         self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
-        self.source: str = raw_debris.get("Source", "")
+
+    def _build_is_collectible(self, raw_debris: dict) -> bool:
+        if raw_debris.get("IsCollectible") is True:
+            return True
+        if self.qualified_item_id:
+            return True
+        if self.source.upper() == "CHUNKS":
+            return False
+        return self.source.upper() in {"RESOURCE", "OBJECT"}
 
 
 class MonsterState:

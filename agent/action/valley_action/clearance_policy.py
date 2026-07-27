@@ -8,6 +8,8 @@ from server.type import Tile
 type ClearanceOwner = Literal["Route", "Farm"]
 
 ORDINARY_TREE_LAYERS: tuple[str, ...] = tuple(f"Tree{growth_stage}" for growth_stage in range(6))
+PASSABLE_TREE_SEED_LAYERS: tuple[str, ...] = ("Tree0",)
+BLOCKING_ORDINARY_TREE_LAYERS: tuple[str, ...] = tuple(f"Tree{growth_stage}" for growth_stage in range(1, 6))
 FRUIT_TREE_LAYERS: tuple[str, ...] = tuple(f"FruitTree{growth_stage}" for growth_stage in range(6))
 
 
@@ -27,7 +29,8 @@ def decide_clear_obstacle(state: StardewState, target_tile: Tile, obstacle_type:
 
     这里承接未来 Agent Skill / Planner 的策略输入，例如保护某棵树、延迟到成熟后再砍等。
     当前尚未接入外部策略记忆，因此默认规则是：
-    - 普通 Tree0~Tree5：Route 和 Farm 都允许清理；Farm 的规划区域视为 Agent 已授权。
+    - Tree0：树种/幼苗，可以通行，不作为自动清障目标；若未来显式清理，只允许斧子/镐子这类点对点工具。
+    - 普通 Tree1~Tree5：Route 和 Farm 都允许清理；Farm 的规划区域视为 Agent 已授权。
     - FruitTree0~FruitTree5：暂不清理。
     - TreeStump：暂不清理。
     - Stone / Weeds / Twig / Grass：允许清理。
@@ -62,6 +65,16 @@ def decide_clear_obstacle(state: StardewState, target_tile: Tile, obstacle_type:
             cost=float("inf"),
             should_skip_tile=True,
             reason="TreeStump 暂不纳入自动清理",
+        )
+
+    if normalized_obstacle_type == "tree_seed":
+        return ClearDecision(
+            can_clear=False,
+            obstacle_type=normalized_obstacle_type,
+            required_tool=None,
+            cost=0.0,
+            should_skip_tile=False,
+            reason="Tree0 树种/幼苗可通行，不作为自动清障目标",
         )
 
     if normalized_obstacle_type == "tree":
@@ -120,6 +133,8 @@ def normalize_obstacle_type(obstacle_type: str | None) -> str | None:
         return "fruit_tree"
     if lower_type == "treestump":
         return "tree_stump"
+    if lower_type == "tree0":
+        return "tree_seed"
     if lower_type.startswith("tree"):
         return "tree"
     if lower_type in ("grass", "weeds", "twig", "stone"):
@@ -128,7 +143,7 @@ def normalize_obstacle_type(obstacle_type: str | None) -> str | None:
 
 
 def get_obstacle_type_at_tile(state: StardewState, target_tile: Tile) -> str | None:
-    for layer_name in ("Grass", "Weeds", "Twig", "Stone", *ORDINARY_TREE_LAYERS, "TreeStump", *FRUIT_TREE_LAYERS):
+    for layer_name in ("Grass", "Weeds", "Twig", "Stone", *BLOCKING_ORDINARY_TREE_LAYERS, "TreeStump", *FRUIT_TREE_LAYERS):
         if target_tile in state.layers.get(layer_name, set()):
             return layer_name
     return None

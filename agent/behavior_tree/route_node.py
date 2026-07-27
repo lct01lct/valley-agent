@@ -5,7 +5,7 @@ from typing import List, Set, Tuple
 from agent.action.location.location import Location
 from agent.action.map.map import HardcodedStardewMap
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
-from agent.action.valley_action.clearance_policy import ORDINARY_TREE_LAYERS, decide_clear_obstacle
+from agent.action.valley_action.clearance_policy import BLOCKING_ORDINARY_TREE_LAYERS, decide_clear_obstacle
 from agent.action.valley_action.tool_targeting import build_tool_target_face_command
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
@@ -933,7 +933,7 @@ def route_cost_function(
     weeds = state.layers.get("Weeds", set())
     twigs = state.layers.get("Twig", set())
     trees = set()
-    for layer_name in ORDINARY_TREE_LAYERS:
+    for layer_name in BLOCKING_ORDINARY_TREE_LAYERS:
         trees.update(state.layers.get(layer_name, set()))
 
     if neighbor in weeds:

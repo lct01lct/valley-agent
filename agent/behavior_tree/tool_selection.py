@@ -64,6 +64,9 @@ def select_required_tool_for_obstacle(
     if normalized_obstacle_type == "stone":
         return _select_first_available_tool(state, ("Pickaxe",))
 
+    if normalized_obstacle_type == "tree_seed":
+        return _select_first_available_tool(state, ("Axe", "Pickaxe"))
+
     if normalized_obstacle_type == "tree":
         return _select_first_available_tool(state, ("Axe",))
 

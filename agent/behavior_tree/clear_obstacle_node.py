@@ -2,17 +2,28 @@ import time
 
 from agent.action.tool.tool_aftermath_service import ToolAftermathRequest, ToolAftermathService
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
-from agent.action.valley_action.clearance_policy import ORDINARY_TREE_LAYERS, normalize_obstacle_type
+from agent.action.valley_action.clearance_policy import (
+    BLOCKING_ORDINARY_TREE_LAYERS,
+    PASSABLE_TREE_SEED_LAYERS,
+    normalize_obstacle_type,
+)
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
-from agent.action.valley_action.tool_targeting import build_tool_target_face_command, format_tool_target, is_tool_targeting
+from agent.action.valley_action.tool_targeting import (
+    build_tool_target_face_command,
+    format_tool_target,
+    is_tool_targeting,
+)
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.clear_obstacle_debug_logger import ClearObstacleDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_action_tracker import ToolActionTracker
-from agent.behavior_tree.tool_selection import has_tool_area_tree1_risk, is_current_tool, select_required_tool_for_obstacle
+from agent.behavior_tree.tool_selection import (
+    has_tool_area_tree1_risk,
+    is_current_tool,
+    select_required_tool_for_obstacle,
+)
 from server.type import Tile
-
 
 CLEARABLE_OBSTACLE_LAYERS: dict[str, tuple[str, ...]] = {
     "stone": ("Stone",),
@@ -23,8 +34,10 @@ CLEARABLE_OBSTACLE_LAYERS: dict[str, tuple[str, ...]] = {
     "Weeds": ("Weeds",),
     "grass": ("Grass",),
     "Grass": ("Grass",),
-    "tree": (*ORDINARY_TREE_LAYERS, "TreeStump"),
-    "Tree": (*ORDINARY_TREE_LAYERS, "TreeStump"),
+    "tree": (*BLOCKING_ORDINARY_TREE_LAYERS, "TreeStump"),
+    "Tree": (*BLOCKING_ORDINARY_TREE_LAYERS, "TreeStump"),
+    "tree_seed": PASSABLE_TREE_SEED_LAYERS,
+    "Tree0": PASSABLE_TREE_SEED_LAYERS,
 }
 CLEAR_OBSTACLE_TIMEOUT_SECONDS = 8.0
 TREE_CLEAR_OBSTACLE_TIMEOUT_SECONDS = 18.0
@@ -34,6 +47,7 @@ MAX_TREE_CLEAR_ATTEMPTS = 24
 POSITIONING_STUCK_TIMEOUT_SECONDS = 0.45
 CLEAR_TOOL_START_GRACE_SECONDS = 0.35
 CLEAR_TOOL_FINISH_TIMEOUT_SECONDS = 2.5
+AREA_CLEAR_VERIFY_GRACE_SECONDS = 0.45
 
 
 class ClearObstacleNode(BTNode):
@@ -51,6 +65,7 @@ class ClearObstacleNode(BTNode):
         self._positioning_stuck_started_at: float | None = None
         self._blocked_stand_tiles: set[Tile] = set()
         self._deferred_loot_tiles: list[Tile] = []
+        self._area_clear_verify_until: float | None = None
         self.tool_aftermath_service = ToolAftermathService()
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=CLEAR_TOOL_START_GRACE_SECONDS,
@@ -82,7 +97,12 @@ class ClearObstacleNode(BTNode):
         if not self._obstacle_exists(game_state.layers, target_tile, obstacle_type):
             return self._handle_cleared_obstacle(context, blackboard, game_state, target_tile, obstacle_type)
 
-        if self._started_at is not None and time.time() - self._started_at > self._get_clear_timeout_seconds(obstacle_type):
+        if self._is_waiting_for_area_clear_state_verify(obstacle_type):
+            return "RUNNING"
+
+        if self._started_at is not None and time.time() - self._started_at > self._get_clear_timeout_seconds(
+            obstacle_type
+        ):
             context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             self._fail(blackboard, f"清障超时: {obstacle_type} @ {target_tile}")
             return "SUCCESS"
@@ -189,6 +209,17 @@ class ClearObstacleNode(BTNode):
                 self.tool_action_tracker.reset()
                 return "RUNNING"
 
+            if self._is_area_clear_obstacle(obstacle_type) and aftermath_result.target_change_state == "UNCHANGED":
+                self._area_clear_verify_until = time.time() + AREA_CLEAR_VERIFY_GRACE_SECONDS
+                self._wait_ticks = 0
+                self.tool_action_tracker.reset()
+                self._log(
+                    f"范围工具清障后目标暂未变化，等待 state 刷新后再决定是否补刀: "
+                    f"target={target_tile}, obstacle={obstacle_type}, "
+                    f"grace={AREA_CLEAR_VERIFY_GRACE_SECONDS:.2f}s, aftermath={aftermath_result.reason}"
+                )
+                return "RUNNING"
+
             if self._is_tree_obstacle(obstacle_type):
                 self._defer_tree_loot(target_tile, aftermath_result.nearby_loot_tiles)
             else:
@@ -290,6 +321,7 @@ class ClearObstacleNode(BTNode):
         self._last_debug_heartbeat_at = 0.0
         self._blocked_stand_tiles = set()
         self._deferred_loot_tiles = []
+        self._area_clear_verify_until = None
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
         print(f"\n🟡 [ClearObstacleNode:{self.owner}] 准备清理必要障碍物: {obstacle_type} @ {target_tile}")
@@ -298,9 +330,7 @@ class ClearObstacleNode(BTNode):
     def _finish(self, blackboard: AgentBlackboard) -> None:
         if self._target_tile is not None:
             blackboard.failed_clear_obstacles.discard((self._target_tile.x, self._target_tile.y))
-        self._log(
-            f"清障完成并清理黑板: target={self._target_tile}, obstacle={self._obstacle_type}, owner={self.owner}"
-        )
+        self._log(f"清障完成并清理黑板: target={self._target_tile}, obstacle={self._obstacle_type}, owner={self.owner}")
         blackboard.require_clear_obstacle = False
         blackboard.clear_obstacle_owner = None
         blackboard.clear_obstacle_tile = None
@@ -469,18 +499,43 @@ class ClearObstacleNode(BTNode):
         self._last_debug_heartbeat_at = 0.0
         self._blocked_stand_tiles = set()
         self._deferred_loot_tiles = []
+        self._area_clear_verify_until = None
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
 
     def _obstacle_exists(self, layers: dict[str, set[Tile]], target_tile: Tile, obstacle_type: str) -> bool:
         normalized_obstacle_type = normalize_obstacle_type(obstacle_type) or obstacle_type
-        for layer_name in CLEARABLE_OBSTACLE_LAYERS.get(normalized_obstacle_type, CLEARABLE_OBSTACLE_LAYERS.get(obstacle_type, ())):
+        for layer_name in CLEARABLE_OBSTACLE_LAYERS.get(
+            normalized_obstacle_type, CLEARABLE_OBSTACLE_LAYERS.get(obstacle_type, ())
+        ):
             if target_tile in layers.get(layer_name, set()):
                 return True
         return False
 
     def _is_tree_obstacle(self, obstacle_type: str | None) -> bool:
         return normalize_obstacle_type(obstacle_type) == "tree"
+
+    def _is_area_clear_obstacle(self, obstacle_type: str | None) -> bool:
+        return normalize_obstacle_type(obstacle_type) in {"grass", "weeds"}
+
+    def _is_waiting_for_area_clear_state_verify(self, obstacle_type: str | None) -> bool:
+        if not self._is_area_clear_obstacle(obstacle_type):
+            self._area_clear_verify_until = None
+            return False
+
+        if self._area_clear_verify_until is None:
+            return False
+
+        if time.time() < self._area_clear_verify_until:
+            return True
+
+        self._log(
+            f"范围工具清障 state 验证窗口结束，目标仍未消失，允许后续重试: "
+            f"target={self._target_tile}, obstacle={self._obstacle_type}, "
+            f"grace={AREA_CLEAR_VERIFY_GRACE_SECONDS:.2f}s"
+        )
+        self._area_clear_verify_until = None
+        return False
 
     def _has_pending_collect_loot(self, blackboard: AgentBlackboard) -> bool:
         return blackboard.require_collect_loot and blackboard.collect_loot_owner == self.owner

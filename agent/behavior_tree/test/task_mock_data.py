@@ -170,7 +170,7 @@ TASK_MOCK_DATA: Dict[
             target_tiles=[Tile(64, 25)],
         ),
     ],
-    "FARM_P1_2": [  # Farm P1 测试数据 2：规划 7x7 区域种防风草；树/树桩跳过，其余可清障碍先清理。
+    "FARM_P1_2": [  # Farm P1 测试数据 2：规划 7x7 区域种防风草；大树桩跳过，其余可清障碍先清理。
         RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
         FarmTask(
             task_type="FARM",
@@ -179,7 +179,7 @@ TASK_MOCK_DATA: Dict[
             target_loc="Farm",
             seed_name="Parsnip Seeds",
             count=49,
-            area_origin=Tile(63, 25),
+            area_origin=Tile(48, 15),
             area_width=7,
             area_height=7,
         ),

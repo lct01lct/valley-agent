@@ -46,7 +46,7 @@ class Agent_Model:
 
     async def run(self, prompt: str, ctx: PlayerContext) -> List[BaseTask]:
         TEST_MODE: TaskType = "ROUTE"
-        # TEST_MODE: TaskType = "FARM"
+        TEST_MODE: TaskType = "FARM"
         # TEST_MODE: TaskType = "CHEST"
         # TEST_MODE: TaskType = "MINE"
 
@@ -69,8 +69,8 @@ class Agent_Model:
                 # return TASK_MOCK_DATA["FARM_P0_3"]
                 # return TASK_MOCK_DATA["FARM_P0_4"]
                 # return TASK_MOCK_DATA["FARM_P1_1"]
-                # return TASK_MOCK_DATA["FARM_P1_2"]
-                return TASK_MOCK_DATA["FARM_P1_3"]
+                return TASK_MOCK_DATA["FARM_P1_2"]
+                # return TASK_MOCK_DATA["FARM_P1_3"]
             elif TEST_MODE == "MINE":
                 return TASK_MOCK_DATA["MINING_P0_1"]
             else:

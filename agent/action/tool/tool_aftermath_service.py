@@ -174,6 +174,8 @@ class ToolAftermathService:
         nearby_tiles: list[Tile] = []
         seen_tiles: set[Tile] = set()
         for debris in getattr(state, "debris", []):
+            if not self._is_collectible_debris(debris):
+                continue
             if self._tile_distance(debris.tile, target_tile) > max_distance:
                 continue
             if debris.tile in seen_tiles:
@@ -181,6 +183,9 @@ class ToolAftermathService:
             seen_tiles.add(debris.tile)
             nearby_tiles.append(debris.tile)
         return nearby_tiles
+
+    def _is_collectible_debris(self, debris: Any) -> bool:
+        return bool(getattr(debris, "is_collectible", False))
 
     def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:
         return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
@@ -220,11 +225,13 @@ class ToolAftermathService:
             name = getattr(debris, "name", "")
             display_name = getattr(debris, "display_name", "")
             qualified_item_id = getattr(debris, "qualified_item_id", "")
+            is_collectible = getattr(debris, "is_collectible", False)
             stack = getattr(debris, "stack", 0)
             source = getattr(debris, "source", "")
             samples.append(
                 f"tile={tile}, position={position}, name={name}, display_name={display_name}, "
-                f"qualified_item_id={qualified_item_id}, stack={stack}, source={source}"
+                f"qualified_item_id={qualified_item_id}, is_collectible={is_collectible}, "
+                f"stack={stack}, source={source}"
             )
         return samples
 

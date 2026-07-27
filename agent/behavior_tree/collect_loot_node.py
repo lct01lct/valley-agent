@@ -140,7 +140,7 @@ class CollectLootNode(BTNode):
         positioning_result = self.positioning_controller.tick(
             game_state,
             PositioningGoal(
-                candidate_stand_tiles=self._build_collect_candidate_tiles(game_state, target_tile),
+                candidate_stand_tiles=self._build_collect_candidate_tiles(blackboard, game_state, target_tile),
                 tool_target_tile=None,
             ),
         )
@@ -306,6 +306,8 @@ class CollectLootNode(BTNode):
         existing_tiles: list[Tile] = []
         seen_tiles: set[Tile] = set()
         for debris in getattr(game_state, "debris", []):
+            if not self._is_collectible_debris(debris):
+                continue
             if debris.tile not in requested_tiles:
                 continue
             if debris.tile in seen_tiles:
@@ -324,6 +326,8 @@ class CollectLootNode(BTNode):
         loot_tiles: list[Tile] = []
         seen_tiles: set[Tile] = set()
         for debris in getattr(game_state, "debris", []):
+            if not self._is_collectible_debris(debris):
+                continue
             if (debris.tile.x, debris.tile.y) in skipped_tiles:
                 continue
             if debris.tile in seen_tiles:
@@ -342,24 +346,19 @@ class CollectLootNode(BTNode):
 
     def _select_target_tile(self, blackboard: AgentBlackboard, game_state) -> Tile | None:
         existing_tiles = self._get_existing_requested_loot_tiles(blackboard, game_state)
+        if (
+            self._target_tile in existing_tiles
+            and (self._target_tile.x, self._target_tile.y) not in self._swept_loot_tiles
+        ):
+            return self._target_tile
+
         unswept_tiles = [tile for tile in existing_tiles if (tile.x, tile.y) not in self._swept_loot_tiles]
         if not unswept_tiles:
             return None
 
-        if self._is_tree_collect_mode(blackboard):
-            outside_magnetic_tiles = [
-                tile
-                for tile in unswept_tiles
-                if not self._is_target_in_magnetic_range(game_state, tile, should_log=False)
-            ]
-            if outside_magnetic_tiles:
-                if self._target_tile in outside_magnetic_tiles:
-                    return self._target_tile
-                return min(outside_magnetic_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
-
         return min(unswept_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
 
-    def _build_collect_candidate_tiles(self, game_state, target_tile: Tile) -> set[Tile]:
+    def _build_collect_candidate_tiles(self, blackboard: AgentBlackboard, game_state, target_tile: Tile) -> set[Tile]:
         debris = self._get_debris_for_tile(game_state, target_tile)
         if debris is None:
             return {target_tile}
@@ -376,6 +375,8 @@ class CollectLootNode(BTNode):
 
     def _is_loot_collected(self, game_state, target_tile: Tile) -> bool:
         for debris in getattr(game_state, "debris", []):
+            if not self._is_collectible_debris(debris):
+                continue
             if debris.tile == target_tile:
                 return False
         return True
@@ -409,9 +410,14 @@ class CollectLootNode(BTNode):
 
     def _get_debris_for_tile(self, game_state, target_tile: Tile):
         for debris in getattr(game_state, "debris", []):
+            if not self._is_collectible_debris(debris):
+                continue
             if debris.tile == target_tile:
                 return debris
         return None
+
+    def _is_collectible_debris(self, debris) -> bool:
+        return bool(getattr(debris, "is_collectible", False))
 
     def _sweep_target(self, target_tile: Tile, game_state, reason: str) -> None:
         self._swept_loot_tiles.add((target_tile.x, target_tile.y))
@@ -462,8 +468,14 @@ class CollectLootNode(BTNode):
         owner = blackboard.collect_loot_owner
         if owner not in ("Route", "Farm"):
             return False
+        if self._is_tree_collect_mode(blackboard):
+            self._skip_target(blackboard, target_tile, "树木掉落物拾取不触发清障；磁吸候选站位不可达")
+            return False
+        if self._is_target_in_magnetic_range(game_state, target_tile, should_log=False):
+            self._sweep_target(target_tile, game_state, "已在磁吸范围内，不为拾取触发清障")
+            return False
 
-        candidate_tiles = self._build_collect_candidate_tiles(game_state, target_tile)
+        candidate_tiles = self._build_collect_candidate_tiles(blackboard, game_state, target_tile)
         search_tiles = sorted(
             candidate_tiles | {target_tile},
             key=lambda tile: self._tile_distance(game_state.player_tile, tile),
