@@ -2,9 +2,10 @@ import json
 import os
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar, Literal, Protocol
+from typing import Any, Callable, ClassVar, Literal, Protocol
 
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from server.valley_server import StardewState
@@ -22,6 +23,25 @@ type ToolTargetChangeState = Literal[
     "CHANGED",  # 目标地块已经发生业务关心的变化，例如石头/障碍消失
     "UNCHANGED",  # 目标地块仍保持原状态，业务节点通常需要重试或继续等待
     "UNKNOWN",  # 无法可靠判断，业务节点需要按自身策略兜底
+]
+
+
+type ToolEffectAction = Literal[
+    "CLEAR_OBSTACLE",  # 清理单个可破坏障碍物，预期目标地块障碍消失
+    "AREA_CLEAR",  # 范围工具清理 Grass/Weeds，预期目标或范围内障碍减少
+    "BREAK_STONE",  # 挖矿/破石，预期石头消失、耐久降低或刷新梯子
+    "HOE_TILE",  # 锄地，预期目标地块变为 HoeDirt
+    "WATER_TILE",  # 浇水，预期作物或耕地进入已浇水状态
+    "PLANT_SEED",  # 播种，预期目标地块出现作物
+]
+
+
+type ToolEffectStatus = Literal[
+    "SUCCESS",  # 预期效果已经被最新 state 证明
+    "WAITING",  # 工具已收招，但 state 还没有刷新出预期效果
+    "TIMEOUT",  # 超过保护窗口仍没有观察到预期效果
+    "BLOCKED",  # 阻塞 UI 或菜单打断了后处理流程
+    "UNKNOWN",  # 当前计划没有可靠验证器，只能交给业务节点兜底
 ]
 
 
@@ -50,6 +70,38 @@ class ToolAftermathResult:
     ladder_query_status: bool | None = None
     nearby_loot_tiles: list[Tile] = field(default_factory=list)
     should_wait_next_tick: bool = False
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ToolEffectPlan:
+    """
+    一次工具动作的预期效果计划。
+
+    业务节点负责在发出工具命令时创建计划；工具动作收招后，本服务
+    根据最新 state 验证预期效果，并统一观察阻塞 UI、掉落物、梯子等副作用。
+    """
+
+    owner: ToolAftermathOwner
+    action_name: ToolEffectAction
+    target_tile: Tile | None = None
+    effect_checker: Callable[[StardewState], bool | None] | None = None
+    side_effect_checker: Callable[[StardewState, ToolAftermathResult], bool | None] | None = None
+    target_change_checker: Callable[[StardewState], bool | None] | None = None
+    check_blocking_menu: bool = True
+    check_ladder_at_target_tile: bool = False
+    loot_scan_distance: int = 2
+    effect_timeout_seconds: float = 1.0
+    started_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolEffectResult:
+    status: ToolEffectStatus
+    aftermath: ToolAftermathResult
+    elapsed_seconds: float
+    effect_satisfied: bool | None = None
     reason: str = ""
 
 
@@ -106,10 +158,11 @@ class ToolAftermathService:
         context: ToolAftermathContext,
         state: StardewState,
         request: ToolAftermathRequest,
+        loot_scan_distance: int = 2,
     ) -> ToolAftermathResult:
         blocking_menu_type, blocking_menu_text = self._read_blocking_menu(state, request.check_blocking_menu)
         target_change_state = self._build_target_change_state(request.target_tile_changed)
-        nearby_loot_tiles = self._find_nearby_loot_tiles(state, request.target_tile)
+        nearby_loot_tiles = self._find_nearby_loot_tiles(state, request.target_tile, max_distance=loot_scan_distance)
 
         generated_ladder_tile: Tile | None = None
         ladder_query_status: bool | None = None
@@ -149,6 +202,114 @@ class ToolAftermathService:
             should_wait_next_tick=blocking_menu_type is not None,
             reason=", ".join(reason_parts),
         )
+
+    def inspect_tool_effect(
+        self,
+        context: ToolAftermathContext,
+        state: StardewState,
+        plan: ToolEffectPlan,
+    ) -> ToolEffectResult:
+        """
+        状态驱动的工具后效果检查。
+
+        该方法只在工具动作已经收招后调用。它不会阻塞等待，也不会 sleep；
+        若预期效果尚未出现在 state 中，则返回 WAITING，由行为树下一帧继续检查。
+        """
+
+        effect_satisfied = self._run_effect_checker(state, plan)
+        target_tile_changed = self._run_target_change_checker(state, plan, effect_satisfied)
+        aftermath_result = self.inspect_after_tool_action(
+            context,
+            state,
+            ToolAftermathRequest(
+                owner=plan.owner,
+                action_name=plan.action_name,
+                target_tile=plan.target_tile,
+                check_blocking_menu=plan.check_blocking_menu,
+                check_ladder_at_target_tile=plan.check_ladder_at_target_tile,
+                target_tile_changed=target_tile_changed,
+            ),
+            loot_scan_distance=plan.loot_scan_distance,
+        )
+        elapsed_seconds = time.time() - plan.started_at
+        side_effect_satisfied = self._run_side_effect_checker(state, plan, aftermath_result)
+
+        if aftermath_result.has_blocking_menu:
+            status: ToolEffectStatus = "BLOCKED"
+            reason = f"blocking_menu={aftermath_result.blocking_menu_type}"
+        elif effect_satisfied is True:
+            status = "SUCCESS"
+            reason = "effect_satisfied"
+        elif side_effect_satisfied is True:
+            status = "SUCCESS"
+            reason = "side_effect_satisfied"
+        elif effect_satisfied is None:
+            status = "UNKNOWN"
+            reason = "missing_or_unknown_effect_checker"
+        elif elapsed_seconds >= plan.effect_timeout_seconds:
+            status = "TIMEOUT"
+            reason = f"effect_timeout={elapsed_seconds:.2f}s/{plan.effect_timeout_seconds:.2f}s"
+        else:
+            status = "WAITING"
+            reason = f"waiting_effect={elapsed_seconds:.2f}s/{plan.effect_timeout_seconds:.2f}s"
+
+        self._log_tool_effect(plan, state, status, elapsed_seconds, effect_satisfied, reason, aftermath_result)
+        return ToolEffectResult(
+            status=status,
+            aftermath=aftermath_result,
+            elapsed_seconds=elapsed_seconds,
+            effect_satisfied=effect_satisfied,
+            reason=reason,
+        )
+
+    def _run_effect_checker(self, state: StardewState, plan: ToolEffectPlan) -> bool | None:
+        if plan.effect_checker is None:
+            return None
+
+        try:
+            return plan.effect_checker(state)
+        except Exception as exc:
+            self._log(
+                f"工具效果验证器异常: action={plan.action_name}, "
+                f"target={self._format_tile(plan.target_tile)}, error={exc}"
+            )
+            return None
+
+    def _run_side_effect_checker(
+        self,
+        state: StardewState,
+        plan: ToolEffectPlan,
+        aftermath_result: ToolAftermathResult,
+    ) -> bool | None:
+        if plan.side_effect_checker is None:
+            return None
+
+        try:
+            return plan.side_effect_checker(state, aftermath_result)
+        except Exception as exc:
+            self._log(
+                f"工具副作用验证器异常: action={plan.action_name}, "
+                f"target={self._format_tile(plan.target_tile)}, error={exc}"
+            )
+            return None
+
+    def _run_target_change_checker(
+        self,
+        state: StardewState,
+        plan: ToolEffectPlan,
+        effect_satisfied: bool | None,
+    ) -> bool | None:
+        if plan.target_change_checker is None:
+            return effect_satisfied
+
+        try:
+            return plan.target_change_checker(state)
+        except Exception as exc:
+            self._log(
+                f"工具目标变化验证器异常: action={plan.action_name}, "
+                f"target={self._format_tile(plan.target_tile)}, error={exc}"
+            )
+            return effect_satisfied
 
     def _read_blocking_menu(self, state: StardewState, enabled: bool) -> tuple[str | None, str]:
         if not enabled:
@@ -216,6 +377,39 @@ class ToolAftermathService:
             f"has_debris_snapshot={getattr(state, 'has_debris_snapshot', None)}, "
             f"debris_count={len(debris_list)}, nearby_loot_tiles={nearby_text}, debris_samples={sample_text}"
         )
+
+    def _log_tool_effect(
+        self,
+        plan: ToolEffectPlan,
+        state: StardewState,
+        status: ToolEffectStatus,
+        elapsed_seconds: float,
+        effect_satisfied: bool | None,
+        reason: str,
+        aftermath_result: ToolAftermathResult,
+    ) -> None:
+        self._log(
+            "验证工具动作预期效果: "
+            f"owner={plan.owner}, action={plan.action_name}, location={state.location_name}, "
+            f"target={self._format_tile(plan.target_tile)}, status={status}, "
+            f"effect_satisfied={effect_satisfied}, elapsed={elapsed_seconds:.3f}s, "
+            f"timeout={plan.effect_timeout_seconds:.3f}s, reason={reason}, "
+            f"aftermath={aftermath_result.reason}, metadata={self._format_metadata(plan.metadata)}"
+        )
+
+    def _format_metadata(self, metadata: dict[str, Any]) -> str:
+        if not metadata:
+            return "{}"
+
+        try:
+            return json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            return str(metadata)
+
+    def _log(self, message: str) -> None:
+        if ToolAftermathService._debug_logger is None:
+            return
+        ToolAftermathService._debug_logger.log(message)
 
     def _format_debris_samples(self, debris_list: list[Any], limit: int = 8) -> list[str]:
         samples: list[str] = []

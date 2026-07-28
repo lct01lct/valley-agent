@@ -3,6 +3,7 @@ from collections import deque
 from typing import Literal
 
 from agent.action.location.location import Location
+from agent.action.tool.tool_aftermath_service import ToolEffectAction, ToolAftermathService, ToolEffectPlan
 from agent.action.valley_action.AStar import astar_solver
 from agent.action.valley_action.clearance_policy import (
     FRUIT_TREE_LAYERS,
@@ -58,6 +59,7 @@ POSITIONING_STUCK_TIMEOUT_SECONDS = 1.2
 MAX_POSITIONING_SOFT_RECOVERIES = 2
 FAILED_WATER_RETRY_DELAY_SECONDS = 1.0
 MAX_FAILED_WATER_RETRY_COUNT = 3
+FARM_EFFECT_TIMEOUT_SECONDS = 1.0
 
 
 class FarmTask(BaseTask):
@@ -116,6 +118,7 @@ class FarmNode(BTNode):
         self._plant_task_signature: tuple[int, str, int, int, int, int, int, int] | None = None
         self._last_use_tool_at: float | None = None
         self._last_water_attempt_at: float | None = None
+        self._active_tool_effect_plan: ToolEffectPlan | None = None
         self._last_debug_heartbeat_at = 0.0
         self._debug_tick_count = 0
         self._last_positioning_position: tuple[float, float] | None = None
@@ -126,6 +129,7 @@ class FarmNode(BTNode):
             start_grace_seconds=FARM_TOOL_START_GRACE_SECONDS,
             finish_timeout_seconds=FARM_TOOL_FINISH_TIMEOUT_SECONDS,
         )
+        self.tool_aftermath_service = ToolAftermathService()
         self.farm_debug_logger = FarmDebugLogger()
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
@@ -285,7 +289,7 @@ class FarmNode(BTNode):
         if self._wait_ticks < STATE_SETTLE_TICKS:
             return "RUNNING"
 
-        if self._is_waiting_for_tool_action_completion(game_state, "WATER", self._target_tile):
+        if self._is_waiting_for_tool_action_completion(context, game_state, "WATER", self._target_tile):
             return "RUNNING"
 
         if self._is_watering_can_empty(game_state):
@@ -326,6 +330,7 @@ class FarmNode(BTNode):
             self._log(f"C# Executor 忙碌，浇水 USE_TOOL 未执行，等待下一帧: target={self._target_tile}")
             return "RUNNING"
 
+        self._active_tool_effect_plan = self._build_farm_effect_plan("WATER", self._target_tile)
         self.tool_action_tracker.start()
         return "RUNNING"
 
@@ -461,9 +466,9 @@ class FarmNode(BTNode):
             return "RUNNING"
 
         if self._target_phase == "PLANT":
-            if self._is_waiting_for_plant_item_result(game_state, target_tile):
+            if self._is_waiting_for_plant_item_result(context, game_state, target_tile):
                 return "RUNNING"
-        elif self._is_waiting_for_tool_action_completion(game_state, self._target_phase, target_tile):
+        elif self._is_waiting_for_tool_action_completion(context, game_state, self._target_phase, target_tile):
             return "RUNNING"
 
         if self._target_phase == "WATER" and self._is_watering_can_empty(game_state):
@@ -518,7 +523,14 @@ class FarmNode(BTNode):
             return "RUNNING"
 
         if self._target_phase != "PLANT":
+            self._active_tool_effect_plan = self._build_farm_effect_plan(self._target_phase, target_tile)
             self.tool_action_tracker.start()
+        else:
+            self._active_tool_effect_plan = self._build_farm_effect_plan(
+                self._target_phase,
+                target_tile,
+                started_at=self._last_use_tool_at,
+            )
         return "RUNNING"
 
     def _ensure_batch_plan(
@@ -998,6 +1010,7 @@ class FarmNode(BTNode):
 
     def _is_waiting_for_tool_action_completion(
         self,
+        context: PlayerContext,
         game_state: StardewState,
         target_phase: FarmWorkPhase,
         target_tile: Tile,
@@ -1013,11 +1026,46 @@ class FarmNode(BTNode):
             return True
 
         if tool_action_status == "FINISHED":
-            self._log(
-                f"农业工具动作已收招，等待下一帧验证结果: phase={target_phase}, target={target_tile}, "
-                f"UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
-                f"state={self._format_farm_tile_state(game_state.farm_tiles_by_tile.get(target_tile))}"
+            effect_result = self.tool_aftermath_service.inspect_tool_effect(
+                context,
+                game_state,
+                self._active_tool_effect_plan or self._build_farm_effect_plan(target_phase, target_tile),
             )
+            if effect_result.status == "WAITING":
+                self._log(
+                    f"等待农业工具预期效果刷新: phase={target_phase}, target={target_tile}, "
+                    f"elapsed={effect_result.elapsed_seconds:.3f}s, reason={effect_result.reason}, "
+                    f"state={self._format_farm_tile_state(game_state.farm_tiles_by_tile.get(target_tile))}"
+                )
+                return True
+
+            if effect_result.status == "TIMEOUT":
+                self._log(
+                    f"农业工具预期效果超时，准备重试/失败判断: phase={target_phase}, target={target_tile}, "
+                    f"elapsed={effect_result.elapsed_seconds:.3f}s, reason={effect_result.reason}, "
+                    f"state={self._format_farm_tile_state(game_state.farm_tiles_by_tile.get(target_tile))}, "
+                    f"aftermath={effect_result.aftermath.reason}"
+                )
+                self._active_tool_effect_plan = None
+                self.tool_action_tracker.reset()
+                return False
+
+            if effect_result.status == "BLOCKED":
+                self._log(
+                    f"农业工具动作后发现阻塞 UI，等待 Guard 处理: phase={target_phase}, target={target_tile}, "
+                    f"menu={effect_result.aftermath.blocking_menu_type}, text={effect_result.aftermath.blocking_menu_text}"
+                )
+                self._active_tool_effect_plan = None
+                self.tool_action_tracker.reset()
+                return True
+
+            self._log(
+                f"农业工具动作已收招且预期效果成立，等待下一帧统一推进: phase={target_phase}, target={target_tile}, "
+                f"UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
+                f"state={self._format_farm_tile_state(game_state.farm_tiles_by_tile.get(target_tile))}, "
+                f"effect={effect_result.reason}, aftermath={effect_result.aftermath.reason}"
+            )
+            self._active_tool_effect_plan = None
             self.tool_action_tracker.reset()
             return True
 
@@ -1028,6 +1076,7 @@ class FarmNode(BTNode):
                 f"tracker={self.tool_action_tracker.get_debug_snapshot()}, "
                 f"state={self._format_farm_tile_state(game_state.farm_tiles_by_tile.get(target_tile))}"
             )
+            self._active_tool_effect_plan = None
             self.tool_action_tracker.reset()
 
         return False
@@ -1046,21 +1095,101 @@ class FarmNode(BTNode):
         )
         return True
 
-    def _is_waiting_for_plant_item_result(self, game_state: StardewState, target_tile: Tile) -> bool:
+    def _is_waiting_for_plant_item_result(
+        self,
+        context: PlayerContext,
+        game_state: StardewState,
+        target_tile: Tile,
+    ) -> bool:
         if self._last_use_tool_at is None:
             return False
 
-        elapsed_after_use_item = time.time() - self._last_use_tool_at
-        if elapsed_after_use_item < PLANT_ITEM_VERIFY_DELAY_SECONDS:
+        effect_plan = self._active_tool_effect_plan or self._build_farm_effect_plan(
+            "PLANT",
+            target_tile,
+            started_at=self._last_use_tool_at,
+        )
+        effect_result = self.tool_aftermath_service.inspect_tool_effect(context, game_state, effect_plan)
+        if effect_result.status == "WAITING":
             self._log(
-                f"等待播种动作后的状态验证窗口: target={target_tile}, "
-                f"elapsed={elapsed_after_use_item:.2f}s, required={PLANT_ITEM_VERIFY_DELAY_SECONDS:.2f}s, "
+                f"等待播种预期效果刷新: target={target_tile}, "
+                f"elapsed={effect_result.elapsed_seconds:.2f}s, required={effect_plan.effect_timeout_seconds:.2f}s, "
                 f"attempt={self._attempt_count}/{self._get_max_attempts_for_phase('PLANT')}, "
                 f"state={self._format_farm_tile_state(game_state.farm_tiles_by_tile.get(target_tile))}"
             )
             return True
 
+        if effect_result.status == "BLOCKED":
+            self._log(
+                f"播种动作后发现阻塞 UI，等待 Guard 处理: target={target_tile}, "
+                f"menu={effect_result.aftermath.blocking_menu_type}, text={effect_result.aftermath.blocking_menu_text}"
+            )
+            self._active_tool_effect_plan = None
+            self._last_use_tool_at = None
+            return True
+
+        if effect_result.status == "TIMEOUT":
+            self._log(
+                f"播种预期效果超时，准备重试/失败判断: target={target_tile}, "
+                f"elapsed={effect_result.elapsed_seconds:.2f}s, reason={effect_result.reason}, "
+                f"state={self._format_farm_tile_state(game_state.farm_tiles_by_tile.get(target_tile))}, "
+                f"aftermath={effect_result.aftermath.reason}"
+            )
+        else:
+            self._log(
+                f"播种预期效果成立，等待下一帧统一推进: target={target_tile}, "
+                f"state={self._format_farm_tile_state(game_state.farm_tiles_by_tile.get(target_tile))}, "
+                f"effect={effect_result.reason}, aftermath={effect_result.aftermath.reason}"
+            )
+
+        self._active_tool_effect_plan = None
         self._last_use_tool_at = None
+        return effect_result.status == "SUCCESS"
+
+    def _build_farm_effect_plan(
+        self,
+        target_phase: FarmWorkPhase | None,
+        target_tile: Tile,
+        started_at: float | None = None,
+    ) -> ToolEffectPlan:
+        action_name = self._get_tool_effect_action_for_phase(target_phase)
+        return ToolEffectPlan(
+            owner="Farm",
+            action_name=action_name,
+            target_tile=target_tile,
+            effect_checker=lambda state: self._is_farm_effect_satisfied(state, target_phase, target_tile),
+            effect_timeout_seconds=FARM_EFFECT_TIMEOUT_SECONDS,
+            started_at=started_at or time.time(),
+            metadata={
+                "phase": target_phase,
+            },
+        )
+
+    def _get_tool_effect_action_for_phase(self, target_phase: FarmWorkPhase | None) -> ToolEffectAction:
+        if target_phase == "HOE":
+            return "HOE_TILE"
+        if target_phase == "PLANT":
+            return "PLANT_SEED"
+        if target_phase == "WATER":
+            return "WATER_TILE"
+        return "WATER_TILE"
+
+    def _is_farm_effect_satisfied(
+        self,
+        state: StardewState,
+        target_phase: FarmWorkPhase | None,
+        target_tile: Tile,
+    ) -> bool:
+        farm_tile_state = state.farm_tiles_by_tile.get(target_tile)
+        if farm_tile_state is None:
+            return False
+
+        if target_phase == "HOE":
+            return farm_tile_state.has_hoe_dirt
+        if target_phase == "PLANT":
+            return farm_tile_state.has_crop
+        if target_phase == "WATER":
+            return farm_tile_state.has_crop and farm_tile_state.is_watered
         return False
 
     def _get_obstacle_tool_group_order(self, obstacle_type: str) -> int:
@@ -1243,6 +1372,7 @@ class FarmNode(BTNode):
         self._has_faced_target = False
         self._last_use_tool_at = None
         self._last_water_attempt_at = None
+        self._active_tool_effect_plan = None
         self._positioning_recovery_count = 0
         self.tool_action_tracker.reset()
         self._reset_positioning_stuck_detection()
@@ -1260,6 +1390,7 @@ class FarmNode(BTNode):
         self._wait_ticks = 0
         self._last_use_tool_at = None
         self._last_water_attempt_at = None
+        self._active_tool_effect_plan = None
         self._positioning_recovery_count = 0
         self.tool_action_tracker.reset()
         self._reset_positioning_stuck_detection()
@@ -1620,6 +1751,7 @@ class FarmNode(BTNode):
         self._has_faced_target = False
         self._last_use_tool_at = None
         self._last_water_attempt_at = None
+        self._active_tool_effect_plan = None
         self._positioning_recovery_count = 0
         self.tool_action_tracker.reset()
         self._reset_positioning_stuck_detection()
@@ -1925,6 +2057,7 @@ class FarmNode(BTNode):
         blackboard.refill_watering_can_owner = "Farm"
         watering_can_item = self._get_watering_can_item(game_state)
         self.tool_action_tracker.reset()
+        self._active_tool_effect_plan = None
         self.positioning_controller.reset()
         print(f"\n💧 [FarmNode] 水壶没水，暂停当前浇水目标并请求补水: target={target_tile}")
         self._log(

@@ -159,7 +159,9 @@ Python 端原则：
 
 - `ClearObstacleNode` 和 `FarmNode` 使用 `ToolActionTracker` 等待工具动作从开始到收招。
 - C# 返回 `BUSY` 时，不增加尝试次数，不启动工具等待，保持节点 `RUNNING`。
-- 工具收招后必须用最新 state 验证结果，例如障碍是否消失、地块是否成为 HoeDirt、作物是否 `IsWatered=True`。
+- 工具收招后必须用最新 state 验证结果和副作用，例如障碍是否消失、范围内障碍是否减少、地块是否成为 HoeDirt、作物是否 `IsWatered=True`、掉落物是否出现、梯子是否出现或是否出现阻塞 UI。
+- 当前 `ToolAftermathService` 的工具效果等待窗口为 `1.0s`。它不是固定等待时间：如果 state 已经证明目标完成或有效副作用发生，节点应立即推进；只有工具收招后 1 秒内完全没有观察到预期效果或副作用，才进入超时、重试或失败判断。
+- 范围工具当前按“精确目标 + 副作用”双层判断。Scythe / 剑清理 Grass / Weeds 时，如果目标格没有立刻消失，但作用范围内预期障碍减少，或目标附近出现可拾取掉落物，也视为本次工具动作已经有效，避免因为要求目标格一次命中而原地等待。
 - Farm P1 的 `WATER_TILES` 阶段把临时失败地块放入浇水重试队列。只要地块仍然 `HasCrop=True` 且 `IsWatered=False`，就不应因为一次站位卡顿或动作未命中直接永久跳过。
 - 锄地、播种和清障阶段仍需要有限重试与明确失败原因，避免无限循环。
 
@@ -249,7 +251,7 @@ Chest P2/P3 约定：
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
 | 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
-| 工具动作后处理 | 最小版接入 | 已新增 `ToolAftermathService`，当前用于 Mining 破石后的目标变化/梯子查询，以及 ClearObstacle 收招后的目标变化/阻塞 UI 观察；已接入 `Debris` 掉落物感知，并通过 `CollectLootNode` 支持工具动作后的近距离可达掉落物自动拾取 |
+| 工具动作后处理 | 最小版接入 | 已新增 `ToolAftermathService`，当前用于 Mining 破石后的目标变化/梯子查询，以及 ClearObstacle 收招后的目标变化/范围副作用/阻塞 UI 观察；工具效果等待窗口为 `1.0s`，仅在没有观察到预期效果或有效副作用时作为超时兜底；已接入 `Debris` 掉落物感知，并通过 `CollectLootNode` 支持工具动作后的近距离可达掉落物自动拾取 |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |

@@ -10,15 +10,15 @@ from agent.behavior_tree.route_node import RouteTask
 
 TASK_MOCK_DATA: Dict[
     Literal[
-        "CHEST_P0_1",
-        "CHEST_P0_2",
-        "CHEST_P1_1",
-        "CHEST_P2_P3_1",
         "ROUTE_1",
         "ROUTE_BACKUP",
         "ROUTE_2",
         "ROUTE_3",
         "ROUTE_4",
+        "CHEST_P0_1",
+        "CHEST_P0_2",
+        "CHEST_P1_1",
+        "CHEST_P2_P3_1",
         "FARM_P0_1",
         "FARM_P0_2",
         "FARM_P0_3",

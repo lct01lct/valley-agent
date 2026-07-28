@@ -1,6 +1,6 @@
 import time
 
-from agent.action.tool.tool_aftermath_service import ToolAftermathRequest, ToolAftermathService
+from agent.action.tool.tool_aftermath_service import ToolAftermathRequest, ToolAftermathService, ToolEffectPlan
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.clearance_policy import (
     BLOCKING_ORDINARY_TREE_LAYERS,
@@ -48,6 +48,8 @@ POSITIONING_STUCK_TIMEOUT_SECONDS = 0.45
 CLEAR_TOOL_START_GRACE_SECONDS = 0.35
 CLEAR_TOOL_FINISH_TIMEOUT_SECONDS = 2.5
 AREA_CLEAR_VERIFY_GRACE_SECONDS = 0.45
+CLEAR_EFFECT_TIMEOUT_SECONDS = 1.0
+AREA_CLEAR_EFFECT_RADIUS = 1
 
 
 class ClearObstacleNode(BTNode):
@@ -66,6 +68,7 @@ class ClearObstacleNode(BTNode):
         self._blocked_stand_tiles: set[Tile] = set()
         self._deferred_loot_tiles: list[Tile] = []
         self._area_clear_verify_until: float | None = None
+        self._active_tool_effect_plan: ToolEffectPlan | None = None
         self.tool_aftermath_service = ToolAftermathService()
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=CLEAR_TOOL_START_GRACE_SECONDS,
@@ -189,49 +192,67 @@ class ClearObstacleNode(BTNode):
             )
             return "RUNNING"
         if tool_action_status == "FINISHED":
-            aftermath_result = self.tool_aftermath_service.inspect_after_tool_action(
-                context,
+            effect_plan = self._active_tool_effect_plan or self._build_clear_effect_plan(
+                target_tile,
+                obstacle_type,
                 game_state,
-                ToolAftermathRequest(
-                    owner="Farm" if self.owner == "Farm" else "Route",
-                    action_name="CLEAR_OBSTACLE",
-                    target_tile=target_tile,
-                    check_ladder_at_target_tile=False,
-                    target_tile_changed=not self._obstacle_exists(game_state.layers, target_tile, obstacle_type),
-                ),
+                required_tool,
             )
-            if aftermath_result.has_blocking_menu:
+            effect_result = self.tool_aftermath_service.inspect_tool_effect(context, game_state, effect_plan)
+            aftermath_result = effect_result.aftermath
+            if effect_result.status == "WAITING":
+                self._log(
+                    f"等待清障预期效果刷新: target={target_tile}, obstacle={obstacle_type}, "
+                    f"elapsed={effect_result.elapsed_seconds:.3f}s, reason={effect_result.reason}, "
+                    f"target_state={self._format_farm_tile_state(game_state, target_tile)}"
+                )
+                return "RUNNING"
+
+            if effect_result.status == "TIMEOUT":
+                self._log(
+                    f"清障预期效果超时，进入重试/失败判断: target={target_tile}, obstacle={obstacle_type}, "
+                    f"elapsed={effect_result.elapsed_seconds:.3f}s, reason={effect_result.reason}, "
+                    f"target_state={self._format_farm_tile_state(game_state, target_tile)}, aftermath={aftermath_result.reason}"
+                )
+                self._active_tool_effect_plan = None
+                self.tool_action_tracker.reset()
+                tool_action_status = "TIMEOUT"
+            elif effect_result.status == "UNKNOWN":
+                self._log(
+                    f"清障预期效果无法可靠验证，按旧后处理兜底: target={target_tile}, obstacle={obstacle_type}, "
+                    f"reason={effect_result.reason}, aftermath={aftermath_result.reason}"
+                )
+                self._active_tool_effect_plan = None
+                self.tool_action_tracker.reset()
+                tool_action_status = "TIMEOUT"
+            elif aftermath_result.has_blocking_menu:
                 self._log(
                     f"清障工具动作收招后发现阻塞 UI，等待 Guard 处理: target={target_tile}, "
                     f"obstacle={obstacle_type}, menu={aftermath_result.blocking_menu_type}, "
                     f"text={aftermath_result.blocking_menu_text}"
                 )
+                self._active_tool_effect_plan = None
                 self.tool_action_tracker.reset()
                 return "RUNNING"
-
-            if self._is_area_clear_obstacle(obstacle_type) and aftermath_result.target_change_state == "UNCHANGED":
-                self._area_clear_verify_until = time.time() + AREA_CLEAR_VERIFY_GRACE_SECONDS
-                self._wait_ticks = 0
-                self.tool_action_tracker.reset()
-                self._log(
-                    f"范围工具清障后目标暂未变化，等待 state 刷新后再决定是否补刀: "
-                    f"target={target_tile}, obstacle={obstacle_type}, "
-                    f"grace={AREA_CLEAR_VERIFY_GRACE_SECONDS:.2f}s, aftermath={aftermath_result.reason}"
-                )
-                return "RUNNING"
-
-            if self._is_tree_obstacle(obstacle_type):
-                self._defer_tree_loot(target_tile, aftermath_result.nearby_loot_tiles)
             else:
-                self._request_collect_loot(blackboard, target_tile, obstacle_type, aftermath_result.nearby_loot_tiles)
-            self._log(
-                f"清障工具动作已收招，等待下一帧验证结果: target={target_tile}, obstacle={obstacle_type}, "
-                f"UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
-                f"target_state={self._format_farm_tile_state(game_state, target_tile)}, "
-                f"aftermath={aftermath_result.reason}"
-            )
-            self.tool_action_tracker.reset()
-            return "RUNNING"
+                if self._is_tree_obstacle(obstacle_type):
+                    self._defer_tree_loot(target_tile, aftermath_result.nearby_loot_tiles)
+                else:
+                    self._request_collect_loot(
+                        blackboard,
+                        target_tile,
+                        obstacle_type,
+                        aftermath_result.nearby_loot_tiles,
+                    )
+                self._log(
+                    f"清障工具动作已收招且预期效果成立，等待下一帧验证结果: target={target_tile}, "
+                    f"obstacle={obstacle_type}, UsingTool={game_state.using_tool}, CanMove={game_state.can_move}, "
+                    f"target_state={self._format_farm_tile_state(game_state, target_tile)}, "
+                    f"effect={effect_result.reason}, aftermath={aftermath_result.reason}"
+                )
+                self._active_tool_effect_plan = None
+                self.tool_action_tracker.reset()
+                return "RUNNING"
         if tool_action_status == "TIMEOUT":
             self._log(
                 f"清障工具动作等待超时，准备进入重试/失败判断: target={target_tile}, obstacle={obstacle_type}, "
@@ -264,6 +285,12 @@ class ClearObstacleNode(BTNode):
             )
             return "RUNNING"
 
+        self._active_tool_effect_plan = self._build_clear_effect_plan(
+            target_tile,
+            obstacle_type,
+            game_state,
+            required_tool,
+        )
         self.tool_action_tracker.start()
         self._log(
             f"发送清障命令: target={target_tile}, obstacle={obstacle_type}, attempt={self._attempt_count}, "
@@ -310,6 +337,130 @@ class ClearObstacleNode(BTNode):
     def _target_changed(self, target_tile: Tile, obstacle_type: str) -> bool:
         return self._target_tile != target_tile or self._obstacle_type != obstacle_type
 
+    def _build_clear_effect_plan(
+        self,
+        target_tile: Tile,
+        obstacle_type: str,
+        game_state=None,
+        required_tool: str | None = None,
+    ) -> ToolEffectPlan:
+        is_area_clear_action = self._is_area_clear_action(obstacle_type, required_tool)
+        action_name = "AREA_CLEAR" if is_area_clear_action else "CLEAR_OBSTACLE"
+        initial_area_obstacle_count = self._count_area_clear_obstacles(game_state, target_tile, obstacle_type)
+        initial_area_obstacle_tiles = self._get_existing_area_clear_obstacle_tiles(game_state, target_tile, obstacle_type)
+        effect_checker = self._build_clear_effect_checker(
+            target_tile,
+            obstacle_type,
+            is_area_clear_action,
+            initial_area_obstacle_count,
+            initial_area_obstacle_tiles,
+        )
+        return ToolEffectPlan(
+            owner="Farm" if self.owner == "Farm" else "Route",
+            action_name=action_name,
+            target_tile=target_tile,
+            effect_checker=effect_checker,
+            side_effect_checker=self._build_clear_side_effect_checker(is_area_clear_action),
+            target_change_checker=lambda state: not self._obstacle_exists(state.layers, target_tile, obstacle_type),
+            effect_timeout_seconds=CLEAR_EFFECT_TIMEOUT_SECONDS,
+            metadata={
+                "obstacle_type": obstacle_type,
+                "node_owner": self.owner,
+                "required_tool": required_tool,
+                "expected_effect": self._get_expected_effect_name(obstacle_type),
+                "initial_area_obstacle_count": initial_area_obstacle_count,
+                "initial_area_obstacle_tiles": self._format_tile_list(initial_area_obstacle_tiles),
+            },
+        )
+
+    def _build_clear_effect_checker(
+        self,
+        target_tile: Tile,
+        obstacle_type: str,
+        is_area_clear_action: bool,
+        initial_area_obstacle_count: int | None,
+        initial_area_obstacle_tiles: list[Tile],
+    ):
+        if self._is_tree_obstacle(obstacle_type):
+            return lambda state: True
+
+        if is_area_clear_action:
+            return lambda state: self._is_area_clear_effect_satisfied(
+                state,
+                target_tile,
+                obstacle_type,
+                initial_area_obstacle_count,
+                initial_area_obstacle_tiles,
+            )
+
+        return lambda state: not self._obstacle_exists(state.layers, target_tile, obstacle_type)
+
+    def _build_clear_side_effect_checker(self, is_area_clear_action: bool):
+        if not is_area_clear_action:
+            return None
+
+        return lambda state, aftermath: bool(aftermath.nearby_loot_tiles)
+
+    def _get_expected_effect_name(self, obstacle_type: str | None) -> str:
+        if self._is_tree_obstacle(obstacle_type):
+            return "multi_hit_progress"
+        if self._is_area_clear_obstacle(obstacle_type):
+            return "area_obstacle_count_reduced"
+        return "target_tile_changed"
+
+    def _is_area_clear_effect_satisfied(
+        self,
+        state,
+        target_tile: Tile,
+        obstacle_type: str,
+        initial_area_obstacle_count: int | None,
+        initial_area_obstacle_tiles: list[Tile],
+    ) -> bool:
+        if not self._obstacle_exists(state.layers, target_tile, obstacle_type):
+            return True
+
+        for initial_tile in initial_area_obstacle_tiles:
+            if not self._obstacle_exists(state.layers, initial_tile, obstacle_type):
+                return True
+
+        if initial_area_obstacle_count is None:
+            return False
+
+        current_area_obstacle_count = self._count_area_clear_obstacles(state, target_tile, obstacle_type)
+        return current_area_obstacle_count < initial_area_obstacle_count
+
+    def _count_area_clear_obstacles(self, game_state, target_tile: Tile, obstacle_type: str) -> int | None:
+        if game_state is None or not self._is_area_clear_obstacle(obstacle_type):
+            return None
+
+        count = 0
+        for area_tile in self._get_area_clear_effect_tiles(target_tile):
+            if self._obstacle_exists(game_state.layers, area_tile, obstacle_type):
+                count += 1
+        return count
+
+    def _get_existing_area_clear_obstacle_tiles(
+        self,
+        game_state,
+        target_tile: Tile,
+        obstacle_type: str,
+    ) -> list[Tile]:
+        if game_state is None or not self._is_area_clear_obstacle(obstacle_type):
+            return []
+
+        return [
+            area_tile
+            for area_tile in sorted(self._get_area_clear_effect_tiles(target_tile), key=lambda tile: (tile.x, tile.y))
+            if self._obstacle_exists(game_state.layers, area_tile, obstacle_type)
+        ]
+
+    def _get_area_clear_effect_tiles(self, target_tile: Tile) -> set[Tile]:
+        return {
+            Tile(target_tile.x + dx, target_tile.y + dy)
+            for dx in range(-AREA_CLEAR_EFFECT_RADIUS, AREA_CLEAR_EFFECT_RADIUS + 1)
+            for dy in range(-AREA_CLEAR_EFFECT_RADIUS, AREA_CLEAR_EFFECT_RADIUS + 1)
+        }
+
     def _start(self, target_tile: Tile, obstacle_type: str) -> None:
         self._target_tile = target_tile
         self._obstacle_type = obstacle_type
@@ -322,6 +473,7 @@ class ClearObstacleNode(BTNode):
         self._blocked_stand_tiles = set()
         self._deferred_loot_tiles = []
         self._area_clear_verify_until = None
+        self._active_tool_effect_plan = None
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
         print(f"\n🟡 [ClearObstacleNode:{self.owner}] 准备清理必要障碍物: {obstacle_type} @ {target_tile}")
@@ -500,6 +652,7 @@ class ClearObstacleNode(BTNode):
         self._blocked_stand_tiles = set()
         self._deferred_loot_tiles = []
         self._area_clear_verify_until = None
+        self._active_tool_effect_plan = None
         self._reset_positioning_stuck_detection()
         self.positioning_controller.reset()
 
@@ -517,6 +670,18 @@ class ClearObstacleNode(BTNode):
 
     def _is_area_clear_obstacle(self, obstacle_type: str | None) -> bool:
         return normalize_obstacle_type(obstacle_type) in {"grass", "weeds"}
+
+    def _is_area_clear_action(self, obstacle_type: str | None, required_tool: str | None) -> bool:
+        if not self._is_area_clear_obstacle(obstacle_type):
+            return False
+        if required_tool is None:
+            return False
+
+        normalized_tool_name = required_tool.strip().lower()
+        return (
+            "scythe" in normalized_tool_name
+            or self._is_weapon_tool(required_tool)
+        )
 
     def _is_waiting_for_area_clear_state_verify(self, obstacle_type: str | None) -> bool:
         if not self._is_area_clear_obstacle(obstacle_type):

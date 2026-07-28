@@ -347,6 +347,14 @@ Selector
 - 检查是否产生新掉落物、新采集物或关键结果，例如 Ladder。
 - 生成结构化 aftermath 结果，供业务节点决定下一步。
 
+当前工具效果等待策略：
+
+- 工具动作先由 `ToolActionTracker` 观察 `UsingTool=True`，再等待 `UsingTool=False` 且 `CanMove=True`，确认动作收招。
+- 收招后进入 `ToolAftermathService`，用业务节点提供的 effect checker / side effect checker 验证最新 state。
+- `1.0s` 工具效果等待窗口只用于“完全没有观察到预期效果或有效副作用”的保护性超时，不是每次工具动作后的固定停顿。
+- 对 Scythe / 剑等范围工具，预期目标没有一次性完全清掉时，只要范围内预期障碍减少，或目标附近出现可拾取掉落物，就应视为本次工具动作有效；随后由业务节点决定继续补刀、切换目标或进入拾取。
+- 后续扩展到 BreakContainer、采集物、矿石和树木时，也应遵守同一原则：通用层观察副作用，业务节点解释目标是否完成，不用固定 sleep 替代 state 验证。
+
 示例结构：
 
 ```python

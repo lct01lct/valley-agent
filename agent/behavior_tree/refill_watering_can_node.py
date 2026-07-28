@@ -2,6 +2,7 @@ import json
 import time
 
 from agent.action.location.location import Location
+from agent.action.tool.tool_aftermath_service import ToolAftermathService, ToolEffectPlan
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
 from agent.action.valley_action.tool_targeting import format_tool_target
@@ -21,6 +22,7 @@ REFILL_ACTION_TIMEOUT_SECONDS = 12.0
 MAX_REFILL_ATTEMPTS = 3
 TOOL_START_GRACE_SECONDS = 0.35
 TOOL_FINISH_TIMEOUT_SECONDS = 3.0
+REFILL_EFFECT_TIMEOUT_SECONDS = 1.0
 
 
 class RefillWateringCanNode(BTNode):
@@ -44,6 +46,8 @@ class RefillWateringCanNode(BTNode):
         self._target_water_source_tile: Tile | None = None
         self._failed_water_source_tiles: set[Tile] = set()
         self._has_queried_water_sources = False
+        self._active_tool_effect_plan: ToolEffectPlan | None = None
+        self.tool_aftermath_service = ToolAftermathService()
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
         if not blackboard.require_refill_watering_can:
@@ -86,7 +90,7 @@ class RefillWateringCanNode(BTNode):
             self._log(f"等待切换水壶: {self._format_watering_can(watering_can_item)}")
             return "RUNNING"
 
-        if self._is_waiting_for_refill_action(game_state, watering_can_item):
+        if self._is_waiting_for_refill_action(context, game_state, watering_can_item):
             return "RUNNING"
 
         if not self._ensure_water_sources_cached(context, game_state):
@@ -127,6 +131,7 @@ class RefillWateringCanNode(BTNode):
             self._attempt_count -= 1
             return "RUNNING"
 
+        self._active_tool_effect_plan = self._build_refill_effect_plan(target_water_source_tile)
         self.tool_action_tracker.start()
         return "RUNNING"
 
@@ -136,6 +141,7 @@ class RefillWateringCanNode(BTNode):
         self._target_water_source_tile = None
         self._failed_water_source_tiles = set()
         self._has_queried_water_sources = False
+        self._active_tool_effect_plan = None
         self.positioning_controller.reset()
         self.tool_action_tracker.reset()
         print("\n💧 [RefillWateringCanNode] 水壶没水，准备前往水源补水。")
@@ -229,7 +235,12 @@ class RefillWateringCanNode(BTNode):
 
         return result
 
-    def _is_waiting_for_refill_action(self, game_state: StardewState, watering_can_item: InventoryItem) -> bool:
+    def _is_waiting_for_refill_action(
+        self,
+        context: PlayerContext,
+        game_state: StardewState,
+        watering_can_item: InventoryItem,
+    ) -> bool:
         if self.tool_action_tracker.is_idle():
             return False
 
@@ -242,10 +253,48 @@ class RefillWateringCanNode(BTNode):
         if status in ("WAITING_STARTED", "WAITING_FINISHED"):
             return True
 
-        self.tool_action_tracker.reset()
         if status == "TIMEOUT":
+            self._active_tool_effect_plan = None
+            self.tool_action_tracker.reset()
             self._log("补水动作等待超时，允许下一帧重试")
-        return False
+            return False
+
+        effect_result = self.tool_aftermath_service.inspect_tool_effect(
+            context,
+            game_state,
+            self._active_tool_effect_plan or self._build_refill_effect_plan(self._target_water_source_tile),
+        )
+        if effect_result.status == "WAITING":
+            self._log(
+                f"等待补水预期效果刷新: target={self._target_water_source_tile}, "
+                f"elapsed={effect_result.elapsed_seconds:.3f}s, reason={effect_result.reason}, "
+                f"{self._format_watering_can(watering_can_item)}"
+            )
+            return True
+
+        self._active_tool_effect_plan = None
+        self.tool_action_tracker.reset()
+        if effect_result.status == "TIMEOUT":
+            self._log(
+                f"补水预期效果超时，允许下一帧重试: target={self._target_water_source_tile}, "
+                f"reason={effect_result.reason}, aftermath={effect_result.aftermath.reason}, "
+                f"{self._format_watering_can(watering_can_item)}"
+            )
+            return False
+
+        if effect_result.status == "BLOCKED":
+            self._log(
+                f"补水动作后发现阻塞 UI，等待 Guard 处理: target={self._target_water_source_tile}, "
+                f"menu={effect_result.aftermath.blocking_menu_type}, text={effect_result.aftermath.blocking_menu_text}"
+            )
+            return True
+
+        self._log(
+            f"补水预期效果成立，等待下一帧统一完成: target={self._target_water_source_tile}, "
+            f"effect={effect_result.reason}, aftermath={effect_result.aftermath.reason}, "
+            f"{self._format_watering_can(watering_can_item)}"
+        )
+        return True
 
     def _finish(self, blackboard: AgentBlackboard) -> None:
         blackboard.require_refill_watering_can = False
@@ -270,8 +319,25 @@ class RefillWateringCanNode(BTNode):
         self._target_water_source_tile = None
         self._failed_water_source_tiles = set()
         self._has_queried_water_sources = False
+        self._active_tool_effect_plan = None
         self.positioning_controller.reset()
         self.tool_action_tracker.reset()
+
+    def _build_refill_effect_plan(self, target_water_source_tile: Tile | None) -> ToolEffectPlan:
+        return ToolEffectPlan(
+            owner="Farm",
+            action_name="WATER_TILE",
+            target_tile=target_water_source_tile,
+            effect_checker=lambda state: self._is_watering_can_refilled(state),
+            effect_timeout_seconds=REFILL_EFFECT_TIMEOUT_SECONDS,
+            metadata={
+                "phase": "REFILL_WATERING_CAN",
+            },
+        )
+
+    def _is_watering_can_refilled(self, state: StardewState) -> bool:
+        watering_can_item = self._get_watering_can_item(state)
+        return watering_can_item is not None and watering_can_item.water_left is not None and watering_can_item.water_left > 0
 
     def _get_watering_can_item(self, game_state: StardewState) -> InventoryItem | None:
         for item in game_state.inventory.items:

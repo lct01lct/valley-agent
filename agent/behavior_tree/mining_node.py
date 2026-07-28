@@ -9,7 +9,7 @@ from agent.action.combat.combat_tactical_resolver import (
 )
 from agent.action.location.location import Location
 from agent.action.combat.monster_threat import MonsterThreat, MonsterThreatEvaluator
-from agent.action.tool.tool_aftermath_service import ToolAftermathRequest, ToolAftermathResult, ToolAftermathService
+from agent.action.tool.tool_aftermath_service import ToolAftermathResult, ToolAftermathService, ToolEffectPlan
 from agent.action.valley_action.AStar import RouteTile, astar_solver
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal, PositioningResult
@@ -95,6 +95,7 @@ class MineNode(BTNode):
         self._last_interact_at = 0.0
         self._has_logged_task = False
         self._last_debug_heartbeat_at = 0.0
+        self._active_tool_effect_plan: ToolEffectPlan | None = None
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
         if not blackboard.macro_plan or blackboard.current_step_index >= len(blackboard.macro_plan):
@@ -451,6 +452,7 @@ class MineNode(BTNode):
             if tool_status == "FINISHED":
                 self.tool_action_tracker.reset()
                 aftermath_result = self._inspect_current_stone_aftermath(context, game_state)
+                self._active_tool_effect_plan = None
                 if aftermath_result.has_blocking_menu:
                     self._log(
                         f"挥镐收招后发现阻塞 UI，等待 Guard 处理: target={self._target_tile}, "
@@ -471,6 +473,7 @@ class MineNode(BTNode):
                 return "RUNNING"
             if tool_status == "TIMEOUT":
                 self.tool_action_tracker.reset()
+                self._active_tool_effect_plan = None
                 if self._target_tile is not None:
                     self._failed_stone_tiles.add(self._target_tile)
                 self._log(f"挥镐等待超时，换下一个石头: target={self._target_tile}")
@@ -510,6 +513,7 @@ class MineNode(BTNode):
             self._stone_attempt_count = 0
             self.positioning_controller.reset()
             self.tool_action_tracker.reset()
+            self._active_tool_effect_plan = None
         tactical_decision = self._resolve_mining_tactical_decision(
             blackboard=blackboard,
             game_state=game_state,
@@ -529,6 +533,7 @@ class MineNode(BTNode):
             self._corridor_ladder_tile = None
             self.positioning_controller.reset()
             self.tool_action_tracker.reset()
+            self._active_tool_effect_plan = None
             return "RUNNING"
 
         positioning_result = self._tick_positioning(game_state, context, self._target_tile)
@@ -554,6 +559,7 @@ class MineNode(BTNode):
             return "RUNNING"
 
         self._stone_attempt_count += 1
+        self._active_tool_effect_plan = self._build_break_stone_effect_plan(self._target_tile)
         self.tool_action_tracker.start()
         print(f"\n⛏️ [MineNode] 使用镐子破坏石头: target={self._target_tile}, attempt={self._stone_attempt_count}")
         self._log(
@@ -1031,6 +1037,7 @@ class MineNode(BTNode):
         self.positioning_controller.reset()
         self.approach_positioning_controller.reset()
         self.tool_action_tracker.reset()
+        self._active_tool_effect_plan = None
 
     def _inspect_current_stone_aftermath(
         self,
@@ -1038,31 +1045,47 @@ class MineNode(BTNode):
         game_state: StardewState,
     ) -> ToolAftermathResult:
         target_tile = self._target_tile
-        target_tile_changed = None
-        if target_tile is not None:
-            target_tile_changed = self._is_current_stone_done(game_state, target_tile) or self._has_ladder_at_tile(
-                game_state,
-                target_tile,
-            )
-
-        result = self.tool_aftermath_service.inspect_after_tool_action(
+        effect_result = self.tool_aftermath_service.inspect_tool_effect(
             context,
             game_state,
-            ToolAftermathRequest(
-                owner="Mining",
-                action_name="BREAK_STONE",
-                target_tile=target_tile,
-                check_ladder_at_target_tile=target_tile is not None and bool(target_tile_changed),
-                target_tile_changed=target_tile_changed,
-            ),
+            self._active_tool_effect_plan or self._build_break_stone_effect_plan(target_tile),
         )
+        result = effect_result.aftermath
         self._log(
-            f"工具后处理结果: target={target_tile}, target_changed={target_tile_changed}, "
+            f"工具后处理结果: target={target_tile}, effect_status={effect_result.status}, "
+            f"effect_satisfied={effect_result.effect_satisfied}, "
             f"change_state={result.target_change_state}, generated_ladder={result.generated_ladder_tile}, "
             f"ladder_query={result.ladder_query_status}, blocking_menu={result.has_blocking_menu}, "
-            f"reason={result.reason}"
+            f"reason={result.reason}, effect_reason={effect_result.reason}"
         )
         return result
+
+    def _build_break_stone_effect_plan(self, target_tile: Tile | None) -> ToolEffectPlan:
+        return ToolEffectPlan(
+            owner="Mining",
+            action_name="BREAK_STONE",
+            target_tile=target_tile,
+            effect_checker=lambda state: self._is_break_stone_effect_observed(state, target_tile),
+            target_change_checker=lambda state: self._is_break_stone_target_changed(state, target_tile),
+            check_ladder_at_target_tile=target_tile is not None,
+            effect_timeout_seconds=0.0,
+            metadata={
+                "phase": "BREAK_STONE",
+                "expected_effect": "stone_removed_or_ladder_detected_or_multi_hit_progress_unknown",
+            },
+        )
+
+    def _is_break_stone_effect_observed(self, state: StardewState, target_tile: Tile | None) -> bool | None:
+        if target_tile is None:
+            return None
+        if self._is_current_stone_done(state, target_tile) or self._has_ladder_at_tile(state, target_tile):
+            return True
+        return None
+
+    def _is_break_stone_target_changed(self, state: StardewState, target_tile: Tile | None) -> bool | None:
+        if target_tile is None:
+            return None
+        return self._is_current_stone_done(state, target_tile) or self._has_ladder_at_tile(state, target_tile)
 
     def _mark_current_stone_done_after_aftermath(
         self,
@@ -1159,6 +1182,7 @@ class MineNode(BTNode):
         self.positioning_controller.reset()
         self.approach_positioning_controller.reset()
         self.tool_action_tracker.reset()
+        self._active_tool_effect_plan = None
         self._phase = None
         self._task_signature = None
         self._started_at = None
