@@ -235,6 +235,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/behavior_tree/`：行为树节点、黑板、玩家上下文、规划兜底和寻路控制。
 - `agent/memory/`：运行期地图知识缓存和长期记忆预留接口。
 - `agent/action/map/map.py`：`HardcodedStardewMap`，维护硬编码场景连通图和最少场景跳数候选路线枚举。
+- `agent/action/mining/mine_target.py`：Mining 目标抽象层，将矿井入口、梯子、Stone、MiningNode 以及后续采集物/木箱木桶统一建模为 `MineTarget`。
 - `agent/action/valley_action/AStar.py`：本地 A\* 寻路、路线动作标注和障碍代价函数。
 - `agent/action/valley_action/clearance_policy.py`：清障策略层，判断障碍是否允许清理、所需工具和清障代价；未来可接入 Agent Skill/Planner 对普通树等高价值资源的保护策略。
 - `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。
@@ -256,6 +257,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 行为树是主控层。增加实时能力时优先新增或完善确定性节点，不把 `LLM_Node` 变成通用执行器。
 - `LLM_Node` 只做最后兜底的宏观计划生成、补计划或恢复建议，不参与每帧移动控制。
 - 未来战术层推荐采用“LLM / Planner 做战略，Utility Tactical Resolver 做战术权衡，行为树做确定性执行”的分层方案；不要把冲层、刷矿、刷怪、机会目标和撤退等多目标权衡长期散落在单个执行节点里。
+- Mining 目标选择应优先经过 `MineTarget` 抽象。MineNode 可以执行目标，但不应长期直接散落读取 `Ladders`、`MiningNodes`、`Stone`、未来采集物和木箱木桶的选择规则。
 - 每个任务和节点都应有前置条件、执行逻辑、成功判定、超时和恢复策略。
 - 寻路需要区分硬障碍、可绕行障碍、可破坏障碍和交互式门。
 - 普通树 `Tree0` ~ `Tree5` 属于“策略允许后可清理”的高成本障碍；当前 Route 和 Farm 规划区域默认允许砍普通树。砍普通树时，如果同一目标地块残留普通树桩，`ClearObstacleNode` 会继续砍完后再触发拾取。`FruitTree0` ~ `FruitTree5` 和独立规划目标中的 `TreeStump` 暂不自动清理。

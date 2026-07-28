@@ -9,6 +9,7 @@ from agent.action.combat.combat_tactical_resolver import (
 )
 from agent.action.location.location import Location
 from agent.action.combat.monster_threat import MonsterThreat, MonsterThreatEvaluator
+from agent.action.mining.mine_target import MineTarget, MineTargetSelector
 from agent.action.tool.tool_aftermath_service import ToolAftermathResult, ToolAftermathService, ToolEffectPlan
 from agent.action.valley_action.AStar import RouteTile, astar_solver
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
@@ -72,6 +73,7 @@ class MineNode(BTNode):
         self.approach_positioning_controller = PositioningController()
         self.threat_evaluator = MonsterThreatEvaluator()
         self.tactical_resolver = CombatTacticalResolver()
+        self.mine_target_selector = MineTargetSelector()
         self.tool_aftermath_service = ToolAftermathService()
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=MINE_TOOL_START_GRACE_SECONDS,
@@ -203,8 +205,8 @@ class MineNode(BTNode):
                 current_task=current_task,
                 target_tile=ladder.tile,
                 target_name="梯子",
-                require_tool_target=True,
-                require_close_to_target=True,
+                require_tool_target=ladder.require_tool_target,
+                require_close_to_target=ladder.require_close_to_target,
             )
 
         self._phase = "BREAK_STONE"
@@ -242,9 +244,9 @@ class MineNode(BTNode):
             current_task=current_task,
             target_tile=entrance.tile,
             target_name="矿洞入口",
-            require_tool_target=True,
-            forced_stand_tiles=self._build_mine_entrance_stand_tiles(entrance.tile),
-            require_close_to_target=True,
+            require_tool_target=entrance.require_tool_target,
+            forced_stand_tiles=entrance.candidate_stand_tiles,
+            require_close_to_target=entrance.require_close_to_target,
         )
 
     def _run_interact_target(
@@ -774,48 +776,33 @@ class MineNode(BTNode):
             candidate_stand_tiles.add(target_tile)
         return candidate_stand_tiles
 
-    def _build_mine_entrance_stand_tiles(self, entrance_tile: Tile) -> set[Tile]:
-        return self._build_cardinal_neighbor_tiles(entrance_tile)
-
-    def _select_nearest_interact_target(
-        self,
-        game_state: StardewState,
-        targets: list[MineInteractTargetState],
-    ) -> MineInteractTargetState | None:
-        if not targets:
-            return None
-        return min(targets, key=lambda target: self._tile_distance(game_state.player_tile, target.tile))
-
-    def _select_mine_level_entrance(self, game_state: StardewState) -> MineInteractTargetState | None:
+    def _select_mine_level_entrance(self, game_state: StardewState) -> MineTarget | None:
+        entrance_targets = self.mine_target_selector.build_mine_entrance_targets(game_state)
         exact_mine_entrances = [
             target
-            for target in game_state.mine_entrances
-            if self._normalize_action(target.action) == "mine"
+            for target, raw_target in zip(entrance_targets, game_state.mine_entrances)
+            if self._normalize_action(raw_target.action) == "mine"
         ]
         if exact_mine_entrances:
-            return self._select_nearest_interact_target(game_state, exact_mine_entrances)
+            return self.mine_target_selector.select_nearest_target(game_state, exact_mine_entrances)
 
         fallback_entrances = [
             target
-            for target in game_state.mine_entrances
-            if self._is_possible_mine_level_entrance(target)
+            for target, raw_target in zip(entrance_targets, game_state.mine_entrances)
+            if self._is_possible_mine_level_entrance(raw_target)
         ]
-        return self._select_nearest_interact_target(game_state, fallback_entrances)
+        return self.mine_target_selector.select_nearest_target(game_state, fallback_entrances)
 
-    def _select_next_level_ladder(self, game_state: StardewState) -> MineInteractTargetState | None:
-        next_level_ladders = [
-            ladder
-            for ladder in game_state.ladders
-            if ladder.tile not in self._return_prompt_tiles
-        ]
+    def _select_next_level_ladder(self, game_state: StardewState) -> MineTarget | None:
+        next_level_ladders = self.mine_target_selector.build_ladder_targets(game_state, self._return_prompt_tiles)
         if len(next_level_ladders) != len(game_state.ladders):
             self._log(
                 "过滤矿层返回入口梯子: "
                 f"return_prompt_tiles={self._format_tiles(self._return_prompt_tiles)}, "
                 f"raw_ladders={self._format_targets(game_state.ladders)}, "
-                f"next_level_ladders={self._format_targets(next_level_ladders)}"
+                f"next_level_ladders={self._format_mine_targets(next_level_ladders)}"
             )
-        return self._select_nearest_interact_target(game_state, next_level_ladders)
+        return self.mine_target_selector.select_nearest_target(game_state, next_level_ladders)
 
     def _record_return_prompt_tiles(self, game_state: StardewState) -> None:
         player_tile = game_state.player_tile
@@ -964,9 +951,10 @@ class MineNode(BTNode):
         return min(scored_stones, key=lambda item: item[0])[1]
 
     def _get_candidate_stone_tiles(self, game_state: StardewState, excluded_tiles: set[Tile]) -> set[Tile]:
-        stone_tiles: set[Tile] = {node.tile for node in game_state.mining_nodes if node.tile not in excluded_tiles}
-        stone_tiles.update(tile for tile in game_state.layers.get("Stone", set()) if tile not in excluded_tiles)
-        return stone_tiles
+        return {
+            target.tile
+            for target in self.mine_target_selector.build_breakable_rock_targets(game_state, excluded_tiles)
+        }
 
     def _is_stone_tile(self, game_state: StardewState, tile: Tile) -> bool:
         return tile in game_state.mining_nodes_by_tile or tile in game_state.layers.get("Stone", set())
@@ -1287,6 +1275,18 @@ class MineNode(BTNode):
                 f"/source={target.source or '-'}"
                 f"/qid={target.qualified_item_id or '-'}"
                 f"/action={target.action or '-'}"
+            )
+            for target in targets[:8]
+        ]
+        return "[" + ", ".join(preview) + "]"
+
+    def _format_mine_targets(self, targets: list[MineTarget]) -> str:
+        preview = [
+            (
+                f"{target.target_type}@{target.tile}"
+                f"/source={target.source or '-'}"
+                f"/qid={target.qualified_item_id or '-'}"
+                f"/action={target.action}"
             )
             for target in targets[:8]
         ]
