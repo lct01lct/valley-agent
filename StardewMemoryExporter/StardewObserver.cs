@@ -42,6 +42,8 @@ namespace StardewMemoryExporter
         private List<object> _cachedFarmTiles = new List<object>();
         private List<object> _cachedLadders = new List<object>();
         private List<object> _cachedMiningNodes = new List<object>();
+        private List<object> _cachedMineCollectibles = new List<object>();
+        private List<object> _cachedMineBreakableContainers = new List<object>();
         private List<object> _cachedMineEntrances = new List<object>();
 
         private List<string> _lastHudMessages = new List<string>();
@@ -214,6 +216,8 @@ namespace StardewMemoryExporter
                     _cachedFarmTiles = CreateFarmTilesSnapshot(location, player);
                     _cachedLadders = MineStateScanner.CreateLaddersSnapshot(location);
                     _cachedMiningNodes = MineStateScanner.CreateMiningNodesSnapshot(location);
+                    _cachedMineCollectibles = MineStateScanner.CreateMineCollectiblesSnapshot(location);
+                    _cachedMineBreakableContainers = MineStateScanner.CreateMineBreakableContainersSnapshot(location);
                     _cachedMineEntrances = MineStateScanner.CreateMineEntrancesSnapshot(location);
                     _lastHeavyStateAtMs = nowMs;
                     _lastHeavyStateLocation = locationName;
@@ -259,6 +263,8 @@ namespace StardewMemoryExporter
                     FarmTiles = shouldRefreshHeavyState ? _cachedFarmTiles : null,
                     Ladders = shouldRefreshHeavyState ? _cachedLadders : null,
                     MiningNodes = shouldRefreshHeavyState ? _cachedMiningNodes : null,
+                    MineCollectibles = shouldRefreshHeavyState ? _cachedMineCollectibles : null,
+                    MineBreakableContainers = shouldRefreshHeavyState ? _cachedMineBreakableContainers : null,
                     MineEntrances = shouldRefreshHeavyState ? _cachedMineEntrances : null,
                     Debris = DebrisStateScanner.CreateDebrisSnapshot(location),
                     warps = _cachedWarpDataList,

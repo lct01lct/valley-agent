@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
-from server.valley_server import MineInteractTargetState, MiningNodeState, StardewState
+from server.valley_server import MineInteractTargetState, MineObjectTargetState, MiningNodeState, StardewState
 from server.type import Tile
 
 
@@ -64,8 +64,7 @@ class MineTargetSelector:
     """
     从当前 SMAPI state 中构建矿井目标。
 
-    当前先接入已有协议中的 Ladder、MineEntrance、Stone 和 MiningNode。
-    Collectible / BreakableContainer 的类型先预留，等 C# Observer 暴露对应 state 后再填充。
+    当前接入 Ladder、MineEntrance、Stone、MiningNode、Collectible 和 BreakableContainer。
     """
 
     def build_ladder_targets(self, state: StardewState, excluded_tiles: set[Tile] | None = None) -> list[MineTarget]:
@@ -98,6 +97,40 @@ class MineTargetSelector:
             targets_by_tile[stone_tile] = self._from_stone_tile(stone_tile)
 
         return list(targets_by_tile.values())
+
+    def build_collectible_targets(
+        self,
+        state: StardewState,
+        excluded_tiles: set[Tile] | None = None,
+    ) -> list[MineTarget]:
+        excluded_tiles = excluded_tiles or set()
+        return [
+            self._from_collectible_state(collectible)
+            for collectible in state.mine_collectibles
+            if collectible.tile not in excluded_tiles
+        ]
+
+    def build_breakable_container_targets(
+        self,
+        state: StardewState,
+        excluded_tiles: set[Tile] | None = None,
+    ) -> list[MineTarget]:
+        excluded_tiles = excluded_tiles or set()
+        return [
+            self._from_breakable_container_state(container)
+            for container in state.mine_breakable_containers
+            if container.tile not in excluded_tiles
+        ]
+
+    def build_all_targets(self, state: StardewState, excluded_tiles: set[Tile] | None = None) -> list[MineTarget]:
+        excluded_tiles = excluded_tiles or set()
+        return [
+            *self.build_ladder_targets(state, excluded_tiles),
+            *self.build_mine_entrance_targets(state),
+            *self.build_collectible_targets(state, excluded_tiles),
+            *self.build_breakable_container_targets(state, excluded_tiles),
+            *self.build_breakable_rock_targets(state, excluded_tiles),
+        ]
 
     def select_nearest_target(self, state: StardewState, targets: list[MineTarget]) -> MineTarget | None:
         if not targets:
@@ -177,6 +210,40 @@ class MineTargetSelector:
             require_close_to_target=False,
             blocks_movement=True,
             priority=2.0,
+        )
+
+    def _from_collectible_state(self, collectible: MineObjectTargetState) -> MineTarget:
+        return MineTarget(
+            target_type="COLLECTIBLE",
+            tile=collectible.tile,
+            action="INTERACT",
+            name=collectible.name,
+            display_name=collectible.display_name,
+            qualified_item_id=collectible.qualified_item_id,
+            source=collectible.source,
+            required_tool=None,
+            can_stand_on_target=True,
+            require_tool_target=True,
+            require_close_to_target=True,
+            blocks_movement=False,
+            priority=1.5,
+        )
+
+    def _from_breakable_container_state(self, container: MineObjectTargetState) -> MineTarget:
+        return MineTarget(
+            target_type="BREAKABLE_CONTAINER",
+            tile=container.tile,
+            action="ATTACK_WEAPON",
+            name=container.name,
+            display_name=container.display_name,
+            qualified_item_id=container.qualified_item_id,
+            source=container.source,
+            required_tool="Weapon",
+            can_stand_on_target=False,
+            require_tool_target=True,
+            require_close_to_target=False,
+            blocks_movement=True,
+            priority=1.25,
         )
 
     def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:

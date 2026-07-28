@@ -27,6 +27,7 @@ TASK_MOCK_DATA: Dict[
         "FARM_P1_2",
         "FARM_P1_3",
         "MINING_P0_1",
+        "MINING_P0_2",
     ],
     List[BaseTask],
 ] = {
@@ -206,6 +207,24 @@ TASK_MOCK_DATA: Dict[
             mine_action="FIND_NEXT_LEVEL",
             target_loc="Mine",
             target_mine_level=10,
+        ),
+    ],
+    "MINING_P0_2": [  # Mining P0/P2：冲层时允许顺手处理低成本资源；当前先作为策略参数 mock。
+        # RouteTask(task_type="ROUTE", desc="前往矿洞", target_loc="Mine"),
+        MiningTask(
+            task_type="MINE",
+            desc="进入矿洞并寻找下一层，允许顺手采集低成本资源",
+            mine_action="FIND_NEXT_LEVEL",
+            target_loc="Mine",
+            target_mine_level=10,
+            collect_opportunity_resources=True,
+            opportunity_target_types=[
+                "COLLECTIBLE",
+                "BREAKABLE_CONTAINER",
+                "MINING_NODE",
+            ],
+            max_opportunity_detour_tiles=2,
+            max_opportunity_actions_per_level=2,
         ),
     ],
 }

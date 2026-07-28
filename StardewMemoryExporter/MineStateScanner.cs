@@ -55,7 +55,7 @@ namespace StardewMemoryExporter
             foreach (var pair in location.Objects.Pairs)
             {
                 StardewValley.Object obj = pair.Value;
-                if (obj == null || !IsMiningNodeObject(obj) && !IsMineShaftBreakableObject(obj))
+                if (obj == null || !IsMiningNodeObject(obj))
                 {
                     continue;
                 }
@@ -72,6 +72,68 @@ namespace StardewMemoryExporter
             }
 
             return miningNodes;
+        }
+
+        public static List<object> CreateMineCollectiblesSnapshot(GameLocation location)
+        {
+            var collectibles = new List<object>();
+            if (location is not MineShaft)
+            {
+                return collectibles;
+            }
+
+            foreach (var pair in location.Objects.Pairs)
+            {
+                StardewValley.Object obj = pair.Value;
+                if (obj == null || !IsMineCollectibleObject(obj))
+                {
+                    continue;
+                }
+
+                collectibles.Add(new
+                {
+                    Tile = new[] { (int)pair.Key.X, (int)pair.Key.Y },
+                    Type = "Collectible",
+                    Name = obj.Name ?? "",
+                    DisplayName = obj.DisplayName ?? "",
+                    QualifiedItemId = obj.QualifiedItemId ?? "",
+                    ParentSheetIndex = obj.ParentSheetIndex,
+                    Source = "Object",
+                });
+            }
+
+            return collectibles;
+        }
+
+        public static List<object> CreateMineBreakableContainersSnapshot(GameLocation location)
+        {
+            var containers = new List<object>();
+            if (location is not MineShaft)
+            {
+                return containers;
+            }
+
+            foreach (var pair in location.Objects.Pairs)
+            {
+                StardewValley.Object obj = pair.Value;
+                if (obj == null || !IsMineBreakableContainerObject(obj))
+                {
+                    continue;
+                }
+
+                containers.Add(new
+                {
+                    Tile = new[] { (int)pair.Key.X, (int)pair.Key.Y },
+                    Type = "BreakableContainer",
+                    Name = obj.Name ?? "",
+                    DisplayName = obj.DisplayName ?? "",
+                    QualifiedItemId = obj.QualifiedItemId ?? "",
+                    ParentSheetIndex = obj.ParentSheetIndex,
+                    Source = obj.GetType().Name,
+                });
+            }
+
+            return containers;
         }
 
         public static List<object> CreateMineEntrancesSnapshot(GameLocation location)
@@ -367,6 +429,11 @@ namespace StardewMemoryExporter
                 return false;
             }
 
+            if (IsMineBreakableContainerObject(obj) || IsMineCollectibleObject(obj))
+            {
+                return false;
+            }
+
             string name = obj.Name ?? "";
             string qualifiedItemId = obj.QualifiedItemId ?? "";
             return name.IndexOf("Stone", StringComparison.OrdinalIgnoreCase) >= 0
@@ -376,7 +443,33 @@ namespace StardewMemoryExporter
                 || qualifiedItemId.IndexOf("Ore", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private static bool IsMineShaftBreakableObject(StardewValley.Object obj)
+        private static bool IsMineCollectibleObject(StardewValley.Object obj)
+        {
+            if (IsLadderObject(obj))
+            {
+                return false;
+            }
+
+            if (obj is Chest || IsMineBreakableContainerObject(obj))
+            {
+                return false;
+            }
+
+            string name = obj.Name ?? "";
+            string displayName = obj.DisplayName ?? "";
+            string qualifiedItemId = obj.QualifiedItemId ?? "";
+            string combined = $"{name} {displayName} {qualifiedItemId}";
+
+            return combined.IndexOf("Quartz", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Earth Crystal", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Frozen Tear", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Fire Quartz", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Cave Carrot", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Dwarf Scroll", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Artifact", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsMineBreakableContainerObject(StardewValley.Object obj)
         {
             if (IsLadderObject(obj))
             {
@@ -388,17 +481,16 @@ namespace StardewMemoryExporter
                 return false;
             }
 
+            string typeName = obj.GetType().Name ?? "";
             string name = obj.Name ?? "";
             string displayName = obj.DisplayName ?? "";
             string qualifiedItemId = obj.QualifiedItemId ?? "";
-            string combined = $"{name} {displayName} {qualifiedItemId}";
-            if (combined.IndexOf("Torch", StringComparison.OrdinalIgnoreCase) >= 0
-                || combined.IndexOf("Chest", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                return false;
-            }
+            string combined = $"{typeName} {name} {displayName} {qualifiedItemId}";
 
-            return true;
+            return combined.IndexOf("BreakableContainer", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Barrel", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Crate", StringComparison.OrdinalIgnoreCase) >= 0
+                || combined.IndexOf("Container", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string GetMiningNodeType(StardewValley.Object obj)

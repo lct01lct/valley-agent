@@ -153,6 +153,19 @@ class MiningNodeState:
         self.parent_sheet_index: int = int(raw_mining_node.get("ParentSheetIndex", -1))
 
 
+class MineObjectTargetState:
+    def __init__(self, raw_target: dict):
+        # 以下字段名来自 C# / SMAPI state 协议，读取时必须保持原始大小写。
+        raw_tile = raw_target.get("Tile", [0, 0])
+        self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
+        self.type: str = raw_target.get("Type", "")
+        self.name: str = raw_target.get("Name", "")
+        self.display_name: str = raw_target.get("DisplayName", "")
+        self.qualified_item_id: str = raw_target.get("QualifiedItemId", "")
+        self.parent_sheet_index: int = int(raw_target.get("ParentSheetIndex", -1))
+        self.source: str = raw_target.get("Source", "")
+
+
 class DebrisState:
     def __init__(self, raw_debris: dict):
         # 以下字段名来自 Stardew Valley Debris state 协议，读取时保持原始大小写。
@@ -276,6 +289,30 @@ class StardewState:
             mining_node = MiningNodeState(raw_mining_node)
             self.mining_nodes.append(mining_node)
             self.mining_nodes_by_tile[mining_node.tile] = mining_node
+
+        self.mine_collectibles: list[MineObjectTargetState] = []
+        self.mine_collectibles_by_tile: dict[Tile, MineObjectTargetState] = {}
+        raw_mine_collectibles = raw_json_data.get("MineCollectibles")
+        self.has_mine_collectibles_snapshot = isinstance(raw_mine_collectibles, list)
+        for raw_mine_collectible in (raw_mine_collectibles if self.has_mine_collectibles_snapshot else []):
+            if not isinstance(raw_mine_collectible, dict):
+                continue
+            mine_collectible = MineObjectTargetState(raw_mine_collectible)
+            self.mine_collectibles.append(mine_collectible)
+            self.mine_collectibles_by_tile[mine_collectible.tile] = mine_collectible
+
+        self.mine_breakable_containers: list[MineObjectTargetState] = []
+        self.mine_breakable_containers_by_tile: dict[Tile, MineObjectTargetState] = {}
+        raw_mine_breakable_containers = raw_json_data.get("MineBreakableContainers")
+        self.has_mine_breakable_containers_snapshot = isinstance(raw_mine_breakable_containers, list)
+        for raw_mine_breakable_container in (
+            raw_mine_breakable_containers if self.has_mine_breakable_containers_snapshot else []
+        ):
+            if not isinstance(raw_mine_breakable_container, dict):
+                continue
+            mine_breakable_container = MineObjectTargetState(raw_mine_breakable_container)
+            self.mine_breakable_containers.append(mine_breakable_container)
+            self.mine_breakable_containers_by_tile[mine_breakable_container.tile] = mine_breakable_container
 
         self.mine_entrances: list[MineInteractTargetState] = []
         raw_mine_entrances = raw_json_data.get("MineEntrances")
@@ -429,6 +466,32 @@ class StardewState:
                     continue
                 self.mining_nodes.append(previous_mining_node)
                 self.mining_nodes_by_tile[previous_mining_node.tile] = previous_mining_node
+
+        if not self.has_mine_collectibles_snapshot:
+            self.mine_collectibles = previous_state.mine_collectibles.copy()
+            self.mine_collectibles_by_tile = previous_state.mine_collectibles_by_tile.copy()
+        elif self.state_scope != "global" and self.scan_range is not None:
+            for previous_mine_collectible in previous_state.mine_collectibles:
+                if previous_mine_collectible.tile in self.mine_collectibles_by_tile:
+                    continue
+                if self.is_tile_inside_current_scan(previous_mine_collectible.tile):
+                    continue
+                self.mine_collectibles.append(previous_mine_collectible)
+                self.mine_collectibles_by_tile[previous_mine_collectible.tile] = previous_mine_collectible
+
+        if not self.has_mine_breakable_containers_snapshot:
+            self.mine_breakable_containers = previous_state.mine_breakable_containers.copy()
+            self.mine_breakable_containers_by_tile = previous_state.mine_breakable_containers_by_tile.copy()
+        elif self.state_scope != "global" and self.scan_range is not None:
+            for previous_mine_breakable_container in previous_state.mine_breakable_containers:
+                if previous_mine_breakable_container.tile in self.mine_breakable_containers_by_tile:
+                    continue
+                if self.is_tile_inside_current_scan(previous_mine_breakable_container.tile):
+                    continue
+                self.mine_breakable_containers.append(previous_mine_breakable_container)
+                self.mine_breakable_containers_by_tile[previous_mine_breakable_container.tile] = (
+                    previous_mine_breakable_container
+                )
 
         if not self.has_mine_entrances_snapshot:
             self.mine_entrances = previous_state.mine_entrances.copy()

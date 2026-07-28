@@ -390,7 +390,7 @@ ToolAftermathResult(
 
 #### Mining 目标类型扩展
 
-Mining P2 不应只理解 Stone / MiningNode。当前已新增第一版结构化 `MineTarget` / `MineTargetSelector`，并先接入已有 state 中的 Ladder、MineEntrance、Stone 和 MiningNode。后续需要继续把矿井内更多目标纳入同一抽象：
+Mining P2 不应只理解 Stone / MiningNode。当前已新增第一版结构化 `MineTarget` / `MineTargetSelector`，并接入 state 中的 Ladder、MineEntrance、Stone、MiningNode、Collectible 和 BreakableContainer。后续需要继续把矿井目标选择和执行策略纳入同一抽象：
 
 ```text
 MineTarget
@@ -414,7 +414,8 @@ MineTarget
 
 - `Ladder` / `MineEntrance`：来自 `state.ladders` / `state.mine_entrances`，用于交互目标选择。
 - `Stone` / `MiningNode`：来自 `state.layers["Stone"]` 和 `state.mining_nodes`，用于破石候选选择。
-- `Collectible` / `BreakableContainer`：类型已预留，但暂不执行；等待 C# Observer 暴露采集物、木箱/木桶等结构化 state 后再接入。
+- `Collectible`：来自 `state.mine_collectibles`，用于后续走近/交互拾取地晶、石英、火水晶等徒手采集物。
+- `BreakableContainer`：来自 `state.mine_breakable_containers`，用于后续切武器打破木箱/木桶并处理掉落物。
 - MineNode 仍保留现有执行状态机，避免在目标抽象第一步就重写完整 Mining 流程。
 
 #### 推荐讨论和开发顺序

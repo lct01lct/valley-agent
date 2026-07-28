@@ -101,6 +101,7 @@ Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。
 - `MiningResourceCheckNode`：在 MiningTask 开始前检查背包/工具栏中是否有 Pickaxe；缺失时安全停止并把恢复原因写入 blackboard。
 - `SwitchToolNode`：根据 Mining 当前阶段切换 Pickaxe。
 - `MineNode`：当前实现 Mining P0，负责矿洞入口交互、读取 `MineLevel`、寻找 Ladder，没有 Ladder 时站到 Stone / MiningNode 上下左右相邻格并使用 Pickaxe，验证 Stone 消失或 Ladder 出现，最终进入目标矿层。
+- `MineTargetSelector`：把 SMAPI state 中的 `Ladders`、`MineEntrances`、`MiningNodes`、`MineCollectibles` 和 `MineBreakableContainers` 统一建模为 `MineTarget`。MineNode 后续应消费目标抽象，不要在执行节点里继续扩散不同对象类型的读取和分类逻辑。
 
 ### Context 负责状态输入和动作输出
 
@@ -235,7 +236,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/behavior_tree/`：行为树节点、黑板、玩家上下文、规划兜底和寻路控制。
 - `agent/memory/`：运行期地图知识缓存和长期记忆预留接口。
 - `agent/action/map/map.py`：`HardcodedStardewMap`，维护硬编码场景连通图和最少场景跳数候选路线枚举。
-- `agent/action/mining/mine_target.py`：Mining 目标抽象层，将矿井入口、梯子、Stone、MiningNode 以及后续采集物/木箱木桶统一建模为 `MineTarget`。
+- `agent/action/mining/mine_target.py`：Mining 目标抽象层，将矿井入口、梯子、Stone、MiningNode、徒手采集物和木箱/木桶统一建模为 `MineTarget`。
 - `agent/action/valley_action/AStar.py`：本地 A\* 寻路、路线动作标注和障碍代价函数。
 - `agent/action/valley_action/clearance_policy.py`：清障策略层，判断障碍是否允许清理、所需工具和清障代价；未来可接入 Agent Skill/Planner 对普通树等高价值资源的保护策略。
 - `agent/action/valley_action/move_controller.py`：根据缓存 tile path 和最新 state 输出连续移动方向。

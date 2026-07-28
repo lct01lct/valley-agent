@@ -28,6 +28,11 @@ from server.type import Tile
 type MiningAction = Literal[
     "FIND_NEXT_LEVEL",  # 找到并进入下一层；若当前层没有梯子，则挖石头直到梯子出现
 ]
+type MineOpportunityTargetType = Literal[
+    "COLLECTIBLE",  # 徒手采集物，例如石英、地晶、冰泪、火水晶、洞穴萝卜等。
+    "BREAKABLE_CONTAINER",  # 矿井木箱/木桶，通常用武器打破并处理掉落物。
+    "MINING_NODE",  # 路线附近低成本矿点，例如铜矿、宝石矿等。
+]
 type MiningPhase = Literal[
     "ENTER_MINE",  # 在矿洞大厅寻找入口并进入第一层
     "FIND_LADDER",  # 在矿层中寻找可交互的下层梯子
@@ -55,12 +60,20 @@ class MiningTask(BaseTask):
         target_loc: Location = "Mine",
         target_mine_level: int = 2,
         max_stones_to_break: int = 60,
+        collect_opportunity_resources: bool = False,
+        opportunity_target_types: list[MineOpportunityTargetType] | None = None,
+        max_opportunity_detour_tiles: int = 2,
+        max_opportunity_actions_per_level: int = 2,
     ) -> None:
         super().__init__(task_type=task_type, desc=desc)
         self.mine_action = mine_action
         self.target_loc = target_loc
         self.target_mine_level = target_mine_level
         self.max_stones_to_break = max_stones_to_break
+        self.collect_opportunity_resources = collect_opportunity_resources
+        self.opportunity_target_types = opportunity_target_types or []
+        self.max_opportunity_detour_tiles = max_opportunity_detour_tiles
+        self.max_opportunity_actions_per_level = max_opportunity_actions_per_level
 
 
 class MineNode(BTNode):
@@ -81,7 +94,7 @@ class MineNode(BTNode):
         )
         self.mining_debug_logger = MiningDebugLogger()
         self._phase: MiningPhase | None = None
-        self._task_signature: tuple[int, int, str] | None = None
+        self._task_signature: tuple[int, int, str, bool, tuple[MineOpportunityTargetType, ...]] | None = None
         self._started_at: float | None = None
         self._target_tile: Tile | None = None
         self._detected_ladder_tile: Tile | None = None
@@ -121,6 +134,8 @@ class MineNode(BTNode):
             blackboard.current_step_index,
             current_task.target_mine_level,
             current_task.mine_action,
+            current_task.collect_opportunity_resources,
+            tuple(current_task.opportunity_target_types),
         )
         if self._task_signature != task_signature:
             self._reset()
@@ -134,12 +149,17 @@ class MineNode(BTNode):
             print(
                 "\n⛏️ [MineNode] 收到采矿任务: "
                 f"action={current_task.mine_action}, target_loc={current_task.target_loc}, "
-                f"target_mine_level={current_task.target_mine_level}"
+                f"target_mine_level={current_task.target_mine_level}, "
+                f"collect_opportunity_resources={current_task.collect_opportunity_resources}"
             )
             self._log(
                 "收到采矿任务: "
                 f"action={current_task.mine_action}, target_loc={current_task.target_loc}, "
                 f"target_mine_level={current_task.target_mine_level}, "
+                f"collect_opportunity_resources={current_task.collect_opportunity_resources}, "
+                f"opportunity_target_types={current_task.opportunity_target_types}, "
+                f"max_opportunity_detour_tiles={current_task.max_opportunity_detour_tiles}, "
+                f"max_opportunity_actions_per_level={current_task.max_opportunity_actions_per_level}, "
                 f"location={game_state.location_name}, mine_level={game_state.mine_level}, "
                 f"player={game_state.player_tile}"
             )
@@ -1264,6 +1284,8 @@ class MineNode(BTNode):
             f"ladders={self._format_targets(game_state.ladders)}, "
             f"entrances={self._format_targets(game_state.mine_entrances)}, "
             f"mining_nodes={len(game_state.mining_nodes)}, stone_layer={len(game_state.layers.get('Stone', set()))}, "
+            f"collectibles={len(game_state.mine_collectibles)}, "
+            f"breakable_containers={len(game_state.mine_breakable_containers)}, "
             f"using_tool={game_state.using_tool}, can_move={game_state.can_move}, "
             f"tracker={self.tool_action_tracker.get_debug_snapshot()}"
         )

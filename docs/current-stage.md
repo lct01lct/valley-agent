@@ -265,7 +265,7 @@ Chest P2/P3 约定：
 | 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源和箱子位置/内容，采集物等机会记忆后续接入 |
 | Farm P1 批处理 | 基础接入，暂停扩展 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线；后续资源管理和复杂失败恢复先转 Mining 模块验证 |
 | Mining P0 | 基础接入，待游戏内实测 | 已新增 MiningTask、MiningResourceCheckNode、MineNode、矿洞 state/action 协议和 mock 数据；目标是进入第一层，找到/挖出梯子并进入第二层 |
-| Mining 目标抽象 | 第一版接入 | 已新增 `MineTarget` / `MineTargetSelector`，当前用于统一建模 Ladder、MineEntrance、Stone 和 MiningNode；Collectible、BreakableContainer 先保留类型，等待 C# state 补齐后继续接入 |
+| Mining 目标抽象 | 第一版接入 | 已新增 `MineTarget` / `MineTargetSelector`，当前用于统一建模 Ladder、MineEntrance、Stone、MiningNode、Collectible 和 BreakableContainer；C# Observer 已新增 `MineCollectibles` 与 `MineBreakableContainers` 快照，MineNode 心跳日志会输出对应数量 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
