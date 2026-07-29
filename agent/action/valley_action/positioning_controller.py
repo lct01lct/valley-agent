@@ -9,6 +9,9 @@ from server.valley_server import StardewState
 from server.type import Tile
 
 
+POSITIONING_PATH_LOOKAHEAD_TILES = 8
+
+
 type PositioningStatus = Literal[
     "MOVING",  # 正在移动到候选站位，还不能执行交互动作
     "FACING",  # 已到候选站位，正在原地调整工具目标方向
@@ -48,6 +51,7 @@ class PositioningController:
         self.move_controller = MoveController()
         self._tile_path: list[RouteTile] = []
         self._path_index = 0
+        self._last_path_blocked_debug = ""
         self._goal_key: tuple[
             tuple[tuple[int, int], ...],
             tuple[int, int] | None,
@@ -60,6 +64,7 @@ class PositioningController:
     def reset(self) -> None:
         self._tile_path = []
         self._path_index = 0
+        self._last_path_blocked_debug = ""
         self._goal_key = None
         self.move_controller.reset()
 
@@ -69,6 +74,7 @@ class PositioningController:
             f"path_len={len(self._tile_path)}, "
             f"path_index={self._path_index}, "
             f"path_end={self._get_path_end_tile()}, "
+            f"path_blocked={self._last_path_blocked_debug}, "
             f"target_edge={self.move_controller.get_target_edge_debug_snapshot()}"
         )
 
@@ -110,6 +116,11 @@ class PositioningController:
             self._path_index = 0
             self.move_controller.reset()
 
+        if self._is_cached_path_blocked(state, extra_blocked_tiles, allowed_blocked_tiles):
+            self._tile_path = []
+            self._path_index = 0
+            self.move_controller.reset()
+
         if not self._tile_path or self._path_index >= len(self._tile_path):
             self._tile_path = self._build_path_to_stand_tiles(
                 state,
@@ -135,6 +146,36 @@ class PositioningController:
             return PositioningResult(status="MOVING", stand_tile=stand_tile, reason="已走到路径末端，等待 state 确认")
 
         return PositioningResult(status="MOVING", command=command, stand_tile=self._get_path_end_tile())
+
+    def _is_cached_path_blocked(
+        self,
+        state: StardewState,
+        extra_blocked_tiles: set[Tile],
+        allowed_blocked_tiles: set[Tile],
+    ) -> bool:
+        if not self._tile_path or self._path_index >= len(self._tile_path):
+            self._last_path_blocked_debug = ""
+            return False
+
+        blocked_tiles = astar_solver._get_blocked_tiles(state) | extra_blocked_tiles
+        lookahead_path = self._tile_path[
+            self._path_index : self._path_index + POSITIONING_PATH_LOOKAHEAD_TILES
+        ]
+        for route_tile in lookahead_path:
+            tile = Tile(route_tile.x, route_tile.y)
+            if tile == state.player_tile:
+                continue
+            if tile in allowed_blocked_tiles:
+                continue
+            if tile in blocked_tiles:
+                self._last_path_blocked_debug = (
+                    f"blocked={tile}, path_index={self._path_index}, "
+                    f"lookahead={POSITIONING_PATH_LOOKAHEAD_TILES}"
+                )
+                return True
+
+        self._last_path_blocked_debug = ""
+        return False
 
     def _build_arrived_result(
         self,

@@ -139,6 +139,8 @@ Selector
 5. 对普通工具目标，只有当 `state.tool_target.tile == tool_target_tile` 时返回 `READY`。
 6. 对矿洞入口、梯子、箱子等 ActionTile / 交互对象，`ToolTarget` 对准只说明方向正确，不代表交互按钮一定可触发；还必须确认人物在相邻格内足够贴近交互范围。
 
+交互站位控制已支持未来路径阻塞检查。Mining 远距离站位路径如果因局部 state 后续发现 `Wall`、`MiningNode`、`Object`、木箱/木桶等障碍，会让缓存路径失效并重新 A\*。
+
 FarmNode 当前已接入这套模型：它只负责选择未浇水作物，并把作物上下左右相邻格作为 `candidate_stand_tiles`、作物地块作为 `tool_target_tile`。后续箱子、树、NPC、商店柜台、门和清障都应优先复用这套模型，而不是在节点内部重复维护路径缓存和转向逻辑。
 
 Mining P0 实测经验：从 Y 轴进入矿洞入口/梯子时，人物可能因碰撞停在理想贴近点前 1~2 像素。贴近判断应使用 X/Y 轴统一的小范围像素容忍区，避免持续向入口/梯子方向 MOVE；但不能仅因 `ToolTarget` 已对准就跳过贴近判断。
@@ -162,6 +164,7 @@ Python 端原则：
 - 工具收招后必须用最新 state 验证结果和副作用，例如障碍是否消失、范围内障碍是否减少、地块是否成为 HoeDirt、作物是否 `IsWatered=True`、掉落物是否出现、梯子是否出现或是否出现阻塞 UI。
 - 当前 `ToolAftermathService` 的工具效果等待窗口为 `1.0s`。它不是固定等待时间：如果 state 已经证明目标完成或有效副作用发生，节点应立即推进；只有工具收招后 1 秒内完全没有观察到预期效果或副作用，才进入超时、重试或失败判断。
 - 范围工具当前按“精确目标 + 副作用”双层判断。Scythe / 剑清理 Grass / Weeds 时，如果目标格没有立刻消失，但作用范围内预期障碍减少，或目标附近出现可拾取掉落物，也视为本次工具动作已经有效，避免因为要求目标格一次命中而原地等待。
+- 破坏类目标当前按“目标消失后才登记掉落物”处理。以铜矿为例，前几次挥镐后 MiningNode 仍存在时只视为受击或视觉碎屑阶段，不登记掉落物；最后一次挥镐后目标从 state 消失，才扫描目标附近可拾取 `Debris` 并登记给 `CollectLootNode`。
 - Mining 破石时即使工具动画期间刷新了梯子，也不能直接抢先进入 Ladder 阶段；必须先完成当前 Pickaxe 动作收招、统一后处理和掉落物登记，再决定拾取或下梯子。
 - MineNode 交互梯子前会先结算当前层拾取需求：包括正在执行的 `require_collect_loot`、延迟拾取队列，以及最近一次工具目标附近短窗口内出现的可拾取掉落物。
 - Farm P1 的 `WATER_TILES` 阶段把临时失败地块放入浇水重试队列。只要地块仍然 `HasCrop=True` 且 `IsWatered=False`，就不应因为一次站位卡顿或动作未命中直接永久跳过。
@@ -251,7 +254,7 @@ Chest P2/P3 约定：
 | SMAPI 结构化感知 | 已有基础 | 导出地点、位置、Warp、局部障碍物、`CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items` |
 | 局部 A* | 已有基础 | 支持格子路径、硬障碍、目标 Warp 和可破坏障碍代价；`Object` 层已作为硬障碍，因此箱子/机器等对象不会被当成可行走 tile；普通树按高成本清障候选处理；已限制斜向清障路径 |
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
-| 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
+| 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode/ChestNode/MiningNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向；缓存路径会根据最新局部 state 的未来阻塞检查失效并重新规划 |
 | 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
 | 工具动作后处理 | 最小版接入 | 已新增 `ToolAftermathService`，当前用于 Mining 破石后的目标变化/梯子查询，以及 ClearObstacle 收招后的目标变化/范围副作用/阻塞 UI 观察；工具效果等待窗口为 `1.0s`，仅在没有观察到预期效果或有效副作用时作为超时兜底；已接入 `Debris` 掉落物感知，并通过 `CollectLootNode` 支持工具动作后的近距离可达掉落物自动拾取；Mining 下梯子前会先结算当前层已登记/延迟/最近工具来源附近的拾取需求 |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
@@ -268,6 +271,7 @@ Chest P2/P3 约定：
 | Farm P1 批处理 | 基础接入，暂停扩展 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线；后续资源管理和复杂失败恢复先转 Mining 模块验证 |
 | Mining P0 | 基础接入，待游戏内实测 | 已新增 MiningTask、MiningResourceCheckNode、MineNode、矿洞 state/action 协议和 mock 数据；目标是进入第一层，找到/挖出梯子并进入第二层 |
 | Mining 目标抽象 | 第一版接入 | 已新增 `MineTarget` / `MineTargetSelector`，当前用于统一建模 Ladder、MineEntrance、Stone、MiningNode、Collectible 和 BreakableContainer；C# Observer 已新增 `MineCollectibles` 与 `MineBreakableContainers` 快照，MineNode 心跳日志会输出对应数量 |
+| Mining 价值资源锚点 | 基础接入 | `collect_opportunity_resources=True` 时，通过 `MiningOpportunityPolicy` 按资源价值、近距离资源奖励、额外路径成本、通路破石成本、动作成本和预留风险成本评分；未出现梯子时高分资源会影响挖石方向，已出现梯子时只处理相对直接下楼仍然值得的路径附近/低成本资源，不再使用固定次数上限 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
@@ -342,6 +346,8 @@ Chest P2/P3 约定：
 - Mining P0 天然梯子：进入某层后若已有天然梯子，优先走到梯子旁并进入下一层；梯子在局部视野外时，应先稳定接近，不应左右抽搐或反复换中继点。
 - Mining P0 挖石出梯子：没有梯子时打碎 Stone / MiningNode，等待工具收招后只查询被破坏 tile 是否生成梯子；若生成梯子，应立即切回梯子目标。
 - Mining P0 破石同时出梯子和掉落物：必须先完成 Pickaxe 收招和 `ToolAftermathService` 后处理，登记并拾取当前层掉落物，再交互梯子进入下一层。
+- Mining P0/P2 破坏资源矿点：多次挥镐的资源矿点只有在目标从 `MiningNodes` state 中消失后才登记掉落物；目标仍存在时不得把 `CHUNKS` 等视觉碎屑当作可拾取物。
+- Mining P0/P2 价值资源锚点：当 10 格内看到石英、地晶、木箱/木桶或资源矿点等价值目标时，应优先挖通向该目标方向的石头；若打通过程中出现梯子，先完成已锁定资源目标，再前往梯子。
 - Mining P0 交互边界：梯子/矿井入口目标 tile 不应被当成可站立 tile；玩家必须站在上下左右相邻格，并足够贴近交互边缘。
 - Mining P0 状态切层：进入下一层后必须重置上一层的目标、接近点、破石计数和临时路径，不能沿用过期状态。
 - 规划一片 Farm 区域，包含 Grass、Weeds、Twig、Stone、普通树、果树和独立树桩，Agent 能清理可处理障碍、普通树连同残留树桩处理完后再拾取掉落物、跳过果树/独立 TreeStump、锄地、播种并浇水。

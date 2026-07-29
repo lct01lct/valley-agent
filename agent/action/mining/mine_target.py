@@ -5,10 +5,24 @@ from server.valley_server import MineInteractTargetState, MineObjectTargetState,
 from server.type import Tile
 
 
-NON_RESOURCE_MINING_NODE_NAMES = {"stone", "stones", "石头"}
+PLAIN_STONE_MINING_NODE_PARENT_SHEET_INDEXES = {
+    32,
+    34,
+    36,
+    38,
+    40,
+    42,
+    668,
+    670,
+}
 NON_RESOURCE_MINING_NODE_QUALIFIED_ITEM_IDS = {
-    "(O)32",
-    "(O)42",
+    f"(O){parent_sheet_index}" for parent_sheet_index in PLAIN_STONE_MINING_NODE_PARENT_SHEET_INDEXES
+}
+RESOURCE_MINING_NODE_PARENT_SHEET_INDEXES = {
+    751,
+}
+RESOURCE_MINING_NODE_QUALIFIED_ITEM_IDS = {
+    f"(O){parent_sheet_index}" for parent_sheet_index in RESOURCE_MINING_NODE_PARENT_SHEET_INDEXES
 }
 
 
@@ -44,6 +58,10 @@ class MineTarget:
     name: str = ""
     display_name: str = ""
     qualified_item_id: str = ""
+    parent_sheet_index: int = -1
+    mining_node_kind: str = ""
+    is_resource_mining_node: bool = False
+    estimated_hits_to_break: int = 1
     source: str = ""
     required_tool: str | None = None
     can_stand_on_target: bool = False
@@ -194,6 +212,10 @@ class MineTargetSelector:
             name=mining_node.name,
             display_name=mining_node.display_name,
             qualified_item_id=mining_node.qualified_item_id,
+            parent_sheet_index=mining_node.parent_sheet_index,
+            mining_node_kind=mining_node.mining_node_kind,
+            is_resource_mining_node=mining_node.is_resource_mining_node,
+            estimated_hits_to_break=mining_node.estimated_hits_to_break,
             source=mining_node.type,
             required_tool="Pickaxe",
             can_stand_on_target=False,
@@ -210,6 +232,10 @@ class MineTargetSelector:
             action="USE_PICKAXE",
             name="Stone",
             display_name="Stone",
+            parent_sheet_index=-1,
+            mining_node_kind="StoneLayer",
+            is_resource_mining_node=False,
+            estimated_hits_to_break=1,
             source="StoneLayer",
             required_tool="Pickaxe",
             can_stand_on_target=False,
@@ -227,6 +253,7 @@ class MineTargetSelector:
             name=collectible.name,
             display_name=collectible.display_name,
             qualified_item_id=collectible.qualified_item_id,
+            parent_sheet_index=collectible.parent_sheet_index,
             source=collectible.source,
             required_tool=None,
             can_stand_on_target=False,
@@ -244,6 +271,7 @@ class MineTargetSelector:
             name=container.name,
             display_name=container.display_name,
             qualified_item_id=container.qualified_item_id,
+            parent_sheet_index=container.parent_sheet_index,
             source=container.source,
             required_tool="Weapon",
             can_stand_on_target=False,
@@ -273,7 +301,7 @@ class MineOpportunitySelector:
         state: StardewState,
         allowed_target_types: set[MineTargetType],
         ignored_tiles: set[Tile] | None = None,
-        max_detour_tiles: int = 10,
+        max_detour_tiles: int | None = 10,
     ) -> list[MineTarget]:
         ignored_tiles = ignored_tiles or set()
         candidates: list[MineTarget] = []
@@ -291,6 +319,9 @@ class MineOpportunitySelector:
                 if target.target_type == "MINING_NODE"
                 if self.is_resource_mining_node(target)
             )
+
+        if max_detour_tiles is None:
+            return candidates
 
         return [
             target
@@ -331,18 +362,29 @@ class MineOpportunitySelector:
         if target.target_type != "MINING_NODE":
             return False
 
-        names = {
-            self._normalize_text(target.name),
-            self._normalize_text(target.display_name),
-            self._normalize_text(target.source),
-        }
-        if names & NON_RESOURCE_MINING_NODE_NAMES:
+        if target.is_resource_mining_node:
+            return True
+
+        if target.mining_node_kind == "Resource":
+            return True
+
+        if target.parent_sheet_index in RESOURCE_MINING_NODE_PARENT_SHEET_INDEXES:
+            return True
+
+        if target.qualified_item_id in RESOURCE_MINING_NODE_QUALIFIED_ITEM_IDS:
+            return True
+
+        if target.mining_node_kind in {"PlainStone", "UnknownStone", "StoneLayer"}:
+            return False
+
+        if target.parent_sheet_index in PLAIN_STONE_MINING_NODE_PARENT_SHEET_INDEXES:
             return False
 
         if target.qualified_item_id in NON_RESOURCE_MINING_NODE_QUALIFIED_ITEM_IDS:
             return False
 
-        return True
+        source = self._normalize_text(target.source)
+        return source in {"ore", "gem", "resource"}
 
     def _normalize_text(self, text: str | None) -> str:
         return "" if text is None else " ".join(text.strip().lower().split())

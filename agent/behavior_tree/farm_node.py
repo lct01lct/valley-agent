@@ -43,6 +43,7 @@ WATERING_CAN_TOOL_NAME = "Watering Can"
 WATER_ACTION_TIMEOUT_SECONDS = 12.0
 FARM_ACTION_TIMEOUT_SECONDS = 12.0
 MAX_WATER_ATTEMPTS = 3
+MAX_HOE_ATTEMPTS = 2
 MAX_FARM_ACTION_ATTEMPTS = 3
 STATE_SETTLE_TICKS = 3
 WATER_TOOL_VERIFY_DELAY_SECONDS = 0.75
@@ -354,6 +355,19 @@ class FarmNode(BTNode):
             self._finish_plant_task(game_state, current_task)
             self._finish(context, blackboard)
             return "SUCCESS"
+
+        if self._target_tile is not None and self._target_phase is not None:
+            if self._target_phase == "PLANT":
+                if self._is_waiting_for_plant_item_result(context, game_state, self._target_tile):
+                    return "RUNNING"
+            elif not self.tool_action_tracker.is_idle():
+                if self._is_waiting_for_tool_action_completion(
+                    context,
+                    game_state,
+                    self._target_phase,
+                    self._target_tile,
+                ):
+                    return "RUNNING"
 
         if self._target_tile is not None and self._is_batch_target_done(game_state, current_task, self._target_tile):
             self._mark_batch_target_done(game_state, current_task, self._target_tile)
@@ -992,7 +1006,7 @@ class FarmNode(BTNode):
 
     def _get_max_attempts_for_phase(self, target_phase: FarmWorkPhase | None) -> int:
         if target_phase == "HOE":
-            return 1
+            return MAX_HOE_ATTEMPTS
         if target_phase == "PLANT":
             return 1
         if target_phase == "WATER":

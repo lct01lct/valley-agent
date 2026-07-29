@@ -10,6 +10,25 @@ namespace StardewMemoryExporter
 {
     internal static class MineStateScanner
     {
+        private static readonly HashSet<int> PlainStoneParentSheetIndexes = new()
+        {
+            // 矿井普通石头有多种外观/耐久，不应作为“顺手机会资源”。
+            32,
+            34,
+            36,
+            38,
+            40,
+            42,
+            668,
+            670,
+        };
+
+        private static readonly HashSet<int> ResourceMiningNodeParentSheetIndexes = new()
+        {
+            // 铜矿石节点。若后续日志确认铁矿、金矿、宝石矿等 ID，再继续扩展。
+            751,
+        };
+
         public static List<object> CreateLaddersSnapshot(GameLocation location)
         {
             var ladders = new List<object>();
@@ -64,6 +83,9 @@ namespace StardewMemoryExporter
                 {
                     Tile = new[] { (int)pair.Key.X, (int)pair.Key.Y },
                     Type = GetMiningNodeType(obj),
+                    MiningNodeKind = GetMiningNodeKind(obj),
+                    IsResourceMiningNode = IsResourceMiningNode(obj),
+                    EstimatedHitsToBreak = EstimateMiningNodeHitsToBreak(obj),
                     Name = obj.Name ?? "",
                     DisplayName = obj.DisplayName ?? "",
                     QualifiedItemId = obj.QualifiedItemId ?? "",
@@ -499,6 +521,10 @@ namespace StardewMemoryExporter
             string qualifiedItemId = obj.QualifiedItemId ?? "";
             string combined = $"{name} {qualifiedItemId}";
 
+            if (ResourceMiningNodeParentSheetIndexes.Contains(obj.ParentSheetIndex))
+            {
+                return "Ore";
+            }
             if (combined.IndexOf("Ore", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return "Ore";
@@ -508,6 +534,51 @@ namespace StardewMemoryExporter
                 return "Boulder";
             }
             return "Stone";
+        }
+
+        private static string GetMiningNodeKind(StardewValley.Object obj)
+        {
+            if (ResourceMiningNodeParentSheetIndexes.Contains(obj.ParentSheetIndex))
+            {
+                return "Resource";
+            }
+            if (PlainStoneParentSheetIndexes.Contains(obj.ParentSheetIndex))
+            {
+                return "PlainStone";
+            }
+
+            string type = GetMiningNodeType(obj);
+            if (string.Equals(type, "Ore", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Resource";
+            }
+            if (string.Equals(type, "Boulder", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Boulder";
+            }
+            return "UnknownStone";
+        }
+
+        private static bool IsResourceMiningNode(StardewValley.Object obj)
+        {
+            return string.Equals(GetMiningNodeKind(obj), "Resource", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int EstimateMiningNodeHitsToBreak(StardewValley.Object obj)
+        {
+            if (ResourceMiningNodeParentSheetIndexes.Contains(obj.ParentSheetIndex))
+            {
+                return 2;
+            }
+            if (PlainStoneParentSheetIndexes.Contains(obj.ParentSheetIndex))
+            {
+                return obj.ParentSheetIndex is 38 or 40 or 668 or 670 ? 2 : 1;
+            }
+            if (string.Equals(GetMiningNodeType(obj), "Boulder", StringComparison.OrdinalIgnoreCase))
+            {
+                return 4;
+            }
+            return 1;
         }
 
         private static bool LooksLikeMineEntranceAction(string actionText)

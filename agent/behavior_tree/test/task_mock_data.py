@@ -216,7 +216,7 @@ TASK_MOCK_DATA: Dict[
             desc="进入矿洞并寻找下一层，允许顺手采集低成本资源",
             mine_action="FIND_NEXT_LEVEL",
             target_loc="Mine",
-            target_mine_level=10,
+            target_mine_level=20,
             collect_opportunity_resources=True,
             opportunity_target_types=[
                 "COLLECTIBLE",
@@ -224,7 +224,6 @@ TASK_MOCK_DATA: Dict[
                 "MINING_NODE",
             ],
             max_opportunity_detour_tiles=10,
-            max_opportunity_actions_per_level=2,
         ),
     ],
 }

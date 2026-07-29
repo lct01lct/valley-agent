@@ -64,6 +64,11 @@ class AStarParser:
         for layer in hard_layers:
             blocked.update(state.layers.get(layer, set()))
 
+        # 矿井里的资源矿点/普通 MiningNode 走独立 state，不一定同步到 layers["Stone"]。
+        # 但它们在游戏物理上仍是不可站立障碍，A* 必须统一避开。
+        blocked.update(state.mining_nodes_by_tile.keys())
+        blocked.update(state.mine_breakable_containers_by_tile.keys())
+
         bed_tiles = state.layers.get("Bed", set())
         for tile in bed_tiles:
             if self._is_bed_center_tile(state, tile):

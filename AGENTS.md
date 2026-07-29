@@ -102,6 +102,9 @@ Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。
 - `SwitchToolNode`：根据 Mining 当前阶段切换 Pickaxe。
 - `MineNode`：当前实现 Mining P0，负责矿洞入口交互、读取 `MineLevel`、寻找 Ladder，没有 Ladder 时站到 Stone / MiningNode 上下左右相邻格并使用 Pickaxe，验证 Stone 消失或 Ladder 出现，最终进入目标矿层。
 - `MineTargetSelector`：把 SMAPI state 中的 `Ladders`、`MineEntrances`、`MiningNodes`、`MineCollectibles` 和 `MineBreakableContainers` 统一建模为 `MineTarget`。MineNode 后续应消费目标抽象，不要在执行节点里继续扩散不同对象类型的读取和分类逻辑。
+- `MiningOpportunityPolicy`：用 Utility 风格机会成本评分判断采矿途中资源是否值得处理。当前评分考虑资源价值、额外路径成本、通路破石成本和工具动作成本；怪物风险项通过 `MiningRiskEvaluator` 预留，当前固定为 0。
+
+Mining 中的“顺手资源”语义应理解为“价值资源锚点会影响挖掘方向”，不是随意路过才处理，也不要用固定次数上限控制。若 `MiningTask.collect_opportunity_resources=True`，MineNode 应通过 `MiningOpportunityPolicy` 评估 `COLLECTIBLE`、`BREAKABLE_CONTAINER` 或资源型 `MINING_NODE` 的机会成本：未发现梯子时，价值资源可作为挖掘方向锚点；已发现梯子时，只有资源相对直接下楼的额外路径成本、通路破石成本和动作成本仍然值得时才处理。若挖掘过程中提前出现梯子，仍应先完成当前已锁定的资源锚点，再处理梯子下楼；不要因为梯子刷新就丢弃已经为之开路的资源目标。
 
 ### Context 负责状态输入和动作输出
 
@@ -175,6 +178,8 @@ Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。
 - `tool_target_tile`：需要工具或交互目标对准的格，可为空。
 
 动作层 `PositioningController` 负责从候选站位中选择可达站位、缓存站位路径、调用 `MoveController` 连续移动，并在到达后发送 `FACE_DIRECTION` 原地转向，直到 `state.tool_target.tile` 等于 `tool_target_tile`。业务节点只负责根据自身目标求解这两个输入，不应重复维护 `_tile_path`、`path_index` 或自行用 MOVE 命令模拟转向。
+
+`PositioningController` 在局部 state 下缓存的站位路径不是永久可信。如果最新 state 证明剩余路径前方出现 `Wall`、`Object`、`MiningNode`、木箱/木桶或其他硬障碍，应让缓存路径失效并重新 A\*。这属于“状态驱动的路径过期判断”，不是撞墙后的 stuck 纠错。
 
 `ToolTarget` 只代表当前朝向/工具目标格已经对准，不等价于交互按钮一定可触发。矿洞入口、矿井梯子、箱子、门、NPC 和商店柜台这类 ActionTile / 交互对象，还需要玩家在相邻格内足够贴近可触发范围；若游戏物理或碰撞使人物停在目标边缘附近，应使用小范围像素容忍区判断“已足够贴近”，不要用单一理想像素点导致持续 MOVE 卡住，也不要仅凭 `ToolTarget` 直接判定 READY。
 
@@ -259,8 +264,9 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 优先使用 SMAPI 结构化状态，不以截图/VLM 作为当前阶段的主要感知来源。
 - 行为树是主控层。增加实时能力时优先新增或完善确定性节点，不把 `LLM_Node` 变成通用执行器。
 - `LLM_Node` 只做最后兜底的宏观计划生成、补计划或恢复建议，不参与每帧移动控制。
-- 未来战术层推荐采用“LLM / Planner 做战略，Utility Tactical Resolver 做战术权衡，行为树做确定性执行”的分层方案；不要把冲层、刷矿、刷怪、机会目标和撤退等多目标权衡长期散落在单个执行节点里。
+- 未来战术层推荐采用“LLM / Planner 做战略，Utility Tactical Resolver 做战术权衡，行为树做确定性执行”的分层方案；不要把冲层、刷矿、刷怪、价值资源锚点和撤退等多目标权衡长期散落在单个执行节点里。
 - Mining 目标选择应优先经过 `MineTarget` 抽象。MineNode 可以执行目标，但不应长期直接散落读取 `Ladders`、`MiningNodes`、`Stone`、未来采集物和木箱木桶的选择规则。
+- 尽量不要用硬编码次数、固定坐标、固定路线或魔法数字替代策略判断。必要的常量必须有明确语义、集中定义、可调，并优先表达为“代价、收益、距离、超时、重试、风险”等策略参数；如果规则会随任务目标、场景、资源价值或角色状态变化，应抽到策略层或任务参数中，而不是散落在执行节点里。
 - 每个任务和节点都应有前置条件、执行逻辑、成功判定、超时和恢复策略。
 - 寻路需要区分硬障碍、可绕行障碍、可破坏障碍和交互式门。
 - 普通树 `Tree0` ~ `Tree5` 属于“策略允许后可清理”的高成本障碍；当前 Route 和 Farm 规划区域默认允许砍普通树。砍普通树时，如果同一目标地块残留普通树桩，`ClearObstacleNode` 会继续砍完后再触发拾取。`FruitTree0` ~ `FruitTree5` 和独立规划目标中的 `TreeStump` 暂不自动清理。
@@ -269,6 +275,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 工具切换应优先读取 SMAPI state 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items`，不要在 Python 端硬猜当前工具。
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
 - 工具收招后的副作用观察优先复用 `ToolAftermathService`。`1.0s` 工具效果等待窗口只用于“完全没有任何预期效果或副作用”的超时兜底；目标变化、范围影响、掉落物、梯子或阻塞 UI 等 state 已出现时必须尽快推进。业务节点仍负责解释结果，例如 Mining 决定是否转向梯子，ClearObstacle 决定是否继续重试；不要把所有工具业务成功判定塞进通用服务。
+- 对 Stone、MiningNode、木箱/木桶、普通树等“破坏类目标”，掉落物登记必须以目标真实消失或明确破坏完成为前提。若工具收招后目标仍存在，说明只是受击、扣耐久或视觉碎屑阶段，不登记掉落物、不触发 CollectLoot，只按业务重试逻辑继续处理；目标消失后才扫描目标附近可拾取 `Debris` 并写入延迟拾取队列。
 - 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。拾取节点只尝试可达掉落物，不触发清障；普通树掉落物会在树和残留树桩都砍完后统一拾取，允许部分拾取并跳过不可达位置。若 C# Debris 提供明确 item id / name，拾取验证应优先使用背包数量变化；若只提供泛化 `RESOURCE` / `OBJECT`，则使用掉落物消失、位置变化和动态观察作为兜底。
 - 节点推进应状态驱动优先；固定 tick/秒数等待只能用于短暂防抖、节流和超时兜底，不要用经验等待替代 SMAPI state 验证。
 - 水壶补水属于 Farm 分支的资源恢复能力。FarmNode 发现 `WaterLeft <= 0` 时应通过 blackboard 触发 `RefillWateringCanNode`，不要在 FarmNode 内部直接实现找水源、移动和补水。

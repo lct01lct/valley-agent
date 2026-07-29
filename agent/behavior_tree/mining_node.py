@@ -12,6 +12,11 @@ from agent.action.combat.weapon_selection import WeaponSelector
 from agent.action.location.location import Location
 from agent.action.combat.monster_threat import MonsterThreat, MonsterThreatEvaluator
 from agent.action.mining.mine_target import MineOpportunitySelector, MineTarget, MineTargetSelector
+from agent.action.mining.mining_opportunity_policy import (
+    MiningOpportunityPolicy,
+    OpportunityDecision,
+    OpportunityPolicyConfig,
+)
 from agent.action.tool.loot_policy_service import LootPolicyService
 from agent.action.tool.tool_aftermath_service import ToolAftermathResult, ToolAftermathService, ToolEffectPlan
 from agent.action.valley_action.AStar import RouteTile, astar_solver
@@ -53,7 +58,6 @@ MINE_TOOL_START_GRACE_SECONDS = 0.35
 MINE_TOOL_FINISH_TIMEOUT_SECONDS = 3.0
 MAX_STONE_ATTEMPTS = 8
 MAX_OPPORTUNITY_ATTEMPTS = 6
-MAX_PRE_LADDER_OPPORTUNITY_ACTIONS_PER_LEVEL = 2
 MAX_PRE_LADDER_CORRIDOR_STONES = 2
 MINE_INTERACT_CLOSE_EDGE_MARGIN = 0.0
 MINE_INTERACT_CLOSE_EDGE_DEAD_ZONE = 4.0
@@ -74,7 +78,6 @@ class MiningTask(BaseTask):
         collect_opportunity_resources: bool = False,
         opportunity_target_types: list[MineOpportunityTargetType] | None = None,
         max_opportunity_detour_tiles: int = 10,
-        max_opportunity_actions_per_level: int = 2,
     ) -> None:
         super().__init__(task_type=task_type, desc=desc)
         self.mine_action = mine_action
@@ -84,7 +87,6 @@ class MiningTask(BaseTask):
         self.collect_opportunity_resources = collect_opportunity_resources
         self.opportunity_target_types = opportunity_target_types or []
         self.max_opportunity_detour_tiles = max_opportunity_detour_tiles
-        self.max_opportunity_actions_per_level = max_opportunity_actions_per_level
 
 
 class MineNode(BTNode):
@@ -100,6 +102,7 @@ class MineNode(BTNode):
         self.weapon_selector = WeaponSelector()
         self.mine_target_selector = MineTargetSelector()
         self.mine_opportunity_selector = MineOpportunitySelector()
+        self.mining_opportunity_policy = MiningOpportunityPolicy()
         self.loot_policy_service = LootPolicyService()
         self.tool_aftermath_service = ToolAftermathService()
         self.tool_action_tracker = ToolActionTracker(
@@ -122,6 +125,9 @@ class MineNode(BTNode):
         self._failed_stone_tiles: set[Tile] = set()
         self._deferred_stone_tiles: set[Tile] = set()
         self._active_opportunity_target: MineTarget | None = None
+        self._opportunity_anchor_target: MineTarget | None = None
+        self._opportunity_anchor_decision: OpportunityDecision | None = None
+        self._opportunity_anchor_corridor_breaks_used = 0
         self._explore_stone_tile: Tile | None = None
         self._handled_opportunity_tiles: set[Tile] = set()
         self._skipped_opportunity_tiles: set[Tile] = set()
@@ -188,7 +194,6 @@ class MineNode(BTNode):
                 f"collect_opportunity_resources={current_task.collect_opportunity_resources}, "
                 f"opportunity_target_types={current_task.opportunity_target_types}, "
                 f"max_opportunity_detour_tiles={current_task.max_opportunity_detour_tiles}, "
-                f"max_opportunity_actions_per_level={current_task.max_opportunity_actions_per_level}, "
                 f"location={game_state.location_name}, mine_level={game_state.mine_level}, "
                 f"player={game_state.player_tile}"
             )
@@ -212,6 +217,9 @@ class MineNode(BTNode):
             self.approach_positioning_controller.reset()
             self._target_tile = None
             self._active_opportunity_target = None
+            self._opportunity_anchor_target = None
+            self._opportunity_anchor_decision = None
+            self._opportunity_anchor_corridor_breaks_used = 0
             self._explore_stone_tile = None
             self._detected_ladder_tile = None
             self._ladder_pursuit_tile = None
@@ -241,6 +249,17 @@ class MineNode(BTNode):
 
         if self._phase == "OPPORTUNITY" and self._active_opportunity_target is not None:
             return self._run_opportunity_phase(context, blackboard, game_state, current_task)
+
+        anchored_opportunity_status = self._try_start_or_continue_opportunity_anchor(
+            context,
+            blackboard,
+            game_state,
+            current_task,
+            is_pre_ladder=self._detected_ladder_tile is not None or self._has_next_level_ladder(game_state),
+            allow_create=False,
+        )
+        if anchored_opportunity_status is not None:
+            return anchored_opportunity_status
 
         if self._detected_ladder_tile is not None:
             if self._promote_deferred_loot_before_ladder(
@@ -302,35 +321,15 @@ class MineNode(BTNode):
         if self._phase == "EXPLORE_STONE":
             return self._run_explore_toward_stone_phase(context, blackboard, game_state, current_task)
 
-        opportunity_target = self._select_opportunity_target(game_state, current_task)
-        if opportunity_target is not None:
-            if self._promote_deferred_loot_if_not_covered(
-                blackboard,
-                game_state,
-                self._build_opportunity_continuation_tiles(game_state, opportunity_target),
-                "顺手机会目标路径无法顺路覆盖掉落物",
-            ):
-                return "RUNNING"
-            self._start_opportunity_target(opportunity_target, current_task)
-            return self._run_opportunity_phase(context, blackboard, game_state, current_task)
-
-        corridor = self._select_corridor_stone_to_opportunity_resource(game_state, current_task)
-        if corridor is not None:
-            corridor_target, stone_tile, required_breaks = corridor
-            self._skipped_opportunity_tiles.discard(corridor_target.tile)
-            self._phase = "BREAK_STONE"
-            self._target_tile = stone_tile
-            self._stone_attempt_count = 0
-            self._corridor_ladder_tile = None
-            self.positioning_controller.reset()
-            self.tool_action_tracker.reset()
-            self._active_tool_effect_plan = None
-            self._log(
-                f"资源目标不可达，优先挖资源方向通路石头: "
-                f"target={self._format_mine_target(corridor_target)}, stone={stone_tile}, "
-                f"required_breaks={required_breaks}, player={game_state.player_tile}"
-            )
-            return self._run_break_stone_phase(context, blackboard, game_state, current_task)
+        anchored_opportunity_status = self._try_start_or_continue_opportunity_anchor(
+            context,
+            blackboard,
+            game_state,
+            current_task,
+            is_pre_ladder=False,
+        )
+        if anchored_opportunity_status is not None:
+            return anchored_opportunity_status
 
         self._phase = "BREAK_STONE"
         return self._run_break_stone_phase(context, blackboard, game_state, current_task)
@@ -403,6 +402,16 @@ class MineNode(BTNode):
             return "RUNNING"
 
         if self._is_opportunity_target_done(game_state, target):
+            if target.action in ("ATTACK_WEAPON", "USE_PICKAXE") and not self.tool_action_tracker.is_idle():
+                return self._run_tool_opportunity(context, blackboard, game_state, target)
+            if target.action in ("ATTACK_WEAPON", "USE_PICKAXE"):
+                return self._finish_destroyed_opportunity_target(
+                    context,
+                    blackboard,
+                    game_state,
+                    target,
+                    "目标已从 state 消失",
+                )
             self._finish_opportunity_target(success=True, reason="目标已从 state 消失")
             return "RUNNING"
 
@@ -499,6 +508,7 @@ class MineNode(BTNode):
             )
             if tool_status == "FINISHED":
                 self.tool_action_tracker.reset()
+                self._remember_last_tool_source_finished(target.tile, target.target_type)
                 effect_result = self.tool_aftermath_service.inspect_tool_effect(
                     context,
                     game_state,
@@ -512,15 +522,24 @@ class MineNode(BTNode):
                     )
                     return "RUNNING"
 
-                self._request_collect_loot(
-                    blackboard,
-                    target.tile,
-                    target.target_type,
-                    aftermath_result.nearby_loot_tiles,
+                target_destroyed = self._is_opportunity_target_done(game_state, target)
+                self._log(
+                    f"机会目标工具收招完成: target={self._format_mine_target(target)}, "
+                    f"destroyed={target_destroyed}, effect_status={effect_result.status}, "
+                    f"loot_tiles={self._format_tile_list(aftermath_result.nearby_loot_tiles)}, "
+                    f"reason={effect_result.reason}"
                 )
-                if effect_result.status in ("SUCCESS", "UNKNOWN") or self._is_opportunity_target_done(game_state, target):
+                if target_destroyed:
                     if aftermath_result.generated_ladder_tile is not None:
                         self._detected_ladder_tile = aftermath_result.generated_ladder_tile
+                    self._request_collect_loot_after_target_destroyed(
+                        blackboard,
+                        game_state,
+                        target,
+                        aftermath_result.nearby_loot_tiles,
+                        "机会目标已破坏",
+                    )
+                    self._active_tool_effect_plan = None
                     self._finish_opportunity_target(success=True, reason=f"工具效果完成: {effect_result.reason}")
                     return "RUNNING"
 
@@ -531,7 +550,8 @@ class MineNode(BTNode):
                 self._active_tool_effect_plan = None
                 self._log(
                     f"机会目标本次工具动作未完成目标，准备重试: target={self._format_mine_target(target)}, "
-                    f"status={effect_result.status}, reason={effect_result.reason}, "
+                    f"status={effect_result.status}, destroyed={target_destroyed}, skip_loot=True, "
+                    f"reason=目标仍存在，暂不登记掉落物; effect_reason={effect_result.reason}, "
                     f"attempt={self._opportunity_attempt_count}/{MAX_OPPORTUNITY_ATTEMPTS}"
                 )
                 return "RUNNING"
@@ -568,6 +588,7 @@ class MineNode(BTNode):
 
         self._opportunity_attempt_count += 1
         self._active_tool_effect_plan = self._build_opportunity_effect_plan(target)
+        self._remember_last_tool_source_started(target.tile, target.target_type)
         self.tool_action_tracker.start()
         print(
             f"\n💎 [MineNode] 处理顺手机会目标: "
@@ -1209,65 +1230,120 @@ class MineNode(BTNode):
     ) -> NodeStatus | None:
         if not current_task.collect_opportunity_resources:
             return None
-        if self._pre_ladder_opportunity_actions_used >= MAX_PRE_LADDER_OPPORTUNITY_ACTIONS_PER_LEVEL:
-            return None
 
-        opportunity_target = self._select_opportunity_target(
+        return self._try_start_or_continue_opportunity_anchor(
+            context,
+            blackboard,
             game_state,
             current_task,
-            allow_when_ladder=True,
-            ignore_action_budget=True,
+            is_pre_ladder=True,
+            ladder_tile=ladder_tile,
+            reason=f"已发现梯子 {ladder_tile}，下楼前先完成价值资源锚点",
         )
-        if opportunity_target is not None:
+
+    def _try_start_or_continue_opportunity_anchor(
+        self,
+        context: PlayerContext,
+        blackboard: AgentBlackboard,
+        game_state: StardewState,
+        current_task: MiningTask,
+        is_pre_ladder: bool,
+        allow_create: bool = True,
+        ladder_tile: Tile | None = None,
+        reason: str | None = None,
+    ) -> NodeStatus | None:
+        if not current_task.collect_opportunity_resources:
+            return None
+
+        if self._opportunity_anchor_target is None:
+            if not allow_create:
+                return None
+
+            anchor_decision = self._select_opportunity_anchor_decision(game_state, current_task, ladder_tile)
+            if anchor_decision is None:
+                return None
+
+            anchor_target = anchor_decision.target
+            self._opportunity_anchor_target = anchor_target
+            self._opportunity_anchor_decision = anchor_decision
+            self._opportunity_anchor_corridor_breaks_used = 0
+            self._log(
+                f"锁定价值资源锚点，后续挖石优先朝该方向推进: "
+                f"target={self._format_mine_target(anchor_target)}, "
+                f"is_pre_ladder={is_pre_ladder}, "
+                f"decision={self._format_opportunity_decision(anchor_decision)}, "
+                f"reason={reason or '-'}"
+            )
+
+        anchor_target = self._opportunity_anchor_target
+        if anchor_target is None:
+            return None
+
+        if self._is_opportunity_target_done(game_state, anchor_target):
+            self._clear_opportunity_anchor(f"锚点资源已完成或消失: target={self._format_mine_target(anchor_target)}")
+            return None
+
+        path = self._build_path_to_opportunity_target(game_state, anchor_target)
+        if path:
             if self._promote_deferred_loot_if_not_covered(
                 blackboard,
                 game_state,
-                self._build_opportunity_continuation_tiles(game_state, opportunity_target),
-                "梯子前顺手机会目标路径无法顺路覆盖掉落物",
+                self._build_opportunity_continuation_tiles(game_state, anchor_target),
+                "价值资源锚点路径无法顺路覆盖掉落物",
             ):
                 return "RUNNING"
             self._start_opportunity_target(
-                opportunity_target,
+                anchor_target,
                 current_task,
-                is_pre_ladder=True,
-                reason=f"已发现梯子 {ladder_tile}，下楼前先收割 10 格内资源侧目标",
+                is_pre_ladder=is_pre_ladder,
+                reason=reason or "价值资源锚点已可达，优先完成后再回到下楼/挖石主线",
             )
             return self._run_opportunity_phase(context, blackboard, game_state, current_task)
 
-        corridor = self._select_pre_ladder_corridor_stone_to_opportunity(game_state, current_task)
-        if corridor is None:
-            return None
-
-        corridor_target, stone_tile, required_breaks = corridor
-        if self._pre_ladder_corridor_target is None or self._pre_ladder_corridor_target.tile != corridor_target.tile:
-            self._pre_ladder_corridor_target = corridor_target
-            self._pre_ladder_corridor_breaks_used = 0
-
-        if self._pre_ladder_corridor_breaks_used >= MAX_PRE_LADDER_CORRIDOR_STONES:
-            self._skipped_opportunity_tiles.add(corridor_target.tile)
-            self._log(
-                f"梯子前资源目标需要继续破石但已达上限，跳过: "
-                f"target={self._format_mine_target(corridor_target)}, "
-                f"used_breaks={self._pre_ladder_corridor_breaks_used}, "
-                f"max_breaks={MAX_PRE_LADDER_CORRIDOR_STONES}"
+        max_anchor_breaks = self._build_opportunity_policy_config(current_task).max_corridor_break_count
+        if self._opportunity_anchor_corridor_breaks_used >= max_anchor_breaks:
+            self._skipped_opportunity_tiles.add(anchor_target.tile)
+            self._clear_opportunity_anchor(
+                f"价值资源锚点通路破石成本过高，放弃: target={self._format_mine_target(anchor_target)}, "
+                f"used_breaks={self._opportunity_anchor_corridor_breaks_used}/{max_anchor_breaks}"
             )
-            self._pre_ladder_corridor_target = None
-            self._pre_ladder_corridor_breaks_used = 0
             return None
+
+        corridor = self._find_first_breakable_stone_for_blocked_target(
+            game_state,
+            anchor_target,
+            max_breaks=max_anchor_breaks - self._opportunity_anchor_corridor_breaks_used,
+        )
+        if corridor is None:
+            self._skipped_opportunity_tiles.add(anchor_target.tile)
+            self._clear_opportunity_anchor(
+                f"价值资源锚点当前无法规划通路石头，跳过: target={self._format_mine_target(anchor_target)}"
+            )
+            return None
+
+        stone_tile, required_breaks, path_length = corridor
+        if self._promote_deferred_loot_if_not_covered(
+            blackboard,
+            game_state,
+            self._build_stone_continuation_tiles(game_state, stone_tile),
+            "价值资源锚点通路石头路径无法顺路覆盖掉落物",
+        ):
+            return "RUNNING"
 
         self._phase = "BREAK_STONE"
         self._target_tile = stone_tile
         self._stone_attempt_count = 0
+        self._corridor_ladder_tile = None
         self.positioning_controller.reset()
         self.tool_action_tracker.reset()
         self._active_tool_effect_plan = None
-        self._pre_ladder_corridor_breaks_used += 1
+        self._opportunity_anchor_corridor_breaks_used += 1
         self._log(
-            f"梯子前资源目标不可达，先破石打通路径: "
-            f"ladder={ladder_tile}, target={self._format_mine_target(corridor_target)}, "
-            f"stone={stone_tile}, required_breaks={required_breaks}, "
-            f"used_breaks={self._pre_ladder_corridor_breaks_used}/{MAX_PRE_LADDER_CORRIDOR_STONES}, "
-            f"player={game_state.player_tile}"
+            f"价值资源锚点不可达，优先破石打通资源方向: "
+            f"target={self._format_mine_target(anchor_target)}, stone={stone_tile}, "
+            f"required_breaks={required_breaks}, path_length={path_length}, "
+            f"used_breaks={self._opportunity_anchor_corridor_breaks_used}/{max_anchor_breaks}, "
+            f"is_pre_ladder={is_pre_ladder}, player={game_state.player_tile}"
         )
         return self._run_break_stone_phase(context, blackboard, game_state, current_task)
 
@@ -1295,11 +1371,239 @@ class MineNode(BTNode):
         )
         self._log(
             f"发现顺手机会目标: target={self._format_mine_target(opportunity_target)}, "
-            f"used={self._opportunity_actions_used}/{current_task.max_opportunity_actions_per_level}, "
-            f"pre_ladder_used={self._pre_ladder_opportunity_actions_used}/{MAX_PRE_LADDER_OPPORTUNITY_ACTIONS_PER_LEVEL}, "
-            f"max_detour={current_task.max_opportunity_detour_tiles}, "
+            f"handled={self._opportunity_actions_used}, "
+            f"pre_ladder_handled={self._pre_ladder_opportunity_actions_used}, "
+            f"policy={self._format_opportunity_decision(self._opportunity_anchor_decision)}, "
             f"is_pre_ladder={is_pre_ladder}, reason={reason or '-'}"
         )
+
+    def _select_opportunity_anchor_decision(
+        self,
+        game_state: StardewState,
+        current_task: MiningTask,
+        ladder_tile: Tile | None = None,
+    ) -> OpportunityDecision | None:
+        allowed_target_types = set(current_task.opportunity_target_types)
+        if not allowed_target_types:
+            return None
+
+        ignored_tiles = self._handled_opportunity_tiles | self._skipped_opportunity_tiles
+        direct_ladder_path = self._build_path_to_ladder_tile(game_state, ladder_tile) if ladder_tile is not None else []
+        direct_ladder_path_tiles = self._route_path_to_tile_list(direct_ladder_path)
+        self._log_opportunity_anchor_diagnostics(
+            game_state=game_state,
+            current_task=current_task,
+            allowed_target_types=allowed_target_types,
+            ignored_tiles=ignored_tiles,
+            direct_ladder_path_tiles=direct_ladder_path_tiles,
+        )
+        targets = self.mine_opportunity_selector.build_opportunity_targets(
+            game_state,
+            allowed_target_types,
+            ignored_tiles=ignored_tiles,
+            max_detour_tiles=None if ladder_tile is not None else current_task.max_opportunity_detour_tiles,
+        )
+        if not targets:
+            return None
+
+        threat_snapshot = self.threat_evaluator.evaluate(game_state) if ENABLE_MINING_MONSTER_TACTICS else None
+        if threat_snapshot is not None:
+            if threat_snapshot.nearest_threat is not None and threat_snapshot.nearest_threat.distance_to_player <= 3:
+                self._log(
+                    f"怪物过近，暂停锁定价值资源锚点: threat={self._format_threat(threat_snapshot.nearest_threat)}"
+                )
+                return None
+
+        policy = self.mining_opportunity_policy.with_config(self._build_opportunity_policy_config(current_task))
+        decisions: list[OpportunityDecision] = []
+        best_rejected_decision: OpportunityDecision | None = None
+        for target in targets:
+            if threat_snapshot is not None and target.tile in threat_snapshot.blocking_tiles:
+                self._skipped_opportunity_tiles.add(target.tile)
+                self._log(f"价值资源锚点位于怪物阻挡区，跳过: target={self._format_mine_target(target)}")
+                continue
+            if not policy.is_candidate_in_scope(game_state, target, direct_ladder_path_tiles or None):
+                continue
+
+            path = self._build_path_to_opportunity_target(game_state, target, threat_snapshot)
+            if path:
+                decision = policy.evaluate(
+                    state=game_state,
+                    target=target,
+                    resource_path_tiles=self._route_path_to_tile_list(path),
+                    corridor_break_count=0,
+                    direct_ladder_path_tiles=direct_ladder_path_tiles or None,
+                    ladder_tile=ladder_tile,
+                )
+                if decision.should_take:
+                    decisions.append(decision)
+                else:
+                    best_rejected_decision = self._select_better_rejected_decision(best_rejected_decision, decision)
+                continue
+
+            corridor = self._find_first_breakable_stone_for_blocked_target(
+                game_state,
+                target,
+                max_breaks=policy.config.max_corridor_break_count,
+            )
+            if corridor is None:
+                self._skipped_opportunity_tiles.add(target.tile)
+                self._log(f"价值资源锚点不可达且无法打通，跳过: target={self._format_mine_target(target)}")
+                continue
+
+            first_stone, required_breaks, path_length = corridor
+            decision = policy.evaluate(
+                state=game_state,
+                target=target,
+                resource_path_tiles=self._build_placeholder_path(game_state.player_tile, path_length),
+                corridor_break_count=required_breaks,
+                direct_ladder_path_tiles=direct_ladder_path_tiles or None,
+                ladder_tile=ladder_tile,
+            )
+            if decision.should_take:
+                decisions.append(decision)
+                self._log(
+                    f"价值资源锚点可通过破石打通: target={self._format_mine_target(target)}, "
+                    f"first_stone={first_stone}, required_breaks={required_breaks}, "
+                    f"path_length={path_length}, decision={self._format_opportunity_decision(decision)}"
+                )
+            else:
+                best_rejected_decision = self._select_better_rejected_decision(best_rejected_decision, decision)
+
+        if not decisions:
+            if best_rejected_decision is not None:
+                self._log(
+                    f"本轮没有值得处理的机会资源: "
+                    f"best_rejected={self._format_mine_target(best_rejected_decision.target)}, "
+                    f"decision={self._format_opportunity_decision(best_rejected_decision)}"
+                )
+            return None
+
+        return max(
+            decisions,
+            key=lambda decision: (
+                decision.score,
+                -self._tile_distance(game_state.player_tile, decision.target.tile),
+                -decision.break_cost,
+                -decision.action_cost,
+            ),
+        )
+
+    def _log_opportunity_anchor_diagnostics(
+        self,
+        game_state: StardewState,
+        current_task: MiningTask,
+        allowed_target_types: set[MineOpportunityTargetType],
+        ignored_tiles: set[Tile],
+        direct_ladder_path_tiles: list[Tile] | None = None,
+    ) -> None:
+        raw_targets: list[MineTarget] = []
+        if "COLLECTIBLE" in allowed_target_types:
+            raw_targets.extend(self.mine_target_selector.build_collectible_targets(game_state))
+        if "BREAKABLE_CONTAINER" in allowed_target_types:
+            raw_targets.extend(self.mine_target_selector.build_breakable_container_targets(game_state))
+        if "MINING_NODE" in allowed_target_types:
+            raw_targets.extend(
+                target
+                for target in self.mine_target_selector.build_breakable_rock_targets(game_state)
+                if target.target_type == "MINING_NODE"
+            )
+
+        if not raw_targets:
+            self._log(
+                "机会资源候选诊断: raw=0, "
+                f"allowed={sorted(allowed_target_types)}, player={game_state.player_tile}, "
+                f"max_detour={current_task.max_opportunity_detour_tiles}, "
+                f"direct_ladder_path={self._format_tile_list(direct_ladder_path_tiles or [])}"
+            )
+            return
+
+        sorted_targets = sorted(
+            raw_targets,
+            key=lambda target: (
+                self._tile_distance(game_state.player_tile, target.tile),
+                target.target_type,
+                target.tile.y,
+                target.tile.x,
+            ),
+        )
+        diagnostic_items: list[str] = []
+        for target in sorted_targets[:16]:
+            distance = self._tile_distance(game_state.player_tile, target.tile)
+            path_nearby_distance = (
+                None
+                if not direct_ladder_path_tiles
+                else min(self._tile_distance(target.tile, path_tile) for path_tile in direct_ladder_path_tiles)
+            )
+            is_ignored = target.tile in ignored_tiles
+            is_in_range = (
+                distance <= current_task.max_opportunity_detour_tiles
+                or (
+                    path_nearby_distance is not None
+                    and path_nearby_distance <= self._build_opportunity_policy_config(current_task).path_nearby_distance
+                )
+            )
+            is_resource_mining_node = (
+                target.target_type != "MINING_NODE"
+                or self.mine_opportunity_selector.is_resource_mining_node(target)
+            )
+
+            reason = "candidate"
+            path_length_text = "-"
+            corridor_text = "-"
+            if is_ignored:
+                reason = "ignored"
+            elif not is_in_range:
+                reason = "out_of_range"
+            elif not is_resource_mining_node:
+                reason = "non_resource_mining_node"
+            else:
+                path = self._build_path_to_opportunity_target(game_state, target)
+                if path:
+                    path_length = max(0, len(path) - 1)
+                    path_length_text = str(path_length)
+                    reason = "reachable" if path_length <= current_task.max_opportunity_detour_tiles else "path_over_budget"
+                else:
+                    corridor = self._find_first_breakable_stone_for_blocked_target(
+                        game_state,
+                        target,
+                        max_breaks=max(1, current_task.max_opportunity_detour_tiles),
+                    )
+                    if corridor is None:
+                        reason = "unreachable"
+                    else:
+                        first_stone, required_breaks, corridor_path_length = corridor
+                        corridor_text = f"{first_stone}/{required_breaks}/{corridor_path_length}"
+                        reason = "blocked_by_stone"
+
+            diagnostic_items.append(
+                (
+                    f"{self._format_mine_target(target)}"
+                    f"/dist={distance}"
+                    f"/path_near={path_nearby_distance if path_nearby_distance is not None else '-'}"
+                    f"/resource={is_resource_mining_node}"
+                    f"/path={path_length_text}"
+                    f"/corridor={corridor_text}"
+                    f"/reason={reason}"
+                )
+            )
+
+        self._log(
+            "机会资源候选诊断: "
+            f"raw={len(raw_targets)}, shown={len(diagnostic_items)}, "
+            f"allowed={sorted(allowed_target_types)}, player={game_state.player_tile}, "
+            f"max_detour={current_task.max_opportunity_detour_tiles}, "
+            f"direct_ladder_path={self._format_tile_list(direct_ladder_path_tiles or [])}, "
+            f"ignored={len(ignored_tiles)}, candidates=["
+            + "; ".join(diagnostic_items)
+            + "]"
+        )
+
+    def _clear_opportunity_anchor(self, reason: str) -> None:
+        self._log(reason)
+        self._opportunity_anchor_target = None
+        self._opportunity_anchor_decision = None
+        self._opportunity_anchor_corridor_breaks_used = 0
 
     def _select_opportunity_target(
         self,
@@ -1309,8 +1613,6 @@ class MineNode(BTNode):
         ignore_action_budget: bool = False,
     ) -> MineTarget | None:
         if not current_task.collect_opportunity_resources:
-            return None
-        if not ignore_action_budget and self._opportunity_actions_used >= current_task.max_opportunity_actions_per_level:
             return None
         if not allow_when_ladder and self._has_next_level_ladder(game_state):
             return None
@@ -1437,8 +1739,6 @@ class MineNode(BTNode):
         普通 Stone 不属于资源侧目标，过滤逻辑由 MineOpportunitySelector 负责。
         """
         if not current_task.collect_opportunity_resources:
-            return None
-        if self._opportunity_actions_used >= current_task.max_opportunity_actions_per_level:
             return None
 
         allowed_target_types = set(current_task.opportunity_target_types)
@@ -1573,6 +1873,55 @@ class MineNode(BTNode):
         extra_blocked_tiles.discard(game_state.player_tile)
         return self._build_path_to_tiles(game_state, target.candidate_stand_tiles, extra_blocked_tiles)
 
+    def _build_path_to_ladder_tile(self, game_state: StardewState, ladder_tile: Tile | None) -> list[RouteTile]:
+        if ladder_tile is None:
+            return []
+        extra_blocked_tiles = {ladder_tile}
+        extra_blocked_tiles.update(self._get_tactical_blocked_tiles(game_state))
+        extra_blocked_tiles.discard(game_state.player_tile)
+        return self._build_path_to_tiles(
+            game_state,
+            self._build_cardinal_neighbor_tiles(ladder_tile),
+            extra_blocked_tiles,
+        )
+
+    def _route_path_to_tile_list(self, path: list[RouteTile]) -> list[Tile]:
+        return [Tile(route_tile.x, route_tile.y) for route_tile in path]
+
+    def _build_placeholder_path(self, start_tile: Tile, path_length: int) -> list[Tile]:
+        return [start_tile for _ in range(max(0, path_length) + 1)]
+
+    def _build_opportunity_policy_config(self, current_task: MiningTask) -> OpportunityPolicyConfig:
+        return OpportunityPolicyConfig(
+            max_visible_resource_distance=current_task.max_opportunity_detour_tiles,
+        )
+
+    def _select_better_rejected_decision(
+        self,
+        current_decision: OpportunityDecision | None,
+        candidate_decision: OpportunityDecision,
+    ) -> OpportunityDecision:
+        if current_decision is None:
+            return candidate_decision
+        if candidate_decision.score > current_decision.score:
+            return candidate_decision
+        return current_decision
+
+    def _format_opportunity_decision(self, decision: OpportunityDecision | None) -> str:
+        if decision is None:
+            return "-"
+        return (
+            f"score={decision.score:.1f}, value={decision.resource_value:.1f}, "
+            f"direct={decision.direct_ladder_cost if decision.direct_ladder_cost is not None else '-'}, "
+            f"resource_cost={decision.resource_cost:.1f}, "
+            f"extra={decision.extra_path_cost if decision.extra_path_cost is not None else '-'}, "
+            f"effective_extra={decision.effective_extra_path_cost if decision.effective_extra_path_cost is not None else '-'}, "
+            f"path_near={decision.path_nearby_distance if decision.path_nearby_distance is not None else '-'}, "
+            f"near_bonus={decision.near_player_bonus:.1f}, "
+            f"action={decision.action_cost:.1f}, break={decision.break_cost:.1f}, "
+            f"risk={decision.risk_cost:.1f}, should_take={decision.should_take}, reason={decision.reason}"
+        )
+
     def _tick_positioning_for_target(
         self,
         game_state: StardewState,
@@ -1630,6 +1979,65 @@ class MineNode(BTNode):
             },
         )
 
+    def _finish_destroyed_opportunity_target(
+        self,
+        context: PlayerContext,
+        blackboard: AgentBlackboard,
+        game_state: StardewState,
+        target: MineTarget,
+        reason: str,
+    ) -> NodeStatus:
+        effect_result = self.tool_aftermath_service.inspect_tool_effect(
+            context,
+            game_state,
+            self._active_tool_effect_plan or self._build_opportunity_effect_plan(target),
+        )
+        aftermath_result = effect_result.aftermath
+        if aftermath_result.has_blocking_menu:
+            self._log(
+                f"机会目标已消失但发现阻塞 UI，等待 Guard 处理: "
+                f"target={self._format_mine_target(target)}, menu={aftermath_result.blocking_menu_type}"
+            )
+            return "RUNNING"
+
+        if aftermath_result.generated_ladder_tile is not None:
+            self._detected_ladder_tile = aftermath_result.generated_ladder_tile
+
+        self._request_collect_loot_after_target_destroyed(
+            blackboard,
+            game_state,
+            target,
+            aftermath_result.nearby_loot_tiles,
+            reason,
+        )
+        self._active_tool_effect_plan = None
+        self._finish_opportunity_target(success=True, reason=reason)
+        return "RUNNING"
+
+    def _request_collect_loot_after_target_destroyed(
+        self,
+        blackboard: AgentBlackboard,
+        game_state: StardewState,
+        target: MineTarget,
+        loot_tiles: list[Tile],
+        reason: str,
+    ) -> None:
+        resolved_loot_tiles = loot_tiles or self._find_collectible_loot_tiles_near_source(
+            game_state,
+            target.tile,
+            LAST_TOOL_SOURCE_LOOT_SCAN_DISTANCE,
+        )
+        self._log(
+            f"机会目标已破坏，扫描掉落物: target={self._format_mine_target(target)}, "
+            f"reason={reason}, loot_tiles={self._format_tile_list(resolved_loot_tiles)}"
+        )
+        self._request_collect_loot(
+            blackboard,
+            target.tile,
+            target.target_type,
+            resolved_loot_tiles,
+        )
+
     def _finish_opportunity_target(self, success: bool, reason: str) -> None:
         target = self._active_opportunity_target
         if target is not None:
@@ -1647,6 +2055,8 @@ class MineNode(BTNode):
                 f"pre_ladder_used={self._pre_ladder_opportunity_actions_used}, "
                 f"is_pre_ladder={self._active_opportunity_is_pre_ladder}"
             )
+            if self._opportunity_anchor_target is not None and self._opportunity_anchor_target.tile == target.tile:
+                self._clear_opportunity_anchor(f"价值资源锚点已结束: success={success}, target={self._format_mine_target(target)}")
 
         self._active_opportunity_target = None
         self._active_opportunity_is_pre_ladder = False
@@ -2281,6 +2691,9 @@ class MineNode(BTNode):
         self._failed_stone_tiles = set()
         self._deferred_stone_tiles = set()
         self._active_opportunity_target = None
+        self._opportunity_anchor_target = None
+        self._opportunity_anchor_decision = None
+        self._opportunity_anchor_corridor_breaks_used = 0
         self._explore_stone_tile = None
         self._handled_opportunity_tiles = set()
         self._skipped_opportunity_tiles = set()
@@ -2379,8 +2792,9 @@ class MineNode(BTNode):
             f"player={game_state.player_tile}, target={self._target_tile}, "
             f"explore_stone={self._explore_stone_tile}, "
             f"opportunity={self._format_mine_target(self._active_opportunity_target)}, "
-            f"opportunity_used={self._opportunity_actions_used}/{current_task.max_opportunity_actions_per_level}, "
-            f"pre_ladder_opportunity_used={self._pre_ladder_opportunity_actions_used}/{MAX_PRE_LADDER_OPPORTUNITY_ACTIONS_PER_LEVEL}, "
+            f"opportunity_handled={self._opportunity_actions_used}, "
+            f"pre_ladder_opportunity_handled={self._pre_ladder_opportunity_actions_used}, "
+            f"opportunity_decision={self._format_opportunity_decision(self._opportunity_anchor_decision)}, "
             f"pre_ladder_corridor={self._format_mine_target(self._pre_ladder_corridor_target)}, "
             f"pre_ladder_corridor_breaks={self._pre_ladder_corridor_breaks_used}/{MAX_PRE_LADDER_CORRIDOR_STONES}, "
             f"detected_ladder={self._detected_ladder_tile}, "
@@ -2429,6 +2843,9 @@ class MineNode(BTNode):
             f"/name={target.name or '-'}"
             f"/source={target.source or '-'}"
             f"/qid={target.qualified_item_id or '-'}"
+            f"/kind={target.mining_node_kind or '-'}"
+            f"/parent={target.parent_sheet_index}"
+            f"/hits={target.estimated_hits_to_break}"
             f"/action={target.action}"
         )
 
