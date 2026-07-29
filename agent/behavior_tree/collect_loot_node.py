@@ -13,15 +13,16 @@ from server.type import Tile
 COLLECT_LOOT_TIMEOUT_SECONDS = 6.0
 COLLECT_TREE_LOOT_TIMEOUT_SECONDS = 12.0
 COLLECT_SINGLE_LOOT_TIMEOUT_SECONDS = 4.0
-MAX_LOOT_SWEEP_PASSES = 3
 DEFAULT_MAGNETIC_RADIUS_RATIO = 0.5
-MAGNETIC_RADIUS_TILE_BUFFER = 0.3
+MAGNETIC_RADIUS_TILE_BUFFER = 0.1
 LOOT_CLUSTER_LINK_RADIUS_TILES = 2
 LOOT_CLUSTER_MAX_STAND_CANDIDATES = 8
 TREE_LOOT_COLLECT_RADIUS_TILES = 6
 WEEDS_LOOT_COLLECT_RADIUS_TILES = 3
+STONE_LOOT_COLLECT_RADIUS_TILES = 4
 LOOT_COLLECT_STAND_SEARCH_RADIUS_TILES = 3
 LOOT_CLEARABLE_OBSTACLE_TYPES = {"grass", "weeds", "twig", "stone"}
+GENERIC_DEBRIS_ITEM_KEYS = {"", "RESOURCE", "OBJECT", "CHUNKS", "Debris"}
 
 
 class CollectLootNode(BTNode):
@@ -42,6 +43,8 @@ class CollectLootNode(BTNode):
         self._sweep_pass_count = 0
         self._source_signature: tuple[str | None, int | None, int | None, str | None] | None = None
         self._last_cluster_log_signature: tuple | None = None
+        self._inventory_snapshot: dict[str, int] = {}
+        self._observed_loot_item_keys: set[str] = set()
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
         if not blackboard.require_collect_loot:
@@ -53,9 +56,9 @@ class CollectLootNode(BTNode):
             return "RUNNING"
 
         if self._started_at is None:
-            self._start(blackboard)
+            self._start(blackboard, game_state)
         elif self._source_changed(blackboard):
-            self._restart_for_source_change(blackboard)
+            self._restart_for_source_change(blackboard, game_state)
 
         if blackboard.require_clear_obstacle and blackboard.clear_obstacle_owner == blackboard.collect_loot_owner:
             self._pause_collect_timeout_while_waiting_clear()
@@ -89,6 +92,16 @@ class CollectLootNode(BTNode):
 
         self._refresh_pending_loot_tiles(blackboard, game_state)
         if not blackboard.pending_loot_tiles:
+            if self._observed_loot_item_keys and not self._has_observed_inventory_gain(game_state):
+                self._log(
+                    f"可识别掉落物已离开可见范围，但背包尚未观察到增量，继续等待 state 刷新: "
+                    f"owner={blackboard.collect_loot_owner}, source={blackboard.collect_loot_source_tile}, "
+                    f"observed_item_keys={sorted(self._observed_loot_item_keys)}, "
+                    f"inventory_snapshot={self._inventory_snapshot}, "
+                    f"current_inventory={self._snapshot_inventory_items(game_state)}"
+                )
+                return "RUNNING"
+
             self._log(
                 f"掉落物已全部消失或已拾取: owner={blackboard.collect_loot_owner}, "
                 f"source={blackboard.collect_loot_source_tile}, skipped={blackboard.skipped_loot_tiles}"
@@ -99,25 +112,10 @@ class CollectLootNode(BTNode):
 
         target_tile = self._select_target_tile(blackboard, game_state)
         if target_tile is None:
-            if blackboard.pending_loot_tiles and self._should_continue_sweeping_pending_loot(blackboard):
-                self._sweep_pass_count += 1
-                self._swept_loot_tiles = set()
-                self._target_tile = None
-                self._target_started_at = None
-                self.positioning_controller.reset()
-                self._log(
-                    f"发现仍有掉落物，开始第 {self._sweep_pass_count} 轮补扫: "
-                    f"owner={blackboard.collect_loot_owner}, source={blackboard.collect_loot_source_tile}, "
-                    f"pending={self._format_tiles(blackboard.pending_loot_tiles)}, "
-                    f"allow_over_limit={self._is_tree_collect_mode(blackboard)}"
-                )
-                return "RUNNING"
-
             self._log(
-                f"当前掉落物都已被拾取路径扫过，结束本轮拾取: "
+                f"当前 pending 掉落物已不在 state 中，结束本轮拾取: "
                 f"owner={blackboard.collect_loot_owner}, source={blackboard.collect_loot_source_tile}, "
-                f"pending={self._format_tiles(blackboard.pending_loot_tiles)}, swept={sorted(self._swept_loot_tiles)}, "
-                f"sweep_pass={self._sweep_pass_count}/{MAX_LOOT_SWEEP_PASSES}"
+                f"pending={self._format_tiles(blackboard.pending_loot_tiles)}, swept={sorted(self._swept_loot_tiles)}"
             )
             context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             self._finish(blackboard)
@@ -166,24 +164,27 @@ class CollectLootNode(BTNode):
 
         if positioning_result.status == "READY":
             if self._is_target_in_magnetic_range(game_state, target_tile):
-                self._sweep_target(
+                command = self._build_move_command_to_debris_center(game_state, target_tile)
+                response = context.executor_client.send_command(command)
+                self._mark_target_covered(
                     target_tile,
                     game_state,
-                    f"已到达聚类拾取覆盖站位: stand_tile={positioning_result.stand_tile}，不中断移动等待",
+                    f"已进入磁吸范围但掉落物仍存在，继续贴近等待 state 消失: "
+                    f"stand_tile={positioning_result.stand_tile}, command={command.action}, response={response}",
                 )
                 return "RUNNING"
 
             command = self._build_move_command_to_magnetic_range(game_state, target_tile)
             if command.action == StardewAction.IDLE:
                 self._log(
-                    f"站位 READY 且贴近命令已停止，标记当前掉落物已覆盖: target={target_tile}, "
+                    f"站位 READY 且贴近命令已停止，但掉落物仍存在，继续等待 state 刷新或单目标超时: target={target_tile}, "
                     f"stand_tile={positioning_result.stand_tile}, player={game_state.player_tile}, "
                     f"player_position={game_state.position}"
                 )
-                self._sweep_target(
+                self._mark_target_covered(
                     target_tile,
                     game_state,
-                    f"贴近命令已停止: stand_tile={positioning_result.stand_tile}，不中断移动等待",
+                    f"贴近命令已停止: stand_tile={positioning_result.stand_tile}",
                 )
                 return "RUNNING"
 
@@ -199,17 +200,21 @@ class CollectLootNode(BTNode):
 
         return "RUNNING"
 
-    def _start(self, blackboard: AgentBlackboard) -> None:
+    def _start(self, blackboard: AgentBlackboard, game_state) -> None:
         self._started_at = time.time()
         self._sweep_pass_count = 1
         self._source_signature = self._build_source_signature(blackboard)
+        self._inventory_snapshot = self._snapshot_inventory_items(game_state)
+        self._observed_loot_item_keys = set()
+        self._observe_visible_loot_item_keys(blackboard, game_state)
         self._log(
             f"开始自动拾取: owner={blackboard.collect_loot_owner}, "
             f"source={blackboard.collect_loot_source_tile}, source_type={blackboard.collect_loot_source_type}, "
-            f"pending={self._format_tiles(blackboard.pending_loot_tiles)}"
+            f"pending={self._format_tiles(blackboard.pending_loot_tiles)}, "
+            f"observed_item_keys={sorted(self._observed_loot_item_keys)}"
         )
 
-    def _restart_for_source_change(self, blackboard: AgentBlackboard) -> None:
+    def _restart_for_source_change(self, blackboard: AgentBlackboard, game_state) -> None:
         old_signature = self._source_signature
         self._started_at = time.time()
         self._target_tile = None
@@ -218,10 +223,14 @@ class CollectLootNode(BTNode):
         self._sweep_pass_count = 1
         self._source_signature = self._build_source_signature(blackboard)
         self._last_cluster_log_signature = None
+        self._inventory_snapshot = self._snapshot_inventory_items(game_state)
+        self._observed_loot_item_keys = set()
+        self._observe_visible_loot_item_keys(blackboard, game_state)
         self.positioning_controller.reset()
         self._log(
             f"拾取来源发生变化，重置拾取计时和扫掠状态: old={old_signature}, new={self._source_signature}, "
-            f"pending={self._format_tiles(blackboard.pending_loot_tiles)}"
+            f"pending={self._format_tiles(blackboard.pending_loot_tiles)}, "
+            f"observed_item_keys={sorted(self._observed_loot_item_keys)}"
         )
 
     def _pause_collect_timeout_while_waiting_clear(self) -> None:
@@ -232,12 +241,9 @@ class CollectLootNode(BTNode):
     def _source_changed(self, blackboard: AgentBlackboard) -> bool:
         return self._source_signature != self._build_source_signature(blackboard)
 
-    def _should_continue_sweeping_pending_loot(self, blackboard: AgentBlackboard) -> bool:
-        if self._sweep_pass_count < MAX_LOOT_SWEEP_PASSES:
-            return True
-        return self._is_tree_collect_mode(blackboard)
-
-    def _build_source_signature(self, blackboard: AgentBlackboard) -> tuple[str | None, int | None, int | None, str | None]:
+    def _build_source_signature(
+        self, blackboard: AgentBlackboard
+    ) -> tuple[str | None, int | None, int | None, str | None]:
         source_tile = blackboard.collect_loot_source_tile
         return (
             blackboard.collect_loot_owner,
@@ -291,9 +297,12 @@ class CollectLootNode(BTNode):
         self._sweep_pass_count = 0
         self._source_signature = None
         self._last_cluster_log_signature = None
+        self._inventory_snapshot = {}
+        self._observed_loot_item_keys = set()
         self.positioning_controller.reset()
 
     def _refresh_pending_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> None:
+        self._observe_visible_loot_item_keys(blackboard, game_state)
         if self._is_dynamic_local_collect_mode(blackboard):
             self._refresh_dynamic_local_loot_tiles(blackboard, game_state)
             return
@@ -372,17 +381,13 @@ class CollectLootNode(BTNode):
 
     def _select_target_tile(self, blackboard: AgentBlackboard, game_state) -> Tile | None:
         existing_tiles = self._get_existing_requested_loot_tiles(blackboard, game_state)
-        if (
-            self._target_tile in existing_tiles
-            and (self._target_tile.x, self._target_tile.y) not in self._swept_loot_tiles
-        ):
+        if self._target_tile in existing_tiles:
             return self._target_tile
 
-        unswept_tiles = [tile for tile in existing_tiles if (tile.x, tile.y) not in self._swept_loot_tiles]
-        if not unswept_tiles:
+        if not existing_tiles:
             return None
 
-        return min(unswept_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
+        return min(existing_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
 
     def _build_collect_candidate_tiles(self, blackboard: AgentBlackboard, game_state, target_tile: Tile) -> set[Tile]:
         debris = self._get_debris_for_tile(game_state, target_tile)
@@ -421,7 +426,9 @@ class CollectLootNode(BTNode):
                         effective_magnetic_radius,
                     )
                 )
-                cluster_distance = sum(self._tile_distance(candidate_tile, cluster_item.tile) for cluster_item in cluster_debris)
+                cluster_distance = sum(
+                    self._tile_distance(candidate_tile, cluster_item.tile) for cluster_item in cluster_debris
+                )
                 player_distance = self._tile_distance(game_state.player_tile, candidate_tile)
                 candidate_scores.append((-cover_count, cluster_distance, player_distance, candidate_tile))
 
@@ -430,10 +437,9 @@ class CollectLootNode(BTNode):
 
         candidate_scores.sort(key=lambda item: (item[0], item[1], item[2], item[3].x, item[3].y))
         best_cover_count = -candidate_scores[0][0]
-        best_candidates = [
-            candidate_tile
-            for cover_count, _, _, candidate_tile in candidate_scores
-        ][:LOOT_CLUSTER_MAX_STAND_CANDIDATES]
+        best_candidates = [candidate_tile for cover_count, _, _, candidate_tile in candidate_scores][
+            :LOOT_CLUSTER_MAX_STAND_CANDIDATES
+        ]
         candidate_tiles = set(best_candidates)
         self._log_cluster_candidate_once(target_tile, cluster_tiles, candidate_tiles, best_cover_count, game_state)
         return candidate_tiles or {target_tile}
@@ -502,16 +508,13 @@ class CollectLootNode(BTNode):
     def _is_collectible_debris(self, debris) -> bool:
         return bool(getattr(debris, "is_collectible", False))
 
-    def _sweep_target(self, target_tile: Tile, game_state, reason: str) -> None:
+    def _mark_target_covered(self, target_tile: Tile, game_state, reason: str) -> None:
         self._swept_loot_tiles.add((target_tile.x, target_tile.y))
         self._log(
-            f"拾取路径已覆盖掉落物，不停留等待: target={target_tile}, reason={reason}, "
+            f"拾取路径已覆盖掉落物但尚未确认消失: target={target_tile}, reason={reason}, "
             f"player_tile={game_state.player_tile}, player_position={game_state.position}, "
             f"swept={sorted(self._swept_loot_tiles)}"
         )
-        self._target_tile = None
-        self._target_started_at = None
-        self.positioning_controller.reset()
 
     def _can_tile_cover_debris_with_magnetic_range(
         self,
@@ -524,7 +527,9 @@ class CollectLootNode(BTNode):
         player_width, player_height = game_state.player_size
         half_width = player_width / 2
         half_height = player_height / 2
-        magnetic_radius = self._get_effective_magnetic_radius(game_state) if magnetic_radius is None else magnetic_radius
+        magnetic_radius = (
+            self._get_effective_magnetic_radius(game_state) if magnetic_radius is None else magnetic_radius
+        )
         if magnetic_radius <= 0:
             return False
 
@@ -592,6 +597,46 @@ class CollectLootNode(BTNode):
 
         return StardewCommand(action=StardewAction.IDLE)
 
+    def _build_move_command_to_debris_center(self, game_state, target_tile: Tile) -> StardewCommand:
+        debris = self._get_debris_for_tile(game_state, target_tile)
+        if debris is None:
+            return StardewCommand(action=StardewAction.IDLE)
+
+        tile_size = game_state.tile_size or 64
+        close_radius = max(8.0, tile_size * 0.15)
+        pressed_keys: set[str] = set()
+        distance_x = game_state.position.x - debris.position.x
+        distance_y = game_state.position.y - debris.position.y
+
+        if distance_x < -close_radius:
+            pressed_keys.add("d")
+        elif distance_x > close_radius:
+            pressed_keys.add("a")
+
+        if distance_y < -close_radius:
+            pressed_keys.add("s")
+        elif distance_y > close_radius:
+            pressed_keys.add("w")
+
+        if "w" in pressed_keys and "d" in pressed_keys:
+            return StardewCommand(action=StardewAction.MOVE_UP_RIGHT, key=["w", "d"])
+        if "w" in pressed_keys and "a" in pressed_keys:
+            return StardewCommand(action=StardewAction.MOVE_UP_LEFT, key=["w", "a"])
+        if "s" in pressed_keys and "d" in pressed_keys:
+            return StardewCommand(action=StardewAction.MOVE_DOWN_RIGHT, key=["s", "d"])
+        if "s" in pressed_keys and "a" in pressed_keys:
+            return StardewCommand(action=StardewAction.MOVE_DOWN_LEFT, key=["s", "a"])
+        if "w" in pressed_keys:
+            return StardewCommand(action=StardewAction.MOVE_UP, key=["w"])
+        if "s" in pressed_keys:
+            return StardewCommand(action=StardewAction.MOVE_DOWN, key=["s"])
+        if "a" in pressed_keys:
+            return StardewCommand(action=StardewAction.MOVE_LEFT, key=["a"])
+        if "d" in pressed_keys:
+            return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
+
+        return StardewCommand(action=StardewAction.IDLE)
+
     def _request_clear_obstacle_for_loot_path(
         self,
         blackboard: AgentBlackboard,
@@ -606,7 +651,7 @@ class CollectLootNode(BTNode):
             self._skip_target(blackboard, target_tile, "树木掉落物拾取不触发清障；磁吸候选站位不可达")
             return False
         if self._is_target_in_magnetic_range(game_state, target_tile, should_log=False):
-            self._sweep_target(target_tile, game_state, "已在磁吸范围内，不为拾取触发清障")
+            self._mark_target_covered(target_tile, game_state, "已在磁吸范围内，不为拾取触发清障")
             return False
 
         candidate_tiles = self._build_collect_candidate_tiles(blackboard, game_state, target_tile)
@@ -658,13 +703,85 @@ class CollectLootNode(BTNode):
         normalized_source_type = normalize_obstacle_type(blackboard.collect_loot_source_type or "")
         return normalized_source_type == "weeds"
 
+    def _is_stone_collect_mode(self, blackboard: AgentBlackboard) -> bool:
+        normalized_source_type = normalize_obstacle_type(blackboard.collect_loot_source_type or "")
+        return normalized_source_type in {"stone", "miningnode", "mining_node", "breakable_container"}
+
     def _is_dynamic_local_collect_mode(self, blackboard: AgentBlackboard) -> bool:
-        return self._is_tree_collect_mode(blackboard) or self._is_area_clear_collect_mode(blackboard)
+        return (
+            self._is_tree_collect_mode(blackboard)
+            or self._is_area_clear_collect_mode(blackboard)
+            or self._is_stone_collect_mode(blackboard)
+        )
 
     def _get_dynamic_collect_radius(self, blackboard: AgentBlackboard) -> int:
         if self._is_tree_collect_mode(blackboard):
             return TREE_LOOT_COLLECT_RADIUS_TILES
+        if self._is_stone_collect_mode(blackboard):
+            return STONE_LOOT_COLLECT_RADIUS_TILES
         return WEEDS_LOOT_COLLECT_RADIUS_TILES
+
+    def _observe_visible_loot_item_keys(self, blackboard: AgentBlackboard, game_state) -> None:
+        for debris in self._get_observed_debris_for_current_source(blackboard, game_state):
+            item_key = self._build_debris_item_key(debris)
+            if item_key is None:
+                continue
+            self._observed_loot_item_keys.add(item_key)
+
+    def _get_observed_debris_for_current_source(self, blackboard: AgentBlackboard, game_state) -> list:
+        if self._is_dynamic_local_collect_mode(blackboard):
+            source_tile = blackboard.collect_loot_source_tile
+            if source_tile is None:
+                return []
+            radius = self._get_dynamic_collect_radius(blackboard)
+            return [
+                debris
+                for debris in getattr(game_state, "debris", [])
+                if self._is_collectible_debris(debris)
+                and self._is_tile_in_dynamic_loot_radius(source_tile, debris.tile, radius)
+            ]
+
+        requested_tiles = set(blackboard.pending_loot_tiles)
+        return [
+            debris
+            for debris in getattr(game_state, "debris", [])
+            if self._is_collectible_debris(debris) and debris.tile in requested_tiles
+        ]
+
+    def _build_debris_item_key(self, debris) -> str | None:
+        qualified_item_id = str(getattr(debris, "qualified_item_id", "") or "").strip()
+        if qualified_item_id:
+            return f"qid:{qualified_item_id}"
+
+        name = str(getattr(debris, "name", "") or "").strip()
+        display_name = str(getattr(debris, "display_name", "") or "").strip()
+        item_name = name if name not in GENERIC_DEBRIS_ITEM_KEYS else display_name
+        if not item_name or item_name in GENERIC_DEBRIS_ITEM_KEYS:
+            return None
+        return f"name:{item_name}"
+
+    def _snapshot_inventory_items(self, game_state) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        inventory = getattr(game_state, "inventory", None)
+        for item in getattr(inventory, "items", []):
+            stack = int(getattr(item, "stack", 0) or 0)
+            qualified_item_id = str(getattr(item, "qualified_item_id", "") or "").strip()
+            if qualified_item_id:
+                key = f"qid:{qualified_item_id}"
+                counts[key] = counts.get(key, 0) + stack
+
+            name = str(getattr(item, "name", "") or "").strip()
+            if name:
+                key = f"name:{name}"
+                counts[key] = counts.get(key, 0) + stack
+        return counts
+
+    def _has_observed_inventory_gain(self, game_state) -> bool:
+        current_inventory = self._snapshot_inventory_items(game_state)
+        for item_key in self._observed_loot_item_keys:
+            if current_inventory.get(item_key, 0) > self._inventory_snapshot.get(item_key, 0):
+                return True
+        return False
 
     def _is_player_busy(self, game_state) -> bool:
         return bool(getattr(game_state, "using_tool", False)) or not bool(getattr(game_state, "can_move", True))

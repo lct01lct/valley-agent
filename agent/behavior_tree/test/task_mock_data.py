@@ -209,7 +209,7 @@ TASK_MOCK_DATA: Dict[
             target_mine_level=10,
         ),
     ],
-    "MINING_P0_2": [  # Mining P0/P2：冲层时允许顺手处理低成本资源；当前先作为策略参数 mock。
+    "MINING_P0_2": [  # Mining P0/P2：冲层时允许在 10 格内顺手处理低成本资源。
         # RouteTask(task_type="ROUTE", desc="前往矿洞", target_loc="Mine"),
         MiningTask(
             task_type="MINE",
@@ -223,7 +223,7 @@ TASK_MOCK_DATA: Dict[
                 "BREAKABLE_CONTAINER",
                 "MINING_NODE",
             ],
-            max_opportunity_detour_tiles=2,
+            max_opportunity_detour_tiles=10,
             max_opportunity_actions_per_level=2,
         ),
     ],

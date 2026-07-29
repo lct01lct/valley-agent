@@ -86,6 +86,41 @@ class BorrowedChestItem:
         )
 
 
+class DeferredLootRecord:
+    def __init__(
+        self,
+        owner: str,
+        source_tile: Tile,
+        source_type: str,
+        loot_tiles: list[Tile],
+        created_at: float,
+        priority: str = "normal",
+    ) -> None:
+        self.owner = owner
+        self.source_tile = source_tile
+        self.source_type = source_type
+        self.loot_tiles = loot_tiles
+        self.created_at = created_at
+        self.priority = priority
+        # 预计由后续主任务路径/站位顺路磁吸覆盖的地块。
+        # 当玩家已经到达这些地块，且掉落物静止不再被磁吸时，应转为主动拾取。
+        self.expected_cover_tiles: set[Tile] = set()
+        # 记录掉落物在预计磁吸覆盖点附近的运动状态。
+        # 如果掉落物仍在移动，说明可能已经被磁吸，不应立刻打断主任务。
+        self.debris_last_positions: dict[tuple[int, int], tuple[float, float]] = {}
+        self.debris_last_distances: dict[tuple[int, int], float] = {}
+        self.debris_stationary_started_at: dict[tuple[int, int], float] = {}
+
+    @property
+    def key(self) -> tuple[str, int, int, str]:
+        return (
+            self.owner,
+            self.source_tile.x,
+            self.source_tile.y,
+            self.source_type,
+        )
+
+
 class AgentBlackboard:
     def __init__(self):
         self.macro_plan: List[BaseTask] = []
@@ -123,6 +158,8 @@ class AgentBlackboard:
         self.collect_loot_source_type: str | None = None
         self.pending_loot_tiles: list[Tile] = []
         self.skipped_loot_tiles: set[tuple[int, int]] = set()
+        # 延迟拾取记录：工具动作产生掉落物后，如果后续主任务路径/站位能覆盖磁吸范围，先不抢占主任务。
+        self.deferred_loot_records: list[DeferredLootRecord] = []
 
         # 切换工具
         self.require_switch_tool = False

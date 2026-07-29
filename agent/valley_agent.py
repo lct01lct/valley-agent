@@ -40,8 +40,8 @@ class ValleyAgent:
                     node_name="Guard",
                     children=[
                         UiGuardNode(),
-                        SwitchToolNode(owner="Guard"),
-                        Defend_Node(),
+                        # SwitchToolNode(owner="Guard"),
+                        # Defend_Node(),
                     ],
                 ),
                 Sequence(

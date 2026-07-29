@@ -198,6 +198,8 @@ SMAPI Observer 需要持续导出并同步以下状态：
 - 当 `UsingTool=True` 或 `CanMove=False` 且本节点没有正在追踪的动作时，节点应暂停推进，避免在上一轮动作未释放控制权时叠加新命令。
 - `ToolAftermathService` 的工具效果等待窗口默认保持 `1.0s`。这个配置不是每次使用工具后的固定等待时间，而是“工具已收招后，如果 1 秒内完全没有观察到任何预期效果或有效副作用，才判定超时”的保护窗口；若 state 已证明目标完成或副作用已发生，应立即推进，不等满 1 秒。
 - 范围工具要区分“精确目标完成”和“有效副作用发生”。例如 Scythe / 剑清 Grass / Weeds 时，目标格可能没有一次命中，但只要作用范围内预期障碍减少，或目标附近出现可拾取掉落物，就说明这次工具动作有效，业务节点应尽快进入下一帧验证、重试或选择新目标，而不是等待目标格一定消失。
+- 工具动作后处理不能被更高优先级目标短路。以 Mining 为例：破石动画期间若目标 tile 已刷新为梯子，MineNode 仍必须先等待当前工具动作收招，执行 `ToolAftermathService`，登记掉落物/梯子/阻塞 UI 等副作用，然后再切换到梯子交互；不要因为 `state.ladders` 已出现就跳过当前工具动作的后处理。
+- 进入下一层矿井前必须先结算当前层工具动作产生的拾取需求。MineNode 在交互梯子前应检查 `blackboard.require_collect_loot`、延迟拾取队列，以及最近一次工具目标附近的可拾取掉落物；若存在应先让 `CollectLootNode` 处理，再下梯子，避免切层后丢失当前层掉落物。
 - 动作失败应区分永久失败和临时失败。Farm P1 浇水阶段的站位卡顿、动作未命中或短暂时序问题应进入浇水重试队列；锄地、播种、清障等阶段只有在明确不可执行或重试耗尽时才标记地块失败。
 - 不要使用 `time.sleep()` 等待工具动画；应通过每 tick 的状态变化判断或使用非阻塞状态机。
 
@@ -267,7 +269,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 工具切换应优先读取 SMAPI state 中的 `CurrentToolIndex`、`CurrentToolbarIndex` 和 `Items`，不要在 Python 端硬猜当前工具。
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
 - 工具收招后的副作用观察优先复用 `ToolAftermathService`。`1.0s` 工具效果等待窗口只用于“完全没有任何预期效果或副作用”的超时兜底；目标变化、范围影响、掉落物、梯子或阻塞 UI 等 state 已出现时必须尽快推进。业务节点仍负责解释结果，例如 Mining 决定是否转向梯子，ClearObstacle 决定是否继续重试；不要把所有工具业务成功判定塞进通用服务。
-- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。拾取节点只尝试可达掉落物，不触发清障；普通树掉落物会在树和残留树桩都砍完后统一拾取，允许部分拾取并跳过不可达位置。
+- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。拾取节点只尝试可达掉落物，不触发清障；普通树掉落物会在树和残留树桩都砍完后统一拾取，允许部分拾取并跳过不可达位置。若 C# Debris 提供明确 item id / name，拾取验证应优先使用背包数量变化；若只提供泛化 `RESOURCE` / `OBJECT`，则使用掉落物消失、位置变化和动态观察作为兜底。
 - 节点推进应状态驱动优先；固定 tick/秒数等待只能用于短暂防抖、节流和超时兜底，不要用经验等待替代 SMAPI state 验证。
 - 水壶补水属于 Farm 分支的资源恢复能力。FarmNode 发现 `WaterLeft <= 0` 时应通过 blackboard 触发 `RefillWateringCanNode`，不要在 FarmNode 内部直接实现找水源、移动和补水。
 - 水源坐标属于低频地图知识，优先通过 C# `QUERY_WATER_SOURCES` 按需查询并写入 `MapKnowledgeCache`；不要作为每帧 state 高频字段同步。

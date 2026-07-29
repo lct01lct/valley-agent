@@ -3,7 +3,7 @@ from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
 from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.mining_node import MiningTask
 from agent.behavior_tree.player_context import PlayerContext
-from agent.behavior_tree.tool_selection import find_tool_item, is_current_tool
+from agent.behavior_tree.tool_selection import find_tool_item
 
 
 PICKAXE_TOOL_NAME = "Pickaxe"
@@ -40,11 +40,5 @@ class MiningResourceCheckNode(BTNode):
             )
             print("\n🔴 [MiningResourceCheckNode] 背包中没有 Pickaxe，无法开始 Mining P0。")
             return "FAILURE"
-
-        if not is_current_tool(game_state, PICKAXE_TOOL_NAME):
-            blackboard.require_switch_tool = True
-            blackboard.is_switching_tool = True
-            blackboard.required_tool_owner = "Mining"
-            blackboard.required_tool = PICKAXE_TOOL_NAME
 
         return "SUCCESS"

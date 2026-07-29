@@ -4,6 +4,7 @@ from typing import List, Set, Tuple
 
 from agent.action.location.location import Location
 from agent.action.map.map import HardcodedStardewMap
+from agent.action.tool.loot_policy_service import LootPolicyService
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.clearance_policy import BLOCKING_ORDINARY_TREE_LAYERS, decide_clear_obstacle
 from agent.action.valley_action.tool_targeting import build_tool_target_face_command
@@ -56,6 +57,7 @@ class RouteNode(BTNode):
         self.failed_route_signature: tuple[int, Location, Location, Location] | None = None
         self.last_clear_obstacle_debug_signature: tuple | None = None
         self.scene_warp_distance_cache: dict[Location, dict[Location, float]] = {}
+        self.loot_policy_service = LootPolicyService()
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
 
@@ -99,6 +101,7 @@ class RouteNode(BTNode):
         if game_state:
             current_run_duration = time.time() - self.route_start_time
             self._update_scene_warp_distance_cache(game_state)
+            self.loot_policy_service.refresh_deferred_loot(blackboard, game_state)
 
             if not self.routes:
                 self.routes = self._select_best_scene_route(game_state, current_task.target_loc)
@@ -230,6 +233,9 @@ class RouteNode(BTNode):
 
                 if not self.should_trigger_astar:
                     if blackboard.is_opening_door:
+                        return "RUNNING"
+
+                    if self._promote_deferred_loot_if_not_covered(blackboard, game_state):
                         return "RUNNING"
 
                     clear_obstacle_tile = self._get_next_reachable_clear_obstacle_tile(game_state, blackboard)
@@ -455,6 +461,79 @@ class RouteNode(BTNode):
 
     def _get_tile_distance(self, start_tile: Tile, end_tile: Tile) -> float:
         return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
+
+    def _promote_deferred_loot_if_not_covered(
+        self,
+        blackboard: AgentBlackboard,
+        game_state: StardewState,
+    ) -> bool:
+        if not blackboard.deferred_loot_records:
+            return False
+
+        continuation_tiles = self._build_route_loot_continuation_tiles(game_state)
+        has_expired_deferred_loot = self.loot_policy_service.has_expired_deferred_loot(blackboard, "Route")
+        has_missed_expected_cover = self.loot_policy_service.has_missed_expected_cover_for_owner(
+            blackboard,
+            game_state,
+            "Route",
+        )
+        should_promote = self.loot_policy_service.should_promote_deferred_loot(
+            blackboard=blackboard,
+            state=game_state,
+            owner="Route",
+            continuation_tiles=continuation_tiles,
+            require_all_continuation_tiles=True,
+        )
+        if not should_promote:
+            self._log_route_debug(
+                f"Route 延迟拾取继续等待顺路磁吸: continuation={self._format_tiles(continuation_tiles)}, "
+                f"deferred={self._format_route_deferred_loot(blackboard)}"
+            )
+            return False
+
+        promoted = self.loot_policy_service.promote_deferred_loot(blackboard, game_state, "Route")
+        if promoted:
+            if has_expired_deferred_loot:
+                promote_reason = "延迟拾取超过等待窗口，立刻主动拾取"
+            elif has_missed_expected_cover:
+                promote_reason = "已经过预计磁吸覆盖地块但掉落物仍存在，立刻主动拾取"
+            else:
+                promote_reason = "路径无法顺路覆盖掉落物"
+            self._log_route_debug(
+                f"Route 延迟拾取转为主动拾取: reason={promote_reason}, "
+                f"continuation={self._format_tiles(continuation_tiles)}, "
+                f"pending={self._format_tile_list(blackboard.pending_loot_tiles)}"
+            )
+        return promoted
+
+    def _build_route_loot_continuation_tiles(self, game_state: StardewState) -> set[Tile]:
+        continuation_tiles: set[Tile] = set()
+        lookahead_end = min(self.path_index + 2, len(self.global_current_path))
+        for route_tile in self.global_current_path[self.path_index:lookahead_end]:
+            continuation_tiles.add(Tile(route_tile.x, route_tile.y))
+        return continuation_tiles
+
+    def _format_route_deferred_loot(self, blackboard: AgentBlackboard) -> str:
+        return str(
+            [
+                {
+                    "owner": record.owner,
+                    "source": (record.source_tile.x, record.source_tile.y),
+                    "source_type": record.source_type,
+                    "loot": [(tile.x, tile.y) for tile in record.loot_tiles],
+                    "expected_cover": [(tile.x, tile.y) for tile in record.expected_cover_tiles],
+                }
+                for record in blackboard.deferred_loot_records
+                if record.owner == "Route"
+            ]
+        )
+
+    def _format_tiles(self, tiles: set[Tile]) -> str:
+        ordered_tiles = sorted(tiles, key=lambda tile: (tile.x, tile.y))
+        return "[" + ", ".join(str(tile) for tile in ordered_tiles) + "]"
+
+    def _format_tile_list(self, tiles: list[Tile]) -> str:
+        return "[" + ", ".join(str(tile) for tile in tiles) + "]"
 
     def _reset_route_state(self) -> None:
         self.route_start_time = None

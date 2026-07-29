@@ -33,6 +33,7 @@ type ToolEffectAction = Literal[
     "HOE_TILE",  # 锄地，预期目标地块变为 HoeDirt
     "WATER_TILE",  # 浇水，预期作物或耕地进入已浇水状态
     "PLANT_SEED",  # 播种，预期目标地块出现作物
+    "BREAK_CONTAINER",  # 破坏矿井木桶/木箱等容器，预期容器消失并可能产生掉落物。
 ]
 
 
@@ -189,6 +190,7 @@ class ToolAftermathService:
             generated_ladder_tile=generated_ladder_tile,
             ladder_query_status=ladder_query_status,
             nearby_loot_tiles=nearby_loot_tiles,
+            loot_scan_distance=loot_scan_distance,
         )
 
         return ToolAftermathResult(
@@ -337,7 +339,7 @@ class ToolAftermathService:
         for debris in getattr(state, "debris", []):
             if not self._is_collectible_debris(debris):
                 continue
-            if self._tile_distance(debris.tile, target_tile) > max_distance:
+            if self._tile_chebyshev_distance(debris.tile, target_tile) > max_distance:
                 continue
             if debris.tile in seen_tiles:
                 continue
@@ -351,6 +353,9 @@ class ToolAftermathService:
     def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:
         return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
 
+    def _tile_chebyshev_distance(self, start_tile: Tile, end_tile: Tile) -> int:
+        return max(abs(start_tile.x - end_tile.x), abs(start_tile.y - end_tile.y))
+
     def _log_inspection(
         self,
         state: StardewState,
@@ -360,6 +365,7 @@ class ToolAftermathService:
         generated_ladder_tile: Tile | None,
         ladder_query_status: bool | None,
         nearby_loot_tiles: list[Tile],
+        loot_scan_distance: int,
     ) -> None:
         if ToolAftermathService._debug_logger is None:
             return
@@ -367,6 +373,11 @@ class ToolAftermathService:
         debris_list = list(getattr(state, "debris", []))
         target_text = self._format_tile(request.target_tile)
         nearby_text = [self._format_tile(tile) for tile in nearby_loot_tiles]
+        filtered_collectible_text = self._format_filtered_collectible_debris(
+            debris_list,
+            request.target_tile,
+            loot_scan_distance,
+        )
         sample_text = self._format_debris_samples(debris_list)
         ToolAftermathService._debug_logger.log(
             "观察工具动作副作用: "
@@ -375,7 +386,9 @@ class ToolAftermathService:
             f"blocking_menu={blocking_menu_type}, ladder_query={ladder_query_status}, "
             f"generated_ladder={self._format_tile(generated_ladder_tile)}, "
             f"has_debris_snapshot={getattr(state, 'has_debris_snapshot', None)}, "
-            f"debris_count={len(debris_list)}, nearby_loot_tiles={nearby_text}, debris_samples={sample_text}"
+            f"debris_count={len(debris_list)}, loot_scan_metric=chebyshev, "
+            f"loot_scan_distance={loot_scan_distance}, nearby_loot_tiles={nearby_text}, "
+            f"filtered_collectible_debris={filtered_collectible_text}, debris_samples={sample_text}"
         )
 
     def _log_tool_effect(
@@ -428,6 +441,36 @@ class ToolAftermathService:
                 f"stack={stack}, source={source}"
             )
         return samples
+
+    def _format_filtered_collectible_debris(
+        self,
+        debris_list: list[Any],
+        target_tile: Tile | None,
+        max_distance: int,
+        limit: int = 8,
+    ) -> list[str]:
+        if target_tile is None:
+            return []
+
+        filtered: list[str] = []
+        for debris in debris_list:
+            if not self._is_collectible_debris(debris):
+                continue
+            debris_tile = getattr(debris, "tile", None)
+            if not isinstance(debris_tile, Tile):
+                continue
+            chebyshev_distance = self._tile_chebyshev_distance(debris_tile, target_tile)
+            if chebyshev_distance <= max_distance:
+                continue
+            manhattan_distance = self._tile_distance(debris_tile, target_tile)
+            filtered.append(
+                f"tile={self._format_tile(debris_tile)}, chebyshev={chebyshev_distance}, "
+                f"manhattan={manhattan_distance}, max={max_distance}, name={getattr(debris, 'name', '')}, "
+                f"source={getattr(debris, 'source', '')}"
+            )
+            if len(filtered) >= limit:
+                break
+        return filtered
 
     def _format_tile(self, tile: Tile | None) -> str:
         if tile is None:

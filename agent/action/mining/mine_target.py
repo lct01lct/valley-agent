@@ -5,6 +5,13 @@ from server.valley_server import MineInteractTargetState, MineObjectTargetState,
 from server.type import Tile
 
 
+NON_RESOURCE_MINING_NODE_NAMES = {"stone", "stones", "石头"}
+NON_RESOURCE_MINING_NODE_QUALIFIED_ITEM_IDS = {
+    "(O)32",
+    "(O)42",
+}
+
+
 type MineTargetType = Literal[
     "LADDER",  # 矿井下一层入口，执行方式是站到相邻格并交互。
     "MINE_ENTRANCE",  # 矿洞大厅进入第一层的入口，执行方式是站到相邻格并交互。
@@ -222,7 +229,7 @@ class MineTargetSelector:
             qualified_item_id=collectible.qualified_item_id,
             source=collectible.source,
             required_tool=None,
-            can_stand_on_target=True,
+            can_stand_on_target=False,
             require_tool_target=True,
             require_close_to_target=True,
             blocks_movement=False,
@@ -245,6 +252,100 @@ class MineTargetSelector:
             blocks_movement=True,
             priority=1.25,
         )
+
+    def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:
+        return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
+
+
+class MineOpportunitySelector:
+    """
+    Mining 冲层过程中的机会目标筛选器。
+
+    它只负责把 state 中“顺手可做”的目标挑出来；是否执行、如何执行、
+    是否因怪物或梯子改变主线，都由 MineNode / 战术层决定。
+    """
+
+    def __init__(self) -> None:
+        self.mine_target_selector = MineTargetSelector()
+
+    def build_opportunity_targets(
+        self,
+        state: StardewState,
+        allowed_target_types: set[MineTargetType],
+        ignored_tiles: set[Tile] | None = None,
+        max_detour_tiles: int = 10,
+    ) -> list[MineTarget]:
+        ignored_tiles = ignored_tiles or set()
+        candidates: list[MineTarget] = []
+
+        if "COLLECTIBLE" in allowed_target_types:
+            candidates.extend(self.mine_target_selector.build_collectible_targets(state, ignored_tiles))
+
+        if "BREAKABLE_CONTAINER" in allowed_target_types:
+            candidates.extend(self.mine_target_selector.build_breakable_container_targets(state, ignored_tiles))
+
+        if "MINING_NODE" in allowed_target_types:
+            candidates.extend(
+                target
+                for target in self.mine_target_selector.build_breakable_rock_targets(state, ignored_tiles)
+                if target.target_type == "MINING_NODE"
+                if self.is_resource_mining_node(target)
+            )
+
+        return [
+            target
+            for target in candidates
+            if self._tile_distance(state.player_tile, target.tile) <= max_detour_tiles
+        ]
+
+    def score_target(
+        self,
+        state: StardewState,
+        target: MineTarget,
+        path_length: int,
+    ) -> tuple[int, int, int, int, int]:
+        """
+        机会目标排序。
+
+        徒手采集物与矿井木箱/木桶按相同动作成本处理；MiningNode 成本更高。
+        """
+
+        action_cost = 0
+        if target.target_type == "MINING_NODE":
+            action_cost = 2
+
+        return (
+            action_cost,
+            path_length,
+            self._tile_distance(state.player_tile, target.tile),
+            target.tile.y,
+            target.tile.x,
+        )
+
+    def is_resource_mining_node(self, target: MineTarget) -> bool:
+        """
+        判断 MiningNode 是否属于“资源侧矿点”。
+
+        普通 Stone 仍可用于找梯子，但不属于机会资源；机会资源只包括矿物、宝石等值得顺手挖的节点。
+        """
+        if target.target_type != "MINING_NODE":
+            return False
+
+        names = {
+            self._normalize_text(target.name),
+            self._normalize_text(target.display_name),
+            self._normalize_text(target.source),
+        }
+        if names & NON_RESOURCE_MINING_NODE_NAMES:
+            return False
+
+        if target.qualified_item_id in NON_RESOURCE_MINING_NODE_QUALIFIED_ITEM_IDS:
+            return False
+
+        return True
+
+    def _normalize_text(self, text: str | None) -> str:
+        return "" if text is None else " ".join(text.strip().lower().split())
 
     def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:
         return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)

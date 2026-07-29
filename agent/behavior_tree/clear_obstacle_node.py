@@ -1,5 +1,6 @@
 import time
 
+from agent.action.tool.loot_policy_service import LootPolicyService
 from agent.action.tool.tool_aftermath_service import ToolAftermathRequest, ToolAftermathService, ToolEffectPlan
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.clearance_policy import (
@@ -69,6 +70,7 @@ class ClearObstacleNode(BTNode):
         self._deferred_loot_tiles: list[Tile] = []
         self._area_clear_verify_until: float | None = None
         self._active_tool_effect_plan: ToolEffectPlan | None = None
+        self.loot_policy_service = LootPolicyService()
         self.tool_aftermath_service = ToolAftermathService()
         self.tool_action_tracker = ToolActionTracker(
             start_grace_seconds=CLEAR_TOOL_START_GRACE_SECONDS,
@@ -505,6 +507,20 @@ class ClearObstacleNode(BTNode):
             return
 
         if not loot_tiles and not self._should_probe_dynamic_loot(source_type):
+            return
+
+        if self.owner == "Route":
+            self.loot_policy_service.register_deferred_loot(
+                blackboard=blackboard,
+                owner=self.owner,
+                source_tile=source_tile,
+                source_type=source_type,
+                loot_tiles=loot_tiles,
+            )
+            self._log(
+                f"发现 Route 清障掉落物，登记延迟拾取: source={source_tile}, source_type={source_type}, "
+                f"loot_tiles={self._format_tile_list(loot_tiles)}"
+            )
             return
 
         should_replace_pending_loot = self._should_replace_pending_loot(source_type)

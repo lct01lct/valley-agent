@@ -162,6 +162,8 @@ Python 端原则：
 - 工具收招后必须用最新 state 验证结果和副作用，例如障碍是否消失、范围内障碍是否减少、地块是否成为 HoeDirt、作物是否 `IsWatered=True`、掉落物是否出现、梯子是否出现或是否出现阻塞 UI。
 - 当前 `ToolAftermathService` 的工具效果等待窗口为 `1.0s`。它不是固定等待时间：如果 state 已经证明目标完成或有效副作用发生，节点应立即推进；只有工具收招后 1 秒内完全没有观察到预期效果或副作用，才进入超时、重试或失败判断。
 - 范围工具当前按“精确目标 + 副作用”双层判断。Scythe / 剑清理 Grass / Weeds 时，如果目标格没有立刻消失，但作用范围内预期障碍减少，或目标附近出现可拾取掉落物，也视为本次工具动作已经有效，避免因为要求目标格一次命中而原地等待。
+- Mining 破石时即使工具动画期间刷新了梯子，也不能直接抢先进入 Ladder 阶段；必须先完成当前 Pickaxe 动作收招、统一后处理和掉落物登记，再决定拾取或下梯子。
+- MineNode 交互梯子前会先结算当前层拾取需求：包括正在执行的 `require_collect_loot`、延迟拾取队列，以及最近一次工具目标附近短窗口内出现的可拾取掉落物。
 - Farm P1 的 `WATER_TILES` 阶段把临时失败地块放入浇水重试队列。只要地块仍然 `HasCrop=True` 且 `IsWatered=False`，就不应因为一次站位卡顿或动作未命中直接永久跳过。
 - 锄地、播种和清障阶段仍需要有限重试与明确失败原因，避免无限循环。
 
@@ -251,7 +253,7 @@ Chest P2/P3 约定：
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向 |
 | 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
-| 工具动作后处理 | 最小版接入 | 已新增 `ToolAftermathService`，当前用于 Mining 破石后的目标变化/梯子查询，以及 ClearObstacle 收招后的目标变化/范围副作用/阻塞 UI 观察；工具效果等待窗口为 `1.0s`，仅在没有观察到预期效果或有效副作用时作为超时兜底；已接入 `Debris` 掉落物感知，并通过 `CollectLootNode` 支持工具动作后的近距离可达掉落物自动拾取 |
+| 工具动作后处理 | 最小版接入 | 已新增 `ToolAftermathService`，当前用于 Mining 破石后的目标变化/梯子查询，以及 ClearObstacle 收招后的目标变化/范围副作用/阻塞 UI 观察；工具效果等待窗口为 `1.0s`，仅在没有观察到预期效果或有效副作用时作为超时兜底；已接入 `Debris` 掉落物感知，并通过 `CollectLootNode` 支持工具动作后的近距离可达掉落物自动拾取；Mining 下梯子前会先结算当前层已登记/延迟/最近工具来源附近的拾取需求 |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
@@ -339,6 +341,7 @@ Chest P2/P3 约定：
 - Mining P0 入口交互：从 Mine 大厅走到矿井入口旁，足够贴近后交互进入第一层；不能只因 `ToolTarget` 对准就提前交互。
 - Mining P0 天然梯子：进入某层后若已有天然梯子，优先走到梯子旁并进入下一层；梯子在局部视野外时，应先稳定接近，不应左右抽搐或反复换中继点。
 - Mining P0 挖石出梯子：没有梯子时打碎 Stone / MiningNode，等待工具收招后只查询被破坏 tile 是否生成梯子；若生成梯子，应立即切回梯子目标。
+- Mining P0 破石同时出梯子和掉落物：必须先完成 Pickaxe 收招和 `ToolAftermathService` 后处理，登记并拾取当前层掉落物，再交互梯子进入下一层。
 - Mining P0 交互边界：梯子/矿井入口目标 tile 不应被当成可站立 tile；玩家必须站在上下左右相邻格，并足够贴近交互边缘。
 - Mining P0 状态切层：进入下一层后必须重置上一层的目标、接近点、破石计数和临时路径，不能沿用过期状态。
 - 规划一片 Farm 区域，包含 Grass、Weeds、Twig、Stone、普通树、果树和独立树桩，Agent 能清理可处理障碍、普通树连同残留树桩处理完后再拾取掉落物、跳过果树/独立 TreeStump、锄地、播种并浇水。
