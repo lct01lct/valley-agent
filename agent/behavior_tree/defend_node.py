@@ -18,6 +18,9 @@ from server.type import Tile
 
 DEFEND_ATTACK_INTERVAL_SECONDS = 0.45
 DEFEND_MELEE_CHEBYSHEV_DISTANCE = 1
+MONSTER_TRACKING_TILE_DISTANCE = 4
+MONSTER_LOOT_SCAN_DISTANCE = 4
+MONSTER_LOOT_SOURCE_TYPE = "monster"
 
 
 class Defend_Node(BTNode):
@@ -30,6 +33,8 @@ class Defend_Node(BTNode):
         self._has_sent_idle = False
         self._last_attack_at = 0.0
         self._last_debug_heartbeat_at = 0.0
+        self._last_engaged_monster_name: str | None = None
+        self._last_engaged_monster_tile: Tile | None = None
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
         game_state = context.state
@@ -43,12 +48,14 @@ class Defend_Node(BTNode):
 
         if primary_threat is None:
             if self._active:
+                self._request_monster_loot_if_safe(blackboard, game_state, snapshot)
                 self._log("威胁解除，Guard 本 tick 让出控制权")
                 self._reset()
                 return "SUCCESS"
             return "FAILURE"
 
         self._active = True
+        self._remember_engaged_threat(primary_threat)
         if not self._has_sent_idle:
             context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             self._has_sent_idle = True
@@ -269,10 +276,81 @@ class Defend_Node(BTNode):
         threats: list[MonsterThreat],
         target_threat: MonsterThreat,
     ) -> MonsterThreat | None:
+        same_name_threats: list[MonsterThreat] = []
         for threat in threats:
             if threat.monster.name == target_threat.monster.name and threat.tile == target_threat.tile:
                 return threat
-        return None
+            if threat.monster.name == target_threat.monster.name:
+                same_name_threats.append(threat)
+
+        nearby_threats = [
+            threat
+            for threat in same_name_threats
+            if self._chebyshev_distance(threat.tile, target_threat.tile) <= MONSTER_TRACKING_TILE_DISTANCE
+        ]
+        if not nearby_threats:
+            return None
+        return min(nearby_threats, key=lambda threat: self._chebyshev_distance(threat.tile, target_threat.tile))
+
+    def _remember_engaged_threat(self, threat: MonsterThreat) -> None:
+        self._last_engaged_monster_name = threat.monster.name
+        self._last_engaged_monster_tile = threat.tile
+
+    def _request_monster_loot_if_safe(self, blackboard: AgentBlackboard, game_state, snapshot) -> None:
+        if self._last_engaged_monster_tile is None:
+            return
+        if any(threat.threat_level in ("FIGHT", "BLOCK") for threat in snapshot.threats):
+            self._log(
+                f"战斗目标消失但仍有威胁，暂不拾取怪物掉落: "
+                f"last_monster={self._last_engaged_monster_name}, last_tile={self._last_engaged_monster_tile}"
+            )
+            return
+        if blackboard.require_collect_loot:
+            self._log(
+                f"战斗目标消失但已有拾取任务，暂不覆盖: "
+                f"last_monster={self._last_engaged_monster_name}, last_tile={self._last_engaged_monster_tile}, "
+                f"active_owner={blackboard.collect_loot_owner}, pending={blackboard.pending_loot_tiles}"
+            )
+            return
+
+        loot_tiles = self._find_collectible_debris_tiles_near(game_state, self._last_engaged_monster_tile)
+        if not loot_tiles:
+            self._log(
+                f"战斗目标消失，附近暂未观察到可拾取掉落物: "
+                f"last_monster={self._last_engaged_monster_name}, last_tile={self._last_engaged_monster_tile}, "
+                f"scan={MONSTER_LOOT_SCAN_DISTANCE}"
+            )
+            return
+
+        blackboard.require_collect_loot = True
+        blackboard.collect_loot_owner = "Guard"
+        blackboard.collect_loot_source_tile = self._last_engaged_monster_tile
+        blackboard.collect_loot_source_type = MONSTER_LOOT_SOURCE_TYPE
+        blackboard.pending_loot_tiles = loot_tiles
+        blackboard.skipped_loot_tiles = set()
+        blackboard.combat_tactical_decision = None
+        self._log(
+            f"登记怪物掉落物拾取: monster={self._last_engaged_monster_name}, "
+            f"source={self._last_engaged_monster_tile}, loot={self._format_tiles(loot_tiles)}"
+        )
+
+    def _find_collectible_debris_tiles_near(self, game_state, source_tile: Tile) -> list[Tile]:
+        loot_tiles: list[Tile] = []
+        seen_tiles: set[tuple[int, int]] = set()
+        for debris in getattr(game_state, "debris", []):
+            if not bool(getattr(debris, "is_collectible", False)):
+                continue
+            debris_tile = getattr(debris, "tile", None)
+            if not isinstance(debris_tile, Tile):
+                continue
+            if self._chebyshev_distance(source_tile, debris_tile) > MONSTER_LOOT_SCAN_DISTANCE:
+                continue
+            tile_key = (debris_tile.x, debris_tile.y)
+            if tile_key in seen_tiles:
+                continue
+            loot_tiles.append(debris_tile)
+            seen_tiles.add(tile_key)
+        return loot_tiles
 
     def _build_cardinal_neighbor_tiles(self, target_tile: Tile) -> set[Tile]:
         return {
@@ -288,6 +366,8 @@ class Defend_Node(BTNode):
         self._has_sent_idle = False
         self._last_attack_at = 0.0
         self._last_debug_heartbeat_at = 0.0
+        self._last_engaged_monster_name = None
+        self._last_engaged_monster_tile = None
 
     def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:
         return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
@@ -324,6 +404,9 @@ class Defend_Node(BTNode):
             f"active={tactical_decision.is_active}"
         )
 
+    def _format_tiles(self, tiles: list[Tile]) -> list[tuple[int, int]]:
+        return [(tile.x, tile.y) for tile in tiles]
+
     def _log_debug_heartbeat(self, snapshot) -> None:
         now = time.time()
         if now - self._last_debug_heartbeat_at < 0.25:
@@ -333,6 +416,7 @@ class Defend_Node(BTNode):
         preview = "; ".join(self._format_threat(threat) for threat in snapshot.threats[:5])
         self._log(
             f"心跳: active={self._active}, has_sent_idle={self._has_sent_idle}, "
+            f"last_engaged={self._last_engaged_monster_name}@{self._last_engaged_monster_tile}, "
             f"max_score={snapshot.max_threat_score:.2f}, nearest={self._format_threat(snapshot.nearest_threat)}, "
             f"blocking_tiles={sorted(snapshot.blocking_tiles, key=lambda tile: (tile.x, tile.y))[:12]}, threats=[{preview}]"
         )
