@@ -10,13 +10,15 @@
 
 Farm P1 当前先暂停继续扩展。已有 Farm 模块已经能证明“确定性农业技能 + Chest 资源恢复 + 工具归还”这条链路成立；后续资源管理、背包容量、体力消耗和复杂恢复更适合放到 Mining 模块中验证，因为采矿场景会更密集地触发这些问题。
 
-下一阶段 Mining 的主线不是先做完整采矿收益最大化，而是先跑通矿洞核心循环：
+Mining 的核心循环已经从“只找下一层”推进到“找下一层 + 机会资源锚点 + 工具后处理 + 掉落物拾取”的基础底座。当前不再把 MineTarget、ToolAftermath、CollectLoot 和机会资源选择作为下一阶段主线；这些能力后续只按真实日志做增量修补。
+
+下一阶段 Mining 的主线也不是马上做完整采矿收益最大化，而是先补上会明显干扰测试稳定性的 Defend P1 / Mining 战术层最小版：
 
 ```text
-进入矿洞 -> 找到下一层 -> 第二层开始处理战斗风险 -> 再做资源采集与资源管理
+进入矿洞 -> 找到下一层/机会资源 -> 遇到怪物时稳定处理威胁 -> 再做体力、背包和资源管理
 ```
 
-因此开发优先级调整为：先完成“找到下一层”，再接 Defend，最后把体力、背包、箱子恢复和目标资源采集逐步叠上去。
+因此当前开发优先级调整为：先抽出怪物威胁判断和最小战术决策，解决怪物堵路、贴脸攻击、梯子附近拉扯和 Mining 目标风险评分预留；随后再把体力、背包、箱子恢复和长期资源采集逐步叠上去。
 
 Farm 当前保留为可复用的基础农业技能：
 
@@ -338,7 +340,7 @@ Selector
 
 #### ToolAftermathService
 
-当前状态：已新增最小版轻量服务层，不是一开始就做复杂节点。当前接入 Mining 和 ClearObstacle，用于工具收招后观察阻塞 UI、目标地块变化，以及 Mining 可选的破石后梯子查询。C# Observer 已同步当前场景 `Debris`，Python `state.debris` 已可被 `ToolAftermathService` 用于记录目标附近掉落物。`CollectLootNode` 已支持工具动作后的近距离可达掉落物自动拾取；采集物分类、批量拾取策略和更复杂的 aftermath checker 仍待后续扩展。
+当前状态：已形成基础底座。`ToolAftermathService` 当前接入 Mining 和 ClearObstacle，用于工具收招后观察阻塞 UI、目标地块变化、范围副作用、Mining 破石后梯子查询，以及目标附近可拾取掉落物。C# Observer 已同步当前场景 `Debris`，Python `state.debris` 已可被 `ToolAftermathService` 过滤为可拾取 debris；`CollectLootNode` / `LootPolicyService` 已支持工具动作后的近距离可达掉落物自动拾取、延迟拾取、磁吸覆盖判断和拾取验证。
 
 职责：
 
@@ -354,7 +356,7 @@ Selector
 - `1.0s` 工具效果等待窗口只用于“完全没有观察到预期效果或有效副作用”的保护性超时，不是每次工具动作后的固定停顿。
 - 对 Scythe / 剑等范围工具，预期目标没有一次性完全清掉时，只要范围内预期障碍减少，或目标附近出现可拾取掉落物，就应视为本次工具动作有效；随后由业务节点决定继续补刀、切换目标或进入拾取。
 - Mining 已补充一个短期保护：破石时如果工具动画期间刷新梯子，仍先完成工具收招和 aftermath；交互梯子前先处理当前层已登记、延迟或最近工具来源附近的可拾取掉落物，避免切层丢失。
-- 后续扩展到 BreakContainer、采集物、矿石和树木时，也应遵守同一原则：通用层观察副作用，业务节点解释目标是否完成，不用固定 sleep 替代 state 验证。
+- 扩展到 BreakContainer、采集物、矿石和树木时，也应遵守同一原则：通用层观察副作用，业务节点解释目标是否完成，不用固定 sleep 替代 state 验证。
 
 示例结构：
 
@@ -367,13 +369,13 @@ ToolAftermathResult(
 )
 ```
 
-短期只需要支持 Mining / ClearObstacle 的最小信息；不要一开始就追求完整物品分类。
+当前不再把 ToolAftermathService 作为独立主线重写；后续只围绕真实日志增量补充 effect checker、side effect checker 和特殊工具动作语义。
 
 #### 掉落物与拾取策略
 
-掉落物管理建议分成两层：
+掉落物管理当前分成两层：
 
-1. `LootAwarenessService`：基于 `state.debris` 识别当前场景掉落物、位置和可拾取状态。
+1. `ToolAftermathService` / `LootPolicyService`：基于 `state.debris` 识别当前场景可拾取掉落物、登记延迟拾取、判断后续动作是否能靠磁吸覆盖掉落物。
 2. `CollectLootNode`：根据 blackboard 中的拾取请求移动并捡起；当前只捡可达目标，不为拾取触发清障，树掉落物允许部分跳过。
 
 拾取策略不要写死在节点里，应由业务模块或战术层决定：
@@ -384,16 +386,16 @@ ToolAftermathResult(
 - Farm 清障：可在清完规划区域后批量拾取木材、石头、纤维等。
 - Combat / Defend：战斗结束且安全后再拾取。
 
-短期建议先实现两种模式：
+当前已支持两种基础模式：
 
 - `IMMEDIATE`：工具动作后立刻尝试拾取附近掉落物。
-- `BATCH`：业务阶段结束后统一拾取已记录的掉落物。
+- `DEFERRED`：如果后续工作站位仍能通过磁吸覆盖掉落物，则先继续主任务；超过延迟窗口、预期覆盖失败或进入下一层前，再提升为主动拾取。
 
-后续需要继续增强拾取验证：如果 C# Debris 能稳定导出 `QualifiedItemId` / 物品名，则 Python 可以用“背包数量增加”确认堆叠物或新物品已拾取；如果只有泛化 `RESOURCE` / `OBJECT`，仍需要保留掉落物消失、位置移动和短窗口动态观察作为兜底。
+拾取验证当前优先利用 C# Debris 的可识别 item id / name 与背包数量变化；如果只有泛化 `RESOURCE` / `OBJECT`，则保留掉落物消失、位置变化和短窗口动态观察作为兜底。后续增强重点不是重做拾取底座，而是把策略参数交给 Mining / Route / Farm 的战术 profile 控制。
 
 #### Mining 目标类型扩展
 
-Mining P2 不应只理解 Stone / MiningNode。当前已新增第一版结构化 `MineTarget` / `MineTargetSelector`，并接入 state 中的 Ladder、MineEntrance、Stone、MiningNode、Collectible 和 BreakableContainer。后续需要继续把矿井目标选择和执行策略纳入同一抽象：
+Mining P2 不应只理解 Stone / MiningNode。当前已新增第一版结构化 `MineTarget` / `MineTargetSelector`，并接入 state 中的 Ladder、MineEntrance、Stone、MiningNode、Collectible 和 BreakableContainer。Mining 后续目标选择和执行策略应继续围绕这个抽象扩展，不再在 MineNode 中散落读取不同对象类型：
 
 ```text
 MineTarget
@@ -411,31 +413,31 @@ MineTarget
 - `BreakableBox`：切武器，站到相邻格，面向目标，攻击，等待动作结束，验证容器消失并处理掉落物。
 - `Ladder`：站到可交互位置，足够贴近并交互，验证 `MineLevel` 变化。
 
-目标选择由 Mining 目标选择器或战术层决定，不应散落在 MineNode 的各个分支里。
+目标选择由 Mining 目标选择器、`MiningOpportunityPolicy` 或后续战术层决定，不应散落在 MineNode 的各个分支里。
 
 当前第一版落地边界：
 
 - `Ladder` / `MineEntrance`：来自 `state.ladders` / `state.mine_entrances`，用于交互目标选择。
 - `Stone` / `MiningNode`：来自 `state.layers["Stone"]` 和 `state.mining_nodes`，用于破石候选选择。
-- `Collectible`：来自 `state.mine_collectibles`，用于后续走近/交互拾取地晶、石英、火水晶等徒手采集物。
-- `BreakableContainer`：来自 `state.mine_breakable_containers`，用于后续切武器打破木箱/木桶并处理掉落物。
+- `Collectible`：来自 `state.mine_collectibles`，用于走近/交互拾取地晶、石英、火水晶等徒手采集物。
+- `BreakableContainer`：来自 `state.mine_breakable_containers`，用于切武器打破木箱/木桶并处理掉落物。
 - MineNode 仍保留现有执行状态机，避免在目标抽象第一步就重写完整 Mining 流程。
 
 #### 推荐讨论和开发顺序
 
-后续按以下顺序逐项商讨和实现：
+当前这条底座路线已完成第一轮落地：
 
-1. 先设计 C# Observer 如何暴露 `MenuState`，以及 Python 如何把 DialogueBox 文本分类为结构化 UI 事件。
-2. 实现 `UiGuardNode`，优先解决晶球提示框导致的全局卡顿，同时保留打烊/上锁触发重新规划的语义。
-3. 设计 C# Observer 如何暴露矿井采集物、矿石节点、木箱/木桶和掉落物。
-4. 抽象 `MineTarget` 与 Mining 目标选择器，先支持 Collectible / MiningNode / Stone / BreakableBox / Ladder 的基础分类。
-5. 设计 `ToolAftermathService`，先用于 Mining 和 ClearObstacle，避免每个节点重复处理菜单、掉落物和 Ladder 查询。
-6. 扩展 `CollectLootNode`：在当前最小版附近拾取基础上，继续支持批量拾取、价值过滤和战术 profile 控制。
-7. 将稳定后的工具后处理能力逐步回流 Route 清障、Farm 清障、砍树和未来战斗掉落。
+1. `UiGuardNode` 已接入 Guard 分支，用于关闭阻塞 UI 并保留打烊/上锁等业务反馈。
+2. C# Observer 已暴露矿井采集物、矿石节点、木箱/木桶和掉落物快照。
+3. `MineTarget` 与 Mining 目标选择器已支持 Collectible / MiningNode / Stone / BreakableContainer / Ladder。
+4. `ToolAftermathService` 已用于 Mining 和 ClearObstacle，避免每个节点重复处理菜单、掉落物和 Ladder 查询。
+5. `CollectLootNode` 已支持近距离可达掉落物拾取、延迟拾取和磁吸覆盖判断。
+
+后续不再把上述内容当成独立开发主线；只在 Mining / Route / Farm 的真实任务日志暴露问题时做增量修补。下一条主线应转向 Defend P1 / Mining 战术层最小版。
 
 ### Mining P2：基础采矿与资源节点选择
 
-目标：从“找下一层”扩展到“打碎指定数量资源节点”。
+目标：在现有 `MineTarget` / `MiningOpportunityPolicy` 基础上，继续验证 Stone、MiningNode、Collectible、BreakableContainer 和 Ladder 的执行闭环，而不是重新抽象目标系统。
 
 推荐任务：
 
@@ -444,13 +446,14 @@ MiningTask(mine_action="BREAK_ROCKS", count=5)
 MiningTask(mine_action="COLLECT_RESOURCE", target_resource_types=["Copper Ore"], count=10)
 ```
 
-P2 重点：
+P2 当前重点：
 
-- 抽出 Mining 目标选择策略：优先选择最近、可达、可破坏的资源节点。
-- 支持普通 Stone、Ore、Gem Node、Container 等类型逐步扩展。
+- 验证机会资源锚点是否稳定影响挖石方向。
+- 验证普通 Stone、Ore、Gem Node、Collectible、BreakableContainer 等目标类型的执行动作和成功判定。
 - 复用 `PositioningController` 做候选站位与 ToolTarget 对准。
 - 复用 `ToolActionTracker` 等待挥镐收招。
-- 通过最新 state 验证节点消失或目标资源数量增加。
+- 通过最新 state 验证节点消失、可拾取物消失或目标资源数量增加。
+- 遇到怪物干扰时暂时不在 P2 内硬塞复杂策略，交给下一步 Defend P1 / Mining 战术层最小版处理。
 
 ### Mining P3：资源管理底座
 
@@ -745,13 +748,10 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 ## 当前建议顺序
 
-1. Mining P0 设计：确认 `MiningTask`、`MineNode`、`MiningResourceCheckNode`、mock 数据和验收标准。
-2. SMAPI state/action 补齐：`MineLevel`、`Ladders/Stairs`、`MiningNodes`、进入下一层动作。
-3. Mining P0 实现：第一层找到下一层；没有入口时打 Stone 直到出现入口；验证进入第二层。
-4. Defend P0/P1 接入：第二层开始识别怪物，先做躲避/近身攻击，保证 Mining 测试安全。
-5. Mining P2 基础采矿：打碎指定数量 Stone / MiningNode，验证节点消失。
-6. Mining P3 资源管理：体力、背包容量、Pickaxe 缺失恢复、掉落/拾取验证、工具归还。
-7. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层。
-8. Mining P5 记忆接入：记录矿洞中遇到的资源、箱子和危险区域。
-9. 将 Mining 中稳定的资源管理和失败恢复能力回流 Farm。
-10. 再恢复 Farm 未来任务：Daily Water、Harvest、Replant、区域规划策略和 Farm 日程化。
+1. Defend P1 / Mining 战术层最小版：抽出怪物威胁判断，处理怪物堵路、贴脸攻击、梯子附近拉扯和目标风险评分预留。
+2. Mining 基础采矿验收：围绕 Stone、MiningNode、Collectible、BreakableContainer、Ladder 验证 MineTarget 抽象下的执行闭环。
+3. Mining P3 资源管理：体力、背包容量、Pickaxe 缺失恢复、工具借用归还和失败恢复。
+4. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层资源。
+5. Mining P5 记忆接入：记录矿洞中遇到的资源、箱子和危险区域。
+6. 将 Mining 中稳定的资源管理和失败恢复能力回流 Farm。
+7. 再恢复 Farm 未来任务：Daily Water、Harvest、Replant、区域规划策略和 Farm 日程化。
