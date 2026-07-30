@@ -17,6 +17,7 @@ from server.type import Tile
 
 
 DEFEND_ATTACK_INTERVAL_SECONDS = 0.45
+DEFEND_MELEE_CHEBYSHEV_DISTANCE = 1
 
 
 class Defend_Node(BTNode):
@@ -101,6 +102,17 @@ class Defend_Node(BTNode):
             self._log(f"请求切换武器: weapon={self._format_weapon(weapon)}, threat={self._format_threat(threat)}")
             return "RUNNING"
 
+        if self._is_same_tile(game_state.player_tile, threat.tile):
+            return self._attack_threat(context, weapon, threat, "怪物与玩家位于同一地块，跳过站位和转向直接攻击")
+
+        if self._chebyshev_distance(game_state.player_tile, threat.tile) <= DEFEND_MELEE_CHEBYSHEV_DISTANCE:
+            if not is_tool_targeting(game_state, threat.tile):
+                command = build_tool_target_face_command(game_state.player_tile, threat.tile)
+                context.executor_client.send_command(command)
+                self._log(f"贴身面向怪物: threat={self._format_threat(threat)}, command={command.action}")
+                return "RUNNING"
+            return self._attack_threat(context, weapon, threat, "怪物已在贴身范围内，直接攻击")
+
         if self._tile_distance(game_state.player_tile, threat.tile) > 1:
             return self._run_approach_monster(context, threat)
 
@@ -110,17 +122,29 @@ class Defend_Node(BTNode):
             self._log(f"面向怪物: threat={self._format_threat(threat)}, command={command.action}")
             return "RUNNING"
 
+        return self._attack_threat(context, weapon, threat, "怪物位于正交相邻格，攻击")
+
+    def _attack_threat(
+        self,
+        context: PlayerContext,
+        weapon,
+        threat: MonsterThreat,
+        reason: str,
+    ) -> NodeStatus:
         now = time.time()
         if now - self._last_attack_at < DEFEND_ATTACK_INTERVAL_SECONDS:
             return "RUNNING"
 
         response = context.executor_client.send_command(StardewCommand(action=StardewAction.ATTACK_WEAPON, key=["c"]))
         if response == "BUSY":
-            self._log(f"攻击命令 BUSY，等待下一帧: threat={self._format_threat(threat)}")
+            self._log(f"攻击命令 BUSY，等待下一帧: reason={reason}, threat={self._format_threat(threat)}")
             return "RUNNING"
 
         self._last_attack_at = now
-        self._log(f"发送攻击命令: response={response}, weapon={self._format_weapon(weapon)}, threat={self._format_threat(threat)}")
+        self._log(
+            f"发送攻击命令: reason={reason}, response={response}, "
+            f"weapon={self._format_weapon(weapon)}, threat={self._format_threat(threat)}"
+        )
         return "RUNNING"
 
     def _run_approach_monster(self, context: PlayerContext, threat: MonsterThreat) -> NodeStatus:
@@ -267,6 +291,12 @@ class Defend_Node(BTNode):
 
     def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:
         return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
+
+    def _chebyshev_distance(self, start_tile: Tile, end_tile: Tile) -> int:
+        return max(abs(start_tile.x - end_tile.x), abs(start_tile.y - end_tile.y))
+
+    def _is_same_tile(self, start_tile: Tile, end_tile: Tile) -> bool:
+        return start_tile.x == end_tile.x and start_tile.y == end_tile.y
 
     def _format_threat(self, threat: MonsterThreat | None) -> str:
         if threat is None:

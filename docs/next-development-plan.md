@@ -12,13 +12,13 @@ Farm P1 当前先暂停继续扩展。已有 Farm 模块已经能证明“确定
 
 Mining 的核心循环已经从“只找下一层”推进到“找下一层 + 机会资源锚点 + 工具后处理 + 掉落物拾取”的基础底座。当前不再把 MineTarget、ToolAftermath、CollectLoot 和机会资源选择作为下一阶段主线；这些能力后续只按真实日志做增量修补。
 
-下一阶段 Mining 的主线也不是马上做完整采矿收益最大化，而是先补上会明显干扰测试稳定性的 Defend P1 / Mining 战术层最小版：
+Defend P1 / Mining 战术层最小版已经完成第一轮接入。下一阶段 Mining 的主线也不是马上做完整采矿收益最大化，而是先验证并调稳这套会明显影响测试稳定性的怪物处理能力：
 
 ```text
 进入矿洞 -> 找到下一层/机会资源 -> 遇到怪物时稳定处理威胁 -> 再做体力、背包和资源管理
 ```
 
-因此当前开发优先级调整为：先抽出怪物威胁判断和最小战术决策，解决怪物堵路、贴脸攻击、梯子附近拉扯和 Mining 目标风险评分预留；随后再把体力、背包、箱子恢复和长期资源采集逐步叠上去。
+因此当前开发优先级调整为：先在游戏内验证怪物威胁判断、最小战术决策、怪物堵路处理、贴脸攻击、梯子附近拉扯和 Mining 目标风险评分预留；随后再把体力、背包、箱子恢复和长期资源采集逐步叠上去。
 
 Farm 当前保留为可复用的基础农业技能：
 
@@ -153,7 +153,7 @@ P1 验收标准：
 
 ### Mining / Defend 战术层长期方案
 
-当前状态：暂缓实现。该部分涉及角色决策架构升级，包括怪物风险、绕路、机会目标、冲层/刷矿/刷怪 profile 和多目标 utility 评分，改动范围较大。短期先不把它作为 Mining P0 和工具后处理通用化的前置条件；只保留设计方向和关键约束，等 Mining 基础动作、工具后处理、掉落物和资源目标稳定后再集中开发。
+当前状态：已接入最小版。当前先使用 `MonsterThreatEvaluator`、`CombatTacticalResolver` 和 `WeaponSelector` 覆盖怪物贴脸、怪物堵路、目标暂缓和风险阻塞；完整的冲层/刷矿/刷怪 profile、多目标 utility 评分、血量体力撤退和长期收益权衡仍属于后续大改方向。
 
 推荐采用“LLM / Planner 做战略，Utility AI 做战术，行为树做执行”的组合架构。
 
@@ -266,14 +266,15 @@ score = 主目标收益
 
 #### 推荐落地顺序
 
-1. 在 Mining 内先实现最小 `TacticalProfile` 和 `TacticalDecision` 数据结构。
-2. 把现有 Mining / Defend 中散落的怪物风险、换石头、绕路和贴脸攻击判断收束到 `MiningTacticalResolver`。
-3. 先支持三个 profile：
+1. 先用当前 `CombatTacticalResolver` 验证 Defend P1 最小闭环：无怪物不抢占、贴脸攻击、堵路战斗、目标暂缓。
+2. 根据游戏内日志调整 `MonsterThreatEvaluator` 的威胁阈值、堵路范围和 `CombatTacticalResolver` 的提交时间。
+3. 再扩展最小 `TacticalProfile` 和更完整的 `TacticalDecision` 数据结构。
+4. 后续支持三个 profile：
    - `RUSH_LEVEL`：冲层，允许低成本机会矿石。
    - `RESOURCE_FARM`：刷矿，允许更高机会预算。
    - `COMBAT_FARM`：刷怪，主动选择目标怪物。
-4. 先只让机会目标支持矿石 / 宝石节点，不急着接入所有采集物。
-5. 当 Mining 稳定后，再把通用战术层扩展给 Route、Farm、Chest 和未来交易/制作模块。
+5. 先只让机会目标支持矿石 / 宝石节点，不急着接入所有采集物。
+6. 当 Mining 稳定后，再把通用战术层扩展给 Route、Farm、Chest 和未来交易/制作模块。
 
 ### 工具动作后处理通用方案
 
@@ -748,10 +749,11 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 ## 当前建议顺序
 
-1. Defend P1 / Mining 战术层最小版：抽出怪物威胁判断，处理怪物堵路、贴脸攻击、梯子附近拉扯和目标风险评分预留。
-2. Mining 基础采矿验收：围绕 Stone、MiningNode、Collectible、BreakableContainer、Ladder 验证 MineTarget 抽象下的执行闭环。
-3. Mining P3 资源管理：体力、背包容量、Pickaxe 缺失恢复、工具借用归还和失败恢复。
-4. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层资源。
-5. Mining P5 记忆接入：记录矿洞中遇到的资源、箱子和危险区域。
-6. 将 Mining 中稳定的资源管理和失败恢复能力回流 Farm。
-7. 再恢复 Farm 未来任务：Daily Water、Harvest、Replant、区域规划策略和 Farm 日程化。
+1. 游戏内验证 Defend P1 / Mining 战术层最小版：确认无怪物不抢占、贴脸切武器攻击、怪物堵路时不左右抽搐、威胁解除后恢复 Mining。
+2. 根据 `logs/defend_node_debug.log` 和 `logs/mining_node_debug.log` 调整威胁阈值、堵路判断、目标暂缓和提交时间。
+3. Mining 基础采矿验收：围绕 Stone、MiningNode、Collectible、BreakableContainer、Ladder 验证 MineTarget 抽象下的执行闭环。
+4. Mining P3 资源管理：体力、背包容量、Pickaxe 缺失恢复、工具借用归还和失败恢复。
+5. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层资源。
+6. Mining P5 记忆接入：记录矿洞中遇到的资源、箱子和危险区域。
+7. 将 Mining 中稳定的资源管理和失败恢复能力回流 Farm。
+8. 再恢复 Farm 未来任务：Daily Water、Harvest、Replant、区域规划策略和 Farm 日程化。

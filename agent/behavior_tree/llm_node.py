@@ -48,7 +48,7 @@ class Agent_Model:
         TEST_MODE: TaskType = "ROUTE"
         # TEST_MODE: TaskType = "FARM"
         # TEST_MODE: TaskType = "CHEST"
-        # TEST_MODE: TaskType = "MINE"
+        TEST_MODE: TaskType = "MINE"
 
         if self.is_mock_data:
             await asyncio.sleep(2.0)
