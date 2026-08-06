@@ -161,6 +161,17 @@ class AgentBlackboard:
         # 延迟拾取记录：工具动作产生掉落物后，如果后续主任务路径/站位能覆盖磁吸范围，先不抢占主任务。
         self.deferred_loot_records: list[DeferredLootRecord] = []
 
+        # 背包风险与恢复信号
+        # InventoryPolicy 只做事实判断；实际恢复由业务节点、Planner 或未来 InventoryNode 消费这些字段。
+        self.inventory_check_failed = False
+        self.inventory_risk_level: str | None = None
+        self.inventory_failure_reason: str | None = None
+        self.inventory_recovery_hint: str | None = None
+        self.inventory_recovery_strategy: str | None = None
+        self.inventory_recovery_context: dict[str, Any] = {}
+        self.inventory_recovery_task: BaseTask | None = None
+        self.inventory_discard_candidates: list[dict[str, str | int]] = []
+
         # 切换工具
         self.require_switch_tool = False
         self.required_tool_owner: str | None = None

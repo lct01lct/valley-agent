@@ -1,5 +1,6 @@
 import time
 
+from agent.action.inventory.inventory_policy import InventoryPolicy, InventoryRecoveryHint
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.clearance_policy import get_obstacle_type_at_tile, normalize_obstacle_type
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal
@@ -35,6 +36,7 @@ class CollectLootNode(BTNode):
 
     def __init__(self) -> None:
         self.positioning_controller = PositioningController()
+        self.inventory_policy = InventoryPolicy()
         self.collect_loot_debug_logger = CollectLootDebugLogger()
         self._started_at: float | None = None
         self._target_tile: Tile | None = None
@@ -123,6 +125,34 @@ class CollectLootNode(BTNode):
 
         if self._target_tile != target_tile:
             self._start_target(target_tile)
+
+        debris = self._get_debris_for_tile(game_state, target_tile)
+        if debris is not None:
+            inventory_decision = self.inventory_policy.can_accept_debris(game_state, debris)
+            if not inventory_decision.can_accept:
+                if self._should_attempt_ambiguous_tree_debris_collect(blackboard, debris):
+                    self._log(
+                        f"树木泛化掉落物身份不完整，背包满时仍尝试磁吸拾取: target={target_tile}, "
+                        f"name={getattr(debris, 'name', '')}, source={getattr(debris, 'source', '')}, "
+                        f"stack={getattr(debris, 'stack', 0)}, reason={inventory_decision.reason}"
+                    )
+                else:
+                    recovery_hint = self.inventory_policy.build_recovery_hint(game_state, inventory_decision)
+                    self._register_inventory_recovery(
+                        blackboard,
+                        game_state,
+                        target_tile,
+                        inventory_decision.reason,
+                        recovery_hint,
+                    )
+                    context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                    self._discard_observed_loot_item_key(debris, f"背包无法接收: {inventory_decision.reason}")
+                    self._skip_target(
+                        blackboard,
+                        target_tile,
+                        f"背包无法接收该掉落物，跳过并继续拾取其它可接收目标: {inventory_decision.reason}",
+                    )
+                    return "RUNNING"
 
         if self._is_loot_collected(game_state, target_tile):
             self._complete_target(blackboard, target_tile, "目标掉落物已消失")
@@ -279,6 +309,54 @@ class CollectLootNode(BTNode):
         self._target_tile = None
         self._target_started_at = None
         self.positioning_controller.reset()
+
+    def _register_inventory_recovery(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        target_tile: Tile,
+        reason: str,
+        recovery_hint: InventoryRecoveryHint,
+    ) -> None:
+        summary = self.inventory_policy.build_summary(game_state)
+        blackboard.inventory_check_failed = True
+        blackboard.inventory_risk_level = "FULL_BLOCKED"
+        blackboard.inventory_failure_reason = "INVENTORY_FULL_WHILE_COLLECTING"
+        blackboard.inventory_recovery_hint = recovery_hint.reason
+        blackboard.inventory_recovery_strategy = recovery_hint.strategy
+        blackboard.inventory_recovery_task = (
+            blackboard.macro_plan[blackboard.current_step_index]
+            if blackboard.macro_plan and blackboard.current_step_index < len(blackboard.macro_plan)
+            else None
+        )
+        blackboard.inventory_discard_candidates = [
+            {
+                "item_name": candidate.item_name,
+                "qualified_item_id": candidate.qualified_item_id,
+                "count": candidate.count,
+                "index": candidate.index,
+                "reason": candidate.reason,
+            }
+            for candidate in recovery_hint.discard_candidates
+        ]
+        blackboard.inventory_recovery_context = {
+            "owner": blackboard.collect_loot_owner,
+            "source_tile": self._format_tile(blackboard.collect_loot_source_tile),
+            "source_type": blackboard.collect_loot_source_type,
+            "target_tile": self._format_tile(target_tile),
+            "risk_level": summary.risk_level,
+            "free_slots": summary.free_slots,
+            "occupied_slots": summary.occupied_slots,
+            "max_items": summary.max_items,
+            "protected_items": summary.protected_items,
+            "reason": reason,
+        }
+        self._log(
+            f"背包无法接收掉落物，跳过当前掉落物并暴露恢复意图: target={target_tile}, "
+            f"reason={reason}, strategy={recovery_hint.strategy}, hint={recovery_hint.reason}, "
+            f"discard_candidates={blackboard.inventory_discard_candidates}, "
+            f"context={blackboard.inventory_recovery_context}"
+        )
 
     def _finish(self, blackboard: AgentBlackboard) -> None:
         blackboard.require_collect_loot = False
@@ -506,7 +584,18 @@ class CollectLootNode(BTNode):
         return None
 
     def _is_collectible_debris(self, debris) -> bool:
+        if self._is_unidentified_object_debris(debris):
+            return False
         return bool(getattr(debris, "is_collectible", False))
+
+    def _is_unidentified_object_debris(self, debris) -> bool:
+        qualified_item_id = str(getattr(debris, "qualified_item_id", "") or "").strip()
+        if qualified_item_id:
+            return False
+
+        name = str(getattr(debris, "name", "") or "").strip().upper()
+        source = str(getattr(debris, "source", "") or "").strip().upper()
+        return name == "OBJECT" and source == "OBJECT"
 
     def _mark_target_covered(self, target_tile: Tile, game_state, reason: str) -> None:
         self._swept_loot_tiles.add((target_tile.x, target_tile.y))
@@ -729,6 +818,7 @@ class CollectLootNode(BTNode):
             self._observed_loot_item_keys.add(item_key)
 
     def _get_observed_debris_for_current_source(self, blackboard: AgentBlackboard, game_state) -> list:
+        skipped_tiles = blackboard.skipped_loot_tiles
         if self._is_dynamic_local_collect_mode(blackboard):
             source_tile = blackboard.collect_loot_source_tile
             if source_tile is None:
@@ -738,6 +828,7 @@ class CollectLootNode(BTNode):
                 debris
                 for debris in getattr(game_state, "debris", [])
                 if self._is_collectible_debris(debris)
+                and (debris.tile.x, debris.tile.y) not in skipped_tiles
                 and self._is_tile_in_dynamic_loot_radius(source_tile, debris.tile, radius)
             ]
 
@@ -745,7 +836,9 @@ class CollectLootNode(BTNode):
         return [
             debris
             for debris in getattr(game_state, "debris", [])
-            if self._is_collectible_debris(debris) and debris.tile in requested_tiles
+            if self._is_collectible_debris(debris)
+            and debris.tile in requested_tiles
+            and (debris.tile.x, debris.tile.y) not in skipped_tiles
         ]
 
     def _build_debris_item_key(self, debris) -> str | None:
@@ -759,6 +852,34 @@ class CollectLootNode(BTNode):
         if not item_name or item_name in GENERIC_DEBRIS_ITEM_KEYS:
             return None
         return f"name:{item_name}"
+
+    def _should_attempt_ambiguous_tree_debris_collect(self, blackboard: AgentBlackboard, debris) -> bool:
+        if not self._is_tree_collect_mode(blackboard):
+            return False
+
+        qualified_item_id = str(getattr(debris, "qualified_item_id", "") or "").strip()
+        if qualified_item_id:
+            return False
+
+        name = str(getattr(debris, "name", "") or "").strip()
+        display_name = str(getattr(debris, "display_name", "") or "").strip()
+        source = str(getattr(debris, "source", "") or "").strip()
+        return (
+            name in GENERIC_DEBRIS_ITEM_KEYS
+            or display_name in GENERIC_DEBRIS_ITEM_KEYS
+            or source.upper() in {"RESOURCE", "OBJECT"}
+        )
+
+    def _discard_observed_loot_item_key(self, debris, reason: str) -> None:
+        item_key = self._build_debris_item_key(debris)
+        if item_key is None or item_key not in self._observed_loot_item_keys:
+            return
+
+        self._observed_loot_item_keys.discard(item_key)
+        self._log(
+            f"撤销掉落物背包增量等待: item_key={item_key}, reason={reason}, "
+            f"remaining_observed_item_keys={sorted(self._observed_loot_item_keys)}"
+        )
 
     def _snapshot_inventory_items(self, game_state) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -794,6 +915,11 @@ class CollectLootNode(BTNode):
 
     def _format_tiles(self, tiles: list[Tile]) -> str:
         return str([(tile.x, tile.y) for tile in tiles])
+
+    def _format_tile(self, tile: Tile | None) -> tuple[int, int] | None:
+        if tile is None:
+            return None
+        return (tile.x, tile.y)
 
     def _log_cluster_candidate_once(
         self,

@@ -40,6 +40,7 @@ class InventoryItem:
         self.qualified_item_id: str = raw_item.get("QualifiedItemId", "")
         self.category: int = int(raw_item.get("Category", 0))
         self.stack: int = int(raw_item.get("Stack", 0))
+        self.maximum_stack_size: int = int(raw_item.get("MaximumStackSize", 0))
         self.is_tool: bool = bool(raw_item.get("IsTool", False))
         self.is_weapon: bool = bool(raw_item.get("IsWeapon", False))
         self.type_definition_id: str = raw_item.get("TypeDefinitionId", "")
@@ -62,10 +63,19 @@ class InventoryState:
         self.current_tool_index: int = int(raw_inventory.get("CurrentToolIndex", -1))
         # CurrentToolbarIndex 是由 CurrentToolIndex // 12 派生出的当前工具栏页，用于 Python 端决定是否按 Tab。
         self.current_toolbar_index: int = int(raw_inventory.get("CurrentToolbarIndex", 0))
+        self.max_items: int | None = self._read_optional_int(raw_inventory, "MaxItems")
+        self.free_slots: int | None = self._read_optional_int(raw_inventory, "FreeSlots")
+        self.occupied_slots: int | None = self._read_optional_int(raw_inventory, "OccupiedSlots")
         self.items: list[InventoryItem] = []
         for raw_item in raw_inventory.get("Items", []):
             if isinstance(raw_item, dict):
                 self.items.append(InventoryItem(raw_item))
+
+    def _read_optional_int(self, raw_inventory: dict, key: str) -> int | None:
+        value = raw_inventory.get(key)
+        if value is None:
+            return None
+        return int(value)
 
 
 class CropState:
@@ -265,6 +275,9 @@ class StardewState:
             {
                 "CurrentToolIndex": raw_json_data.get("CurrentToolIndex", -1),
                 "CurrentToolbarIndex": raw_json_data.get("CurrentToolbarIndex", 0),
+                "MaxItems": raw_json_data.get("MaxItems"),
+                "FreeSlots": raw_json_data.get("FreeSlots"),
+                "OccupiedSlots": raw_json_data.get("OccupiedSlots"),
                 "Items": raw_json_data.get("Items", []),
             }
         )

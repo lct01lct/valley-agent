@@ -249,6 +249,9 @@ namespace StardewMemoryExporter
                     map_size = new[] { mapWidth, mapHeight },
                     CurrentToolIndex = player.CurrentToolIndex,
                     CurrentToolbarIndex = player.CurrentToolIndex / 12,
+                    MaxItems = player.MaxItems,
+                    FreeSlots = player.freeSpotsInInventory(),
+                    OccupiedSlots = player.Items.Count(item => item != null),
                     UsingTool = player.UsingTool,
                     CanMove = player.CanMove,
                     IsPlayerFree = Context.IsPlayerFree,
@@ -446,6 +449,7 @@ namespace StardewMemoryExporter
                     QualifiedItemId = item.QualifiedItemId ?? "",
                     Category = item.Category,
                     Stack = item.Stack,
+                    MaximumStackSize = ReadMaximumStackSize(item),
                     IsTool = item is Tool,
                     IsWeapon = item is MeleeWeapon,
                     TypeDefinitionId = item.TypeDefinitionId ?? "",
@@ -458,6 +462,18 @@ namespace StardewMemoryExporter
             }
 
             return items;
+        }
+
+        private int ReadMaximumStackSize(Item item)
+        {
+            try
+            {
+                return item.maximumStackSize();
+            }
+            catch
+            {
+                return item is Tool ? 1 : Math.Max(item.Stack, 1);
+            }
         }
 
         private int? ReadOptionalIntMember(object source, string memberName)

@@ -273,6 +273,7 @@ Chest P2/P3 约定：
 | Mining 目标抽象 | 第一版接入 | 已新增 `MineTarget` / `MineTargetSelector`，当前用于统一建模 Ladder、MineEntrance、Stone、MiningNode、Collectible 和 BreakableContainer；C# Observer 已新增 `MineCollectibles` 与 `MineBreakableContainers` 快照，MineNode 心跳日志会输出对应数量 |
 | Mining 价值资源锚点 | 基础接入 | `collect_opportunity_resources=True` 时，通过 `MiningOpportunityPolicy` 按资源价值、近距离资源奖励、额外路径成本、通路破石成本、动作成本和预留风险成本评分；未出现梯子时高分资源会影响挖石方向，已出现梯子时只处理相对直接下楼仍然值得的路径附近/低成本资源，不再使用固定次数上限 |
 | Defend P1 / Mining 战术层最小版 | 最小版接入，第一轮验证通过 | Guard 分支已启用 `SwitchToolNode(owner="Guard")` 和 `Defend_Node`；Mining 已启用怪物战术判断，使用 `MonsterThreatEvaluator`、`CombatTacticalResolver` 和 `WeaponSelector` 处理怪物贴脸、堵路、暂缓目标和风险阻塞；怪物威胁解除后会在安全条件下登记附近可拾取掉落物并交给 `CollectLootNode` |
+| Inventory P0 背包风险 | 第一版接入，待游戏内验证 | C# Observer 已补充背包容量和最大堆叠信息；Python 已新增背包风险判断层，支持 OK / LOW_SPACE / FULL_CAN_STACK / FULL_BLOCKED；CollectLoot 拾取前会阻止无法进入背包的掉落物反复拾取，Mining 入场和机会资源选择会识别满包风险并暴露丢弃/存箱恢复意图 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
@@ -320,10 +321,11 @@ Chest P2/P3 约定：
 4. 继续实测 Defend P1 / Mining 战术层最小版：确认无怪物时不抢占 Mining、怪物贴脸时切武器攻击、怪物堵住梯子/目标路径时不再左右抽搐，怪物死亡/消失后能在安全条件下拾取掉落物。
 5. 根据 `logs/defend_node_debug.log`、`logs/collect_loot_debug.log` 和 `logs/mining_node_debug.log` 调整威胁阈值、堵路判断、目标暂缓策略和战斗后拾取范围。
 6. 扩展 Mining 基础采矿验收：确认 Stone / MiningNode / Collectible / BreakableContainer / Ladder 在当前 MineTarget 抽象下能稳定执行和验证。
-7. 在 Mining 中实现资源管理底座：体力检查、背包容量检查、Pickaxe 缺失恢复、工具借用归还和失败恢复。
+7. 游戏内验证 Inventory P0：确认背包满但目标可堆叠时仍可继续拾取，目标不可接收时不会反复移动拾取，并能暴露丢弃低价值物或回箱子整理的恢复意图。
 8. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
-9. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
-10. 增加确定性 Route/Farm/Mining 场景测试与游戏内端到端验收。
+9. 在 Mining 中继续实现资源管理底座：体力检查、Pickaxe 缺失恢复、工具借用归还和失败恢复。
+10. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
+11. 增加确定性 Route/Farm/Mining 场景测试与游戏内端到端验收。
 
 ## 第一阶段验收标准
 
