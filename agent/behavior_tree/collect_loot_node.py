@@ -584,18 +584,18 @@ class CollectLootNode(BTNode):
         return None
 
     def _is_collectible_debris(self, debris) -> bool:
-        if self._is_unidentified_object_debris(debris):
+        if self._is_unidentified_generic_debris(debris):
             return False
         return bool(getattr(debris, "is_collectible", False))
 
-    def _is_unidentified_object_debris(self, debris) -> bool:
+    def _is_unidentified_generic_debris(self, debris) -> bool:
         qualified_item_id = str(getattr(debris, "qualified_item_id", "") or "").strip()
         if qualified_item_id:
             return False
 
         name = str(getattr(debris, "name", "") or "").strip().upper()
         source = str(getattr(debris, "source", "") or "").strip().upper()
-        return name == "OBJECT" and source == "OBJECT"
+        return (name, source) in {("OBJECT", "OBJECT"), ("RESOURCE", "RESOURCE")}
 
     def _mark_target_covered(self, target_tile: Tile, game_state, reason: str) -> None:
         self._swept_loot_tiles.add((target_tile.x, target_tile.y))

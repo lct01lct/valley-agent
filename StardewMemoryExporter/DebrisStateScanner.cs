@@ -34,20 +34,45 @@ namespace StardewMemoryExporter
             string source = ReadOptionalStringMember(debris, "debrisType")
                 ?? ReadOptionalStringMember(debris, "chunkType")
                 ?? debris.GetType().Name;
+            ResolvedDebrisItem resolvedItem = ResolveDebrisItem(debris, item, source);
             bool isCollectible = IsCollectibleDebris(item, source);
 
             return new
             {
-                Name = item?.Name ?? source,
-                DisplayName = item?.DisplayName ?? source,
-                QualifiedItemId = item?.QualifiedItemId ?? "",
-                Category = item?.Category ?? 0,
+                Name = resolvedItem.Name,
+                DisplayName = resolvedItem.DisplayName,
+                QualifiedItemId = resolvedItem.QualifiedItemId,
+                Category = resolvedItem.Category,
                 Stack = stack,
                 Position = new[] { Math.Round((double)position.X, 1), Math.Round((double)position.Y, 1) },
                 Tile = new[] { (int)(position.X / Game1.tileSize), (int)(position.Y / Game1.tileSize) },
                 Source = source,
                 IsCollectible = isCollectible,
+                DebrisTypeValue = TryReadIntMember(debris, "debrisType", out int debrisTypeValue) ? debrisTypeValue : -1,
+                ChunkTypeValue = TryReadIntMember(debris, "chunkType", out int chunkTypeValue) ? chunkTypeValue : -1,
             };
+        }
+
+        private static ResolvedDebrisItem ResolveDebrisItem(Debris debris, Item item, string source)
+        {
+            if (item != null)
+            {
+                return new ResolvedDebrisItem(
+                    item.Name ?? "",
+                    item.DisplayName ?? "",
+                    item.QualifiedItemId ?? "",
+                    item.Category
+                );
+            }
+
+            if (!string.Equals(source, "RESOURCE", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ResolvedDebrisItem(source, source, "", 0);
+            }
+
+            // 砍树产生的木头在游戏 Debris 中常表现为 RESOURCE，且没有 item。
+            // 这类 Debris 被拾取后会进入 Wood 堆叠，因此这里补全为 Wood 的结构化物品身份。
+            return new ResolvedDebrisItem("Wood", "Wood", "(O)388", 0);
         }
 
         private static bool IsCollectibleDebris(Item item, string source)
@@ -185,6 +210,36 @@ namespace StardewMemoryExporter
             return 1;
         }
 
+        private static bool TryReadIntMember(object source, string memberName, out int result)
+        {
+            object value = ReadOptionalMember(source, memberName);
+            if (TryReadInt(value, out result))
+            {
+                return true;
+            }
+
+            object wrappedValue = ReadOptionalMember(value, "Value");
+            return TryReadInt(wrappedValue, out result);
+        }
+
+        private static bool TryReadInt(object value, out int result)
+        {
+            if (value is int intValue)
+            {
+                result = intValue;
+                return true;
+            }
+
+            if (value is Enum enumValue)
+            {
+                result = Convert.ToInt32(enumValue);
+                return true;
+            }
+
+            result = 0;
+            return false;
+        }
+
         private static Item ReadOptionalItemMember(object source, string memberName)
         {
             return ReadOptionalMember(source, memberName) as Item;
@@ -215,6 +270,22 @@ namespace StardewMemoryExporter
             }
 
             return null;
+        }
+
+        private class ResolvedDebrisItem
+        {
+            public ResolvedDebrisItem(string name, string displayName, string qualifiedItemId, int category)
+            {
+                Name = name;
+                DisplayName = displayName;
+                QualifiedItemId = qualifiedItemId;
+                Category = category;
+            }
+
+            public string Name { get; }
+            public string DisplayName { get; }
+            public string QualifiedItemId { get; }
+            public int Category { get; }
         }
     }
 }
