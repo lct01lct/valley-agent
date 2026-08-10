@@ -5,7 +5,7 @@ from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.clearance_policy import get_obstacle_type_at_tile, normalize_obstacle_type
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
-from agent.behavior_tree.blackboard import AgentBlackboard
+from agent.behavior_tree.blackboard import AgentBlackboard, UnreceivableLootRecord
 from agent.behavior_tree.collect_loot_debug_logger import CollectLootDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_selection import has_tool_area_tree1_risk, select_required_tool_for_obstacle
@@ -19,6 +19,7 @@ DEFAULT_MAGNETIC_RADIUS_RATIO = 0.5
 MAGNETIC_RADIUS_TILE_BUFFER = 0.1
 LOOT_CLUSTER_LINK_RADIUS_TILES = 2
 LOOT_CLUSTER_MAX_STAND_CANDIDATES = 8
+TREE_LOOT_CLUSTER_MAX_STAND_CANDIDATES = 32
 TREE_LOOT_COLLECT_RADIUS_TILES = 6
 WEEDS_LOOT_COLLECT_RADIUS_TILES = 3
 STONE_LOOT_COLLECT_RADIUS_TILES = 4
@@ -28,6 +29,8 @@ LOOT_CLEARABLE_OBSTACLE_TYPES = {"grass", "weeds", "twig", "stone"}
 TREE_LOOT_MAX_PATH_TILES = 12
 LOOT_MAGNETIC_STALL_SECONDS = 0.25
 LOOT_POSITION_PROGRESS_EPSILON = 1.0
+UNRECEIVABLE_LOOT_SKIP_SECONDS = 5.0
+
 
 class CollectLootNode(BTNode):
     """
@@ -62,6 +65,8 @@ class CollectLootNode(BTNode):
         game_state = context.state
         if game_state is None:
             return "RUNNING"
+
+        self._prune_unreceivable_loot_records(blackboard, game_state)
 
         if self._started_at is None:
             self._start(blackboard, game_state)
@@ -150,6 +155,12 @@ class CollectLootNode(BTNode):
             inventory_decision = self.inventory_policy.can_accept_debris(game_state, debris)
             if not inventory_decision.can_accept:
                 recovery_hint = self.inventory_policy.build_recovery_hint(game_state, inventory_decision)
+                self._register_unreceivable_loot_skip(
+                    blackboard,
+                    game_state,
+                    debris,
+                    inventory_decision.reason,
+                )
                 self._register_inventory_recovery(
                     blackboard,
                     game_state,
@@ -399,6 +410,106 @@ class CollectLootNode(BTNode):
             f"context={blackboard.inventory_recovery_context}"
         )
 
+    def _register_unreceivable_loot_skip(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        debris,
+        reason: str,
+    ) -> None:
+        item_key = self._build_debris_item_key(debris)
+        if item_key is None:
+            return
+
+        record = UnreceivableLootRecord(
+            owner=blackboard.collect_loot_owner,
+            location_name=str(getattr(game_state, "location_name", "") or ""),
+            source_tile=blackboard.collect_loot_source_tile,
+            source_type=self._normalize_source_type(blackboard.collect_loot_source_type),
+            item_key=item_key,
+            inventory_signature=self._build_inventory_signature(game_state),
+            expires_at=time.time() + UNRECEIVABLE_LOOT_SKIP_SECONDS,
+            reason=reason,
+        )
+        existing_records = {
+            existing_record.key: existing_record for existing_record in blackboard.unreceivable_loot_records
+        }
+        existing_records[record.key] = record
+        blackboard.unreceivable_loot_records = list(existing_records.values())
+        self._log(
+            f"登记不可接收掉落物短期跳过: owner={record.owner}, location={record.location_name}, "
+            f"source={self._format_tile(record.source_tile)}, source_type={record.source_type}, "
+            f"item_key={item_key}, ttl={UNRECEIVABLE_LOOT_SKIP_SECONDS:.1f}s, reason={reason}"
+        )
+
+    def _prune_unreceivable_loot_records(self, blackboard: AgentBlackboard, game_state) -> None:
+        now = time.time()
+        inventory_signature = self._build_inventory_signature(game_state)
+        kept_records: list[UnreceivableLootRecord] = []
+        removed_records: list[UnreceivableLootRecord] = []
+        for record in blackboard.unreceivable_loot_records:
+            if record.expires_at <= now or record.inventory_signature != inventory_signature:
+                removed_records.append(record)
+                continue
+            kept_records.append(record)
+
+        if not removed_records:
+            return
+
+        blackboard.unreceivable_loot_records = kept_records
+        self._log(
+            f"清理不可接收掉落物短期跳过记录: removed={len(removed_records)}, "
+            f"remaining={len(kept_records)}, inventory_changed={any(record.inventory_signature != inventory_signature for record in removed_records)}"
+        )
+
+    def _remove_unreceivable_pending_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> None:
+        if not blackboard.pending_loot_tiles or not blackboard.unreceivable_loot_records:
+            return
+
+        kept_tiles: list[Tile] = []
+        removed_tiles: list[Tile] = []
+        for tile in blackboard.pending_loot_tiles:
+            debris = self._get_debris_for_tile_without_skip(blackboard, game_state, tile)
+            if debris is not None and self._is_unreceivable_loot_skipped(blackboard, game_state, debris):
+                blackboard.skipped_loot_tiles.add((tile.x, tile.y))
+                removed_tiles.append(tile)
+                continue
+            kept_tiles.append(tile)
+
+        if not removed_tiles:
+            return
+
+        blackboard.pending_loot_tiles = kept_tiles
+        self._log(
+            f"移除当前背包状态下不可接收的 pending 掉落物: "
+            f"removed={self._format_tiles(removed_tiles)}, remaining={self._format_tiles(kept_tiles)}"
+        )
+
+    def _is_unreceivable_loot_skipped(self, blackboard: AgentBlackboard, game_state, debris) -> bool:
+        item_key = self._build_debris_item_key(debris)
+        if item_key is None:
+            return False
+
+        location_name = str(getattr(game_state, "location_name", "") or "")
+        source_tile = blackboard.collect_loot_source_tile
+        source_type = self._normalize_source_type(blackboard.collect_loot_source_type)
+        inventory_signature = self._build_inventory_signature(game_state)
+        for record in blackboard.unreceivable_loot_records:
+            if record.item_key != item_key:
+                continue
+            if record.owner != blackboard.collect_loot_owner:
+                continue
+            if record.location_name != location_name:
+                continue
+            if record.source_type != source_type:
+                continue
+            if self._format_tile(record.source_tile) != self._format_tile(source_tile):
+                continue
+            if record.inventory_signature != inventory_signature:
+                continue
+            return True
+        return False
+
     def _finish(self, blackboard: AgentBlackboard) -> None:
         blackboard.require_collect_loot = False
         blackboard.collect_loot_owner = None
@@ -424,6 +535,7 @@ class CollectLootNode(BTNode):
         self.positioning_controller.reset()
 
     def _refresh_pending_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> None:
+        self._remove_unreceivable_pending_loot_tiles(blackboard, game_state)
         self._observe_visible_loot_item_keys(blackboard, game_state)
         if self._is_dynamic_local_collect_mode(blackboard):
             self._refresh_dynamic_local_loot_tiles(blackboard, game_state)
@@ -490,6 +602,8 @@ class CollectLootNode(BTNode):
         for debris in getattr(game_state, "debris", []):
             if not self._is_collectible_debris_for_source(blackboard, debris):
                 continue
+            if self._is_unreceivable_loot_skipped(blackboard, game_state, debris):
+                continue
             if debris.tile in existing_tiles or debris.tile in seen_tiles:
                 continue
             if (debris.tile.x, debris.tile.y) in skipped_tiles:
@@ -531,6 +645,8 @@ class CollectLootNode(BTNode):
         for debris in getattr(game_state, "debris", []):
             if not self._is_collectible_debris_for_source(blackboard, debris):
                 continue
+            if self._is_unreceivable_loot_skipped(blackboard, game_state, debris):
+                continue
             if debris.tile not in requested_tiles:
                 continue
             if debris.tile in seen_tiles:
@@ -550,6 +666,8 @@ class CollectLootNode(BTNode):
         seen_tiles: set[Tile] = set()
         for debris in getattr(game_state, "debris", []):
             if not self._is_collectible_debris_for_source(blackboard, debris):
+                continue
+            if self._is_unreceivable_loot_skipped(blackboard, game_state, debris):
                 continue
             if (debris.tile.x, debris.tile.y) in skipped_tiles:
                 continue
@@ -623,20 +741,25 @@ class CollectLootNode(BTNode):
                 )
                 player_distance = self._tile_distance(game_state.player_tile, candidate_tile)
                 candidate_scores.append(
-                    (player_distance, cluster_distance, -cover_count, candidate_tile.x, candidate_tile.y, candidate_tile)
+                    (-cover_count, player_distance, cluster_distance, candidate_tile.x, candidate_tile.y, candidate_tile)
                 )
 
         if not candidate_scores:
             return {target_tile}
 
+        max_stand_candidates = self._get_max_stand_candidates_for_collect_mode(blackboard)
         candidate_scores.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
-        best_cover_count = -min(score[2] for score in candidate_scores[:LOOT_CLUSTER_MAX_STAND_CANDIDATES])
-        best_candidates = [candidate_tile for _, _, _, _, _, candidate_tile in candidate_scores][
-            :LOOT_CLUSTER_MAX_STAND_CANDIDATES
-        ]
+        selected_scores = candidate_scores[:max_stand_candidates]
+        best_cover_count = -min(score[0] for score in selected_scores)
+        best_candidates = [candidate_tile for _, _, _, _, _, candidate_tile in selected_scores]
         candidate_tiles = set(best_candidates)
         self._log_cluster_candidate_once(target_tile, cluster_tiles, candidate_tiles, best_cover_count, game_state)
         return candidate_tiles or {target_tile}
+
+    def _get_max_stand_candidates_for_collect_mode(self, blackboard: AgentBlackboard) -> int:
+        if self._is_tree_collect_mode(blackboard):
+            return TREE_LOOT_CLUSTER_MAX_STAND_CANDIDATES
+        return LOOT_CLUSTER_MAX_STAND_CANDIDATES
 
     def _build_loot_cluster(self, blackboard: AgentBlackboard, game_state, target_tile: Tile) -> list[Tile]:
         existing_tiles = self._get_existing_requested_loot_tiles(blackboard, game_state)
@@ -703,6 +826,16 @@ class CollectLootNode(BTNode):
         return is_in_range
 
     def _get_debris_for_tile(self, blackboard: AgentBlackboard, game_state, target_tile: Tile):
+        for debris in getattr(game_state, "debris", []):
+            if not self._is_collectible_debris_for_source(blackboard, debris):
+                continue
+            if self._is_unreceivable_loot_skipped(blackboard, game_state, debris):
+                continue
+            if debris.tile == target_tile:
+                return debris
+        return None
+
+    def _get_debris_for_tile_without_skip(self, blackboard: AgentBlackboard, game_state, target_tile: Tile):
         for debris in getattr(game_state, "debris", []):
             if not self._is_collectible_debris_for_source(blackboard, debris):
                 continue
@@ -995,6 +1128,7 @@ class CollectLootNode(BTNode):
                 debris
                 for debris in getattr(game_state, "debris", [])
                 if self._is_collectible_debris_for_source(blackboard, debris)
+                and not self._is_unreceivable_loot_skipped(blackboard, game_state, debris)
                 and (debris.tile.x, debris.tile.y) not in skipped_tiles
                 and self._is_tile_in_dynamic_loot_radius(source_tile, debris.tile, radius)
             ]
@@ -1004,6 +1138,7 @@ class CollectLootNode(BTNode):
             debris
             for debris in getattr(game_state, "debris", [])
             if self._is_collectible_debris_for_source(blackboard, debris)
+            and not self._is_unreceivable_loot_skipped(blackboard, game_state, debris)
             and debris.tile in requested_tiles
             and (debris.tile.x, debris.tile.y) not in skipped_tiles
         ]
@@ -1041,6 +1176,9 @@ class CollectLootNode(BTNode):
                 counts[key] = counts.get(key, 0) + stack
         return counts
 
+    def _build_inventory_signature(self, game_state) -> tuple[tuple[str, int], ...]:
+        return tuple(sorted(self._snapshot_inventory_items(game_state).items()))
+
     def _has_observed_inventory_gain(self, game_state) -> bool:
         current_inventory = self._snapshot_inventory_items(game_state)
         for item_key in self._observed_loot_item_keys:
@@ -1073,6 +1211,11 @@ class CollectLootNode(BTNode):
         if tile is None:
             return None
         return (tile.x, tile.y)
+
+    def _normalize_source_type(self, source_type: str | None) -> str | None:
+        if source_type is None:
+            return None
+        return normalize_obstacle_type(source_type) or source_type
 
     def _log_cluster_candidate_once(
         self,

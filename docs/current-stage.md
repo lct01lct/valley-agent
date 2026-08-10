@@ -100,7 +100,7 @@ Selector
 
 当前水源不作为每帧 state 高频字段同步。Farm 需要补水时，`RefillWateringCanNode` 先查 `MapKnowledgeCache`，没有缓存时通过 C# `QUERY_WATER_SOURCES` 低频查询一次，并把结果写回缓存。
 
-`Debris` 是工具动作后可能快速变化的动态掉落物事实，当前由 C# Observer 轻量高频同步到 Python `state.debris`。它用于工具动作后处理层判断目标附近是否出现掉落物；近距离可达掉落物已由 `ToolAftermathService` 登记，并交给 `CollectLootNode` / `LootPolicyService` 处理低成本局部贪心拾取、延迟拾取、磁吸覆盖和拾取验证。
+`Debris` 是工具动作后可能快速变化的动态掉落物事实，当前由 C# Observer 轻量高频同步到 Python `state.debris`。它用于工具动作后处理层判断目标附近是否出现掉落物；近距离可达掉落物已由 `ToolAftermathService` 登记，并交给 `CollectLootNode` / `LootPolicyService` 处理低成本局部贪心拾取、延迟拾取、磁吸覆盖和拾取验证。当前 `CollectLootNode` 已收敛背包满场景：可堆叠掉落物继续拾取，不可接收掉落物按当前背包快照短期跳过，避免同一掉落物重复抢占；普通树掉落物使用更宽的磁吸候选站位集合，降低明明可磁吸却被误判不可达的概率。
 
 当前 Debris state 已按“只同步真实可拾取物品”收紧：纯视觉碎屑、身份不完整的 Debris 和 `Weeds/(O)0` 不进入 Python state。C# `DebrisStateScanner` 已补充读取 `Debris.itemId.Value`，矿石/硬木等 `source=OBJECT` 掉落物即使没有 `debris.item` / `chunk.item`，也可以解析出真实物品身份；已通过日志确认 Copper Ore / 铜矿石 `(O)378` 可以从 C# 传到 Python，并触发 `CollectLootNode`。
 
@@ -258,7 +258,7 @@ Chest P2/P3 约定：
 | 路径缓存与局部跟随 | 已有基础 | RouteNode 缓存 `tile_path` / `path_index`，MoveController 负责连续移动方向 |
 | 交互站位控制 | 基础接入 | `PositioningController` 已接入 FarmNode/ChestNode/MiningNode，统一处理候选站位、ToolTarget 对准和 FACE_DIRECTION 转向；缓存路径会根据最新局部 state 的未来阻塞检查失效并重新规划 |
 | 工具动作等待 | 基础接入 | Observer 导出 `UsingTool`/`CanMove`，Executor 忙碌时返回 `BUSY`，Python 通过 `ToolActionTracker` 等待收招后验证 state |
-| 工具动作后处理 | 基础底座接入 | `ToolAftermathService` 已用于 Mining / ClearObstacle 的目标变化、梯子查询、范围副作用、阻塞 UI 和掉落物观察；工具效果等待窗口为 `1.0s`，仅在完全没有观察到预期效果或有效副作用时作为超时兜底；C# Debris state 已收紧为真实可拾取物品，并支持从 `Debris.itemId.Value` 解析 Copper Ore `(O)378` 等 `source=OBJECT` 掉落物；近距离可达掉落物已通过 `CollectLootNode` / `LootPolicyService` 支持低成本局部贪心拾取、延迟拾取、磁吸覆盖判断和拾取验证；Mining 下梯子前会先结算当前层已登记/延迟/最近工具来源附近的拾取需求 |
+| 工具动作后处理 | 基础底座接入 | `ToolAftermathService` 已用于 Mining / ClearObstacle 的目标变化、梯子查询、范围副作用、阻塞 UI 和掉落物观察；工具效果等待窗口为 `1.0s`，仅在完全没有观察到预期效果或有效副作用时作为超时兜底；C# Debris state 已收紧为真实可拾取物品，并支持从 `Debris.itemId.Value` 解析 Copper Ore `(O)378` 等 `source=OBJECT` 掉落物；近距离可达掉落物已通过 `CollectLootNode` / `LootPolicyService` 支持低成本局部贪心拾取、延迟拾取、磁吸覆盖判断、树木掉落物宽候选站位和拾取验证；Mining 下梯子前会先结算当前层已登记/延迟/最近工具来源附近的拾取需求 |
 | 动态避障与重规划 | 已有基础 | 支持偏航、未来路径阻塞检测和后台 A*，仍需系统化测试 |
 | 开门 | 部分完成 | 已有 Route/OpenDoor 协作，需要补齐异步等待和结果验证 |
 | 工具切换 | 基础接入 | `SwitchToolNode` 已接入 Route 分支，可基于背包 state 发送 Tab/槽位键切换 Axe/Pickaxe |
@@ -276,7 +276,7 @@ Chest P2/P3 约定：
 | Mining 目标决策迁移 | 第一轮完成，待游戏内验证 | 已新增纯决策 `MiningTargetResolver` / `MiningTargetDecision`，梯子、价值资源锚点、资源通路石头、普通破石和探索石头选择已从 MineNode 迁入 Resolver；MineNode 继续负责站位、工具动作、交互、后处理和结果验收 |
 | Mining 价值资源锚点 | 基础接入 | `collect_opportunity_resources=True` 时，通过 `MiningOpportunityPolicy` 按资源价值、近距离资源奖励、额外路径成本、通路破石成本、动作成本和预留风险成本评分；未出现梯子时高分资源会影响挖石方向，已出现梯子时只处理相对直接下楼仍然值得的路径附近/低成本资源，不再使用固定次数上限 |
 | Defend P1 / Mining 战术层最小版 | 最小版接入，第一轮验证通过 | Guard 分支已启用 `SwitchToolNode(owner="Guard")` 和 `Defend_Node`；Mining 已启用怪物战术判断，使用 `MonsterThreatEvaluator`、`CombatTacticalResolver` 和 `WeaponSelector` 处理怪物贴脸、堵路、暂缓目标和风险阻塞；怪物威胁解除后会在安全条件下登记附近可拾取掉落物并交给 `CollectLootNode` |
-| Inventory P0 背包风险 | 第一版接入，继续收敛 | C# Observer 已补充背包容量和最大堆叠信息；Python 已新增背包风险判断层，支持 OK / LOW_SPACE / FULL_CAN_STACK / FULL_BLOCKED；CollectLoot 拾取前会判断目标是否可进入背包，Mining 入场和机会资源选择会识别满包风险并暴露丢弃/存箱恢复意图；真实日志显示背包满且目标不可接收时仍可能重复触发同一掉落物拾取，需要继续收敛 |
+| Inventory P0 背包风险 | 第一版稳定 | C# Observer 已补充背包容量和最大堆叠信息；Python 已新增背包风险判断层，支持 OK / LOW_SPACE / FULL_CAN_STACK / FULL_BLOCKED；CollectLoot 拾取前会判断目标是否可进入背包，背包满但目标可堆叠时继续拾取，目标不可接收时按同一 source/item_key/背包快照短期跳过，避免反复移动拾取；Mining 入场和机会资源选择会识别满包风险并暴露丢弃/存箱恢复意图 |
 | C# 持续移动 | 已有基础 | Executor 保持最后 MOVE 方向，Python 需用新方向/IDLE 显式更新或停止 |
 | 真实 LLM 规划 | 后续阶段 | 第一阶段继续使用 mock 计划 |
 | 完整自主游玩 | 长期目标 | 还需要背包、时间、体力、菜单、NPC 等状态与技能 |
@@ -313,7 +313,7 @@ Chest P2/P3 约定：
 - 高层场景连通图仍是硬编码数据，建筑入口和特殊路线需要持续校验；错误边会导致在当前场景查找不存在的目标 warp。
 - SMAPI 快照仍缺少完成自主游玩需要的时间、金钱、体力、工具栏、背包、菜单、天气、NPC 和动作结果等状态。
 - Farm P1 目前还是基础闭环，已加入基础资源检查，但仍缺少体力检查、背包容量检查、区域选择策略、作物阶段识别、失败后的二次规划和完整验收测试。
-- CollectLoot 已支持低成本局部拾取和背包可接收性判断，但背包满且目标不可堆叠/不可接收时，仍需要对同一 source/item_key 做短期跳过或一次性失败结算，避免每 tick 重复触发。
+- CollectLoot 已支持低成本局部拾取、树木掉落物宽候选站位和背包可接收性判断；背包满且目标不可堆叠/不可接收时，已按同一 source/item_key/背包快照做短期跳过。后续重点转向 Inventory Recovery：判断高价值掉落物是否值得腾背包、丢弃低价值物品并避免重新捡回主动丢弃物。
 - Python 动作枚举比 C# Executor 实际支持的动作更多，两侧能力尚未完全对齐。
 - `server/valley_server.py` 仍含旧 demo 逻辑，不要继续在 demo 路径上扩展正式能力。
 
@@ -325,7 +325,7 @@ Chest P2/P3 约定：
 4. 继续实测 Defend P1 / Mining 战术层最小版：确认无怪物时不抢占 Mining、怪物贴脸时切武器攻击、怪物堵住梯子/目标路径时不再左右抽搐，怪物死亡/消失后能在安全条件下拾取掉落物。
 5. 根据 `logs/defend_node_debug.log`、`logs/collect_loot_debug.log` 和 `logs/mining_node_debug.log` 调整威胁阈值、堵路判断、目标暂缓策略和战斗后拾取范围。
 6. 扩展 Mining 基础采矿验收：确认 Stone / MiningNode / Collectible / BreakableContainer / Ladder 在当前 MineTarget 抽象下能稳定执行和验证。
-7. 游戏内验证 Inventory P0：确认背包满但目标可堆叠时仍可继续拾取，目标不可接收时能短期跳过或一次性结算，避免反复移动拾取，并能暴露丢弃低价值物或回箱子整理的恢复意图。
+7. 开发 Inventory Recovery P1：在 CollectLoot 已能暴露“背包满且目标不可接收”的基础上，判断高价值掉落物是否值得腾背包，安全丢弃明确低价值物品，并重新尝试拾取目标掉落物。
 8. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
 9. 在 Mining 中继续实现资源管理底座：体力检查、Pickaxe 缺失恢复、工具借用归还和失败恢复。
 10. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。

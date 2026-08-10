@@ -281,7 +281,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
 - 工具收招后的副作用观察优先复用 `ToolAftermathService`。`1.0s` 工具效果等待窗口只用于“完全没有任何预期效果或副作用”的超时兜底；目标变化、范围影响、掉落物、梯子或阻塞 UI 等 state 已出现时必须尽快推进。业务节点仍负责解释结果，例如 Mining 决定是否转向梯子，ClearObstacle 决定是否继续重试；不要把所有工具业务成功判定塞进通用服务。
 - 对 Stone、MiningNode、木箱/木桶、普通树等“破坏类目标”，掉落物登记必须以目标真实消失或明确破坏完成为前提。若工具收招后目标仍存在，说明只是受击、扣耐久或视觉碎屑阶段，不登记掉落物、不触发 CollectLoot，只按业务重试逻辑继续处理；目标消失后才扫描目标附近可拾取 `Debris` 并写入延迟拾取队列。
-- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。`CollectLootNode` 定位是低成本局部贪心拾取：优先利用当前站位、下一步工作站位和磁吸范围覆盖掉落物，尽量少移动、少停顿、不中断主任务太久；它不做全局收益规划，不为拾取触发清障，不为远距离掉落物大范围绕路。普通树掉落物会在树和残留树桩都砍完后统一拾取，允许部分拾取并跳过不可达位置。若 C# Debris 提供明确 item id / name，拾取验证应优先使用背包数量变化；若只提供泛化 `RESOURCE` / `OBJECT`，则使用掉落物消失、位置变化和动态观察作为兜底。
+- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。`CollectLootNode` 定位是低成本局部贪心拾取：优先利用当前站位、下一步工作站位和磁吸范围覆盖掉落物，尽量少移动、少停顿、不中断主任务太久；它不做全局收益规划，不为拾取触发清障，不为远距离掉落物大范围绕路。普通树掉落物会在树和残留树桩都砍完后统一拾取，树木掉落物可使用更宽的磁吸候选站位集合，避免在 A* 可达性判断前过早丢弃可行站位；仍允许部分拾取并跳过真正不可达位置。背包满时，若目标掉落物可与背包已有物品堆叠，应继续拾取；若目标掉落物在当前背包状态下不可接收，应按 `owner/location/source/item_key/inventory_signature` 登记短期跳过，避免每 tick 重复触发同一不可接收掉落物。该短期跳过不是永久黑名单，背包变化或过期后必须重新评估；未来高价值掉落物腾背包由 Inventory Recovery / Planner 接管，CollectLoot 不直接丢弃物品。若 C# Debris 提供明确 item id / name，拾取验证应优先使用背包数量变化；若只提供泛化 `RESOURCE` / `OBJECT`，则使用掉落物消失、位置变化和动态观察作为兜底。
 - 节点推进应状态驱动优先；固定 tick/秒数等待只能用于短暂防抖、节流和超时兜底，不要用经验等待替代 SMAPI state 验证。
 - 水壶补水属于 Farm 分支的资源恢复能力。FarmNode 发现 `WaterLeft <= 0` 时应通过 blackboard 触发 `RefillWateringCanNode`，不要在 FarmNode 内部直接实现找水源、移动和补水。
 - 水源坐标属于低频地图知识，优先通过 C# `QUERY_WATER_SOURCES` 按需查询并写入 `MapKnowledgeCache`；不要作为每帧 state 高频字段同步。

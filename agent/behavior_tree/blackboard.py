@@ -121,6 +121,39 @@ class DeferredLootRecord:
         )
 
 
+class UnreceivableLootRecord:
+    def __init__(
+        self,
+        owner: str | None,
+        location_name: str,
+        source_tile: Tile | None,
+        source_type: str | None,
+        item_key: str,
+        inventory_signature: tuple[tuple[str, int], ...],
+        expires_at: float,
+        reason: str,
+    ) -> None:
+        self.owner = owner
+        self.location_name = location_name
+        self.source_tile = source_tile
+        self.source_type = source_type
+        self.item_key = item_key
+        self.inventory_signature = inventory_signature
+        self.expires_at = expires_at
+        self.reason = reason
+
+    @property
+    def key(self) -> tuple[str | None, str, int | None, int | None, str | None, str]:
+        return (
+            self.owner,
+            self.location_name,
+            None if self.source_tile is None else self.source_tile.x,
+            None if self.source_tile is None else self.source_tile.y,
+            self.source_type,
+            self.item_key,
+        )
+
+
 class AgentBlackboard:
     def __init__(self):
         self.macro_plan: List[BaseTask] = []
@@ -160,6 +193,9 @@ class AgentBlackboard:
         self.skipped_loot_tiles: set[tuple[int, int]] = set()
         # 延迟拾取记录：工具动作产生掉落物后，如果后续主任务路径/站位能覆盖磁吸范围，先不抢占主任务。
         self.deferred_loot_records: list[DeferredLootRecord] = []
+        # 当前背包状态下无法接收的掉落物短期跳过记录。
+        # 该记录不是永久黑名单；背包变化或过期后会重新评估，未来 InventoryRecoveryNode 可接管高价值恢复。
+        self.unreceivable_loot_records: list[UnreceivableLootRecord] = []
 
         # 背包风险与恢复信号
         # InventoryPolicy 只做事实判断；实际恢复由业务节点、Planner 或未来 InventoryNode 消费这些字段。

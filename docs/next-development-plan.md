@@ -377,7 +377,7 @@ ToolAftermathResult(
 掉落物管理当前分成两层：
 
 1. `ToolAftermathService` / `LootPolicyService`：基于精简后的 `state.debris` 识别当前场景可拾取掉落物、登记延迟拾取、判断后续动作是否能靠磁吸覆盖掉落物。
-2. `CollectLootNode`：根据 blackboard 中的拾取请求移动并捡起；当前采用低成本局部贪心策略，只捡当前局部范围内可达、值得处理或即将被磁吸覆盖的目标，不为拾取触发清障，树掉落物允许部分跳过。
+2. `CollectLootNode`：根据 blackboard 中的拾取请求移动并捡起；当前采用低成本局部贪心策略，只捡当前局部范围内可达、值得处理或即将被磁吸覆盖的目标，不为拾取触发清障。普通树掉落物会使用更宽的磁吸候选站位集合，避免可行站位在 A* 可达性判断前被过早截断；仍允许真正不可达的树木掉落物部分跳过。
 
 拾取策略不要写死在节点里，应由业务模块或战术层决定：
 
@@ -392,12 +392,14 @@ ToolAftermathResult(
 - `IMMEDIATE`：工具动作后立刻尝试拾取附近掉落物。
 - `DEFERRED`：如果后续工作站位仍能通过磁吸覆盖掉落物，则先继续主任务；超过延迟窗口、预期覆盖失败或进入下一层前，再提升为主动拾取。
 
-拾取验证当前优先利用 C# Debris 的可识别 item id / name 与背包数量变化；Debris state 应尽量只保留真实可拾取物品，若 C# 仍只能提供泛化 `RESOURCE` / `OBJECT`，则保留掉落物消失、位置变化和短窗口动态观察作为兜底。后续增强重点不是重做拾取底座，而是把策略参数交给 Mining / Route / Farm 的战术 profile 控制。
+拾取验证当前优先利用 C# Debris 的可识别 item id / name 与背包数量变化；Debris state 应尽量只保留真实可拾取物品，若 C# 仍只能提供泛化 `RESOURCE` / `OBJECT`，则保留掉落物消失、位置变化和短窗口动态观察作为兜底。
 
-已知待收敛问题：
+背包满时，CollectLoot 当前遵守两条边界：
 
-- 背包满且目标不可堆叠/不可接收时，`CollectLootNode` 应对同一 source/item_key 做短期跳过或一次性失败结算，避免每 tick 重新开始拾取同一个无法进入背包的掉落物。
-- 低成本局部贪心拾取后续应接入战术 profile：Mining 冲层、刷矿、Route 清障、Farm 清障和 Defend 战后拾取可以使用不同距离、时间预算和价值阈值。
+- 若目标掉落物可与背包已有物品堆叠，继续执行拾取。
+- 若目标掉落物在当前背包状态下不可接收，按 `owner/location/source/item_key/inventory_signature` 做短期跳过，避免每 tick 重新开始拾取同一个无法进入背包的掉落物。
+
+这个短期跳过不是永久黑名单：背包变化或记录过期后应重新评估。未来高价值掉落物腾背包属于 Inventory Recovery / Planner 的职责，CollectLoot 不直接丢弃物品。后续增强重点不是重做拾取底座，而是把策略参数交给 Mining / Route / Farm 的战术 profile 控制，并实现 Inventory Recovery P1。
 
 #### Mining 目标类型扩展
 
@@ -757,9 +759,9 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 1. 游戏内验证 Defend P1 / Mining 战术层最小版：确认无怪物不抢占、贴脸切武器攻击、怪物堵路时不左右抽搐、威胁解除后恢复 Mining。
 2. 根据 `logs/defend_node_debug.log` 和 `logs/mining_node_debug.log` 调整威胁阈值、堵路判断、目标暂缓和提交时间。
-3. 收敛 CollectLoot 背包满不可接收场景：同一 source/item_key 不应每 tick 反复触发拾取。
+3. 开发 Inventory Recovery P1：当高价值掉落物因背包满无法拾取时，判断是否值得腾背包，安全丢弃明确低价值物品，并避免把 Agent 主动丢弃的物品重新捡回。
 4. Mining 基础采矿验收：围绕 Stone、MiningNode、Collectible、BreakableContainer、Ladder 验证 MineTarget 抽象下的执行闭环。
-5. Mining P3 资源管理：先验证 Inventory P0 满包风险，再补体力、Pickaxe 缺失恢复、工具借用归还和失败恢复。
+5. Mining P3 资源管理：在 Inventory P0 已稳定的基础上，继续补体力、Pickaxe 缺失恢复、工具借用归还和失败恢复。
 6. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层资源。
 7. Mining P5 记忆接入：记录矿洞中遇到的资源、箱子和危险区域。
 8. 将 Mining 中稳定的资源管理和失败恢复能力回流 Farm。
