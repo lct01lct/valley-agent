@@ -9,6 +9,7 @@ from agent.behavior_tree.blackboard import AgentBlackboard
 from agent.behavior_tree.collect_loot_debug_logger import CollectLootDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_selection import has_tool_area_tree1_risk, select_required_tool_for_obstacle
+from server.valley_server import IGNORED_DEBRIS_QUALIFIED_ITEM_IDS
 from server.type import Tile
 
 COLLECT_LOOT_TIMEOUT_SECONDS = 6.0
@@ -22,9 +23,11 @@ TREE_LOOT_COLLECT_RADIUS_TILES = 6
 WEEDS_LOOT_COLLECT_RADIUS_TILES = 3
 STONE_LOOT_COLLECT_RADIUS_TILES = 4
 LOOT_COLLECT_STAND_SEARCH_RADIUS_TILES = 3
+LOOT_RELOCATE_SEARCH_RADIUS_TILES = 6
 LOOT_CLEARABLE_OBSTACLE_TYPES = {"grass", "weeds", "twig", "stone"}
-GENERIC_DEBRIS_ITEM_KEYS = {"", "RESOURCE", "OBJECT", "CHUNKS", "Debris"}
-
+TREE_LOOT_MAX_PATH_TILES = 12
+LOOT_MAGNETIC_STALL_SECONDS = 0.25
+LOOT_POSITION_PROGRESS_EPSILON = 1.0
 
 class CollectLootNode(BTNode):
     """
@@ -47,6 +50,9 @@ class CollectLootNode(BTNode):
         self._last_cluster_log_signature: tuple | None = None
         self._inventory_snapshot: dict[str, int] = {}
         self._observed_loot_item_keys: set[str] = set()
+        self._last_magnetic_player_position: tuple[float, float] | None = None
+        self._last_magnetic_debris_position: tuple[float, float] | None = None
+        self._magnetic_stall_started_at: float | None = None
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
         if not blackboard.require_collect_loot:
@@ -95,6 +101,18 @@ class CollectLootNode(BTNode):
         self._refresh_pending_loot_tiles(blackboard, game_state)
         if not blackboard.pending_loot_tiles:
             if self._observed_loot_item_keys and not self._has_observed_inventory_gain(game_state):
+                inventory_gain_items = self._get_inventory_gain_items(game_state)
+                if inventory_gain_items:
+                    self._log(
+                        f"可识别掉落物已消失，但背包增量身份与观察身份不一致，按真实背包增量完成拾取: "
+                        f"owner={blackboard.collect_loot_owner}, source={blackboard.collect_loot_source_tile}, "
+                        f"observed_item_keys={sorted(self._observed_loot_item_keys)}, "
+                        f"inventory_gain_items={inventory_gain_items}"
+                    )
+                    context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                    self._finish(blackboard)
+                    return "SUCCESS"
+
                 self._log(
                     f"可识别掉落物已离开可见范围，但背包尚未观察到增量，继续等待 state 刷新: "
                     f"owner={blackboard.collect_loot_owner}, source={blackboard.collect_loot_source_tile}, "
@@ -102,6 +120,7 @@ class CollectLootNode(BTNode):
                     f"inventory_snapshot={self._inventory_snapshot}, "
                     f"current_inventory={self._snapshot_inventory_items(game_state)}"
                 )
+                context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
                 return "RUNNING"
 
             self._log(
@@ -126,35 +145,28 @@ class CollectLootNode(BTNode):
         if self._target_tile != target_tile:
             self._start_target(target_tile)
 
-        debris = self._get_debris_for_tile(game_state, target_tile)
+        debris = self._get_debris_for_tile(blackboard, game_state, target_tile)
         if debris is not None:
             inventory_decision = self.inventory_policy.can_accept_debris(game_state, debris)
             if not inventory_decision.can_accept:
-                if self._should_attempt_ambiguous_tree_debris_collect(blackboard, debris):
-                    self._log(
-                        f"树木泛化掉落物身份不完整，背包满时仍尝试磁吸拾取: target={target_tile}, "
-                        f"name={getattr(debris, 'name', '')}, source={getattr(debris, 'source', '')}, "
-                        f"stack={getattr(debris, 'stack', 0)}, reason={inventory_decision.reason}"
-                    )
-                else:
-                    recovery_hint = self.inventory_policy.build_recovery_hint(game_state, inventory_decision)
-                    self._register_inventory_recovery(
-                        blackboard,
-                        game_state,
-                        target_tile,
-                        inventory_decision.reason,
-                        recovery_hint,
-                    )
-                    context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
-                    self._discard_observed_loot_item_key(debris, f"背包无法接收: {inventory_decision.reason}")
-                    self._skip_target(
-                        blackboard,
-                        target_tile,
-                        f"背包无法接收该掉落物，跳过并继续拾取其它可接收目标: {inventory_decision.reason}",
-                    )
-                    return "RUNNING"
+                recovery_hint = self.inventory_policy.build_recovery_hint(game_state, inventory_decision)
+                self._register_inventory_recovery(
+                    blackboard,
+                    game_state,
+                    target_tile,
+                    inventory_decision.reason,
+                    recovery_hint,
+                )
+                context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                self._discard_observed_loot_item_key(debris, f"背包无法接收: {inventory_decision.reason}")
+                self._skip_target(
+                    blackboard,
+                    target_tile,
+                    f"背包无法接收该掉落物，跳过并继续拾取其它可接收目标: {inventory_decision.reason}",
+                )
+                return "RUNNING"
 
-        if self._is_loot_collected(game_state, target_tile):
+        if self._is_loot_collected_for_source(blackboard, game_state, target_tile):
             self._complete_target(blackboard, target_tile, "目标掉落物已消失")
             return "RUNNING"
 
@@ -179,6 +191,17 @@ class CollectLootNode(BTNode):
             return "RUNNING"
 
         if positioning_result.command is not None:
+            current_path_length = self.positioning_controller.get_current_path_length()
+            if self._is_tree_collect_mode(blackboard) and current_path_length > TREE_LOOT_MAX_PATH_TILES:
+                context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                self._skip_target(
+                    blackboard,
+                    target_tile,
+                    f"树木掉落物拾取路径过长，放弃绕路拾取: path_len={current_path_length}, "
+                    f"max_path={TREE_LOOT_MAX_PATH_TILES}",
+                )
+                return "RUNNING"
+
             response = context.executor_client.send_command(positioning_result.command)
             self._log(
                 f"移动到掉落物附近: target={target_tile}, status={positioning_result.status}, "
@@ -193,8 +216,17 @@ class CollectLootNode(BTNode):
             return "RUNNING"
 
         if positioning_result.status == "READY":
-            if self._is_target_in_magnetic_range(game_state, target_tile):
-                command = self._build_move_command_to_debris_center(game_state, target_tile)
+            if self._is_target_in_magnetic_range(blackboard, game_state, target_tile):
+                if debris is not None and self._is_magnetic_pickup_stalled(game_state, debris):
+                    context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                    self._skip_target(
+                        blackboard,
+                        target_tile,
+                        "已进入磁吸范围但人物/掉落物没有有效变化，判定当前掉落物无法继续吸附",
+                    )
+                    return "RUNNING"
+
+                command = self._build_move_command_to_debris_center(blackboard, game_state, target_tile)
                 response = context.executor_client.send_command(command)
                 self._mark_target_covered(
                     target_tile,
@@ -204,7 +236,7 @@ class CollectLootNode(BTNode):
                 )
                 return "RUNNING"
 
-            command = self._build_move_command_to_magnetic_range(game_state, target_tile)
+            command = self._build_move_command_to_magnetic_range(blackboard, game_state, target_tile)
             if command.action == StardewAction.IDLE:
                 self._log(
                     f"站位 READY 且贴近命令已停止，但掉落物仍存在，继续等待 state 刷新或单目标超时: target={target_tile}, "
@@ -285,6 +317,9 @@ class CollectLootNode(BTNode):
     def _start_target(self, target_tile: Tile) -> None:
         self._target_tile = target_tile
         self._target_started_at = time.time()
+        self._last_magnetic_player_position = None
+        self._last_magnetic_debris_position = None
+        self._magnetic_stall_started_at = None
         self.positioning_controller.reset()
         self._last_cluster_log_signature = None
         self._log(f"选择掉落物目标: target={target_tile}")
@@ -296,6 +331,9 @@ class CollectLootNode(BTNode):
         )
         self._target_tile = None
         self._target_started_at = None
+        self._last_magnetic_player_position = None
+        self._last_magnetic_debris_position = None
+        self._magnetic_stall_started_at = None
         self.positioning_controller.reset()
 
     def _skip_target(self, blackboard: AgentBlackboard, target_tile: Tile, reason: str) -> None:
@@ -308,6 +346,9 @@ class CollectLootNode(BTNode):
         )
         self._target_tile = None
         self._target_started_at = None
+        self._last_magnetic_player_position = None
+        self._last_magnetic_debris_position = None
+        self._magnetic_stall_started_at = None
         self.positioning_controller.reset()
 
     def _register_inventory_recovery(
@@ -377,6 +418,9 @@ class CollectLootNode(BTNode):
         self._last_cluster_log_signature = None
         self._inventory_snapshot = {}
         self._observed_loot_item_keys = set()
+        self._last_magnetic_player_position = None
+        self._last_magnetic_debris_position = None
+        self._magnetic_stall_started_at = None
         self.positioning_controller.reset()
 
     def _refresh_pending_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> None:
@@ -406,10 +450,76 @@ class CollectLootNode(BTNode):
         if len(existing_tiles) == len(blackboard.pending_loot_tiles):
             return
 
-        removed_tiles = [tile for tile in blackboard.pending_loot_tiles if tile not in existing_tiles]
-        blackboard.pending_loot_tiles = [tile for tile in blackboard.pending_loot_tiles if tile in existing_tiles]
+        relocated_tiles = self._find_relocated_loot_tiles(blackboard, game_state, existing_tiles)
+        removed_tiles = [
+            tile
+            for tile in blackboard.pending_loot_tiles
+            if tile not in existing_tiles and tile not in relocated_tiles
+        ]
+        blackboard.pending_loot_tiles = [
+            *[tile for tile in blackboard.pending_loot_tiles if tile in existing_tiles],
+            *relocated_tiles,
+        ]
+        if relocated_tiles:
+            self._log(
+                f"按物品身份重定位弹跳/磁吸中的掉落物: "
+                f"observed_item_keys={sorted(self._observed_loot_item_keys)}, relocated={self._format_tiles(relocated_tiles)}, "
+                f"source={blackboard.collect_loot_source_tile}, player={game_state.player_tile}"
+            )
         if removed_tiles:
             self._log(f"移除已消失掉落物: removed={self._format_tiles(removed_tiles)}")
+
+    def _find_relocated_loot_tiles(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        existing_tiles: set[Tile],
+    ) -> list[Tile]:
+        if not self._observed_loot_item_keys:
+            return []
+
+        pending_tile_count = len(blackboard.pending_loot_tiles)
+        if len(existing_tiles) >= pending_tile_count:
+            return []
+
+        missing_count = pending_tile_count - len(existing_tiles)
+        skipped_tiles = blackboard.skipped_loot_tiles
+        source_tile = blackboard.collect_loot_source_tile
+        candidate_debris = []
+        seen_tiles: set[Tile] = set()
+        for debris in getattr(game_state, "debris", []):
+            if not self._is_collectible_debris_for_source(blackboard, debris):
+                continue
+            if debris.tile in existing_tiles or debris.tile in seen_tiles:
+                continue
+            if (debris.tile.x, debris.tile.y) in skipped_tiles:
+                continue
+            item_key = self._build_debris_item_key(debris)
+            if item_key not in self._observed_loot_item_keys:
+                continue
+            if not self._is_relocated_loot_candidate_in_range(source_tile, game_state.player_tile, debris.tile):
+                continue
+
+            seen_tiles.add(debris.tile)
+            source_distance = (
+                self._tile_chebyshev_distance(source_tile, debris.tile) if source_tile is not None else 0
+            )
+            player_distance = self._tile_distance(game_state.player_tile, debris.tile)
+            candidate_debris.append((source_distance, player_distance, debris.tile, item_key))
+
+        candidate_debris.sort(key=lambda item: (item[0], item[1], item[2].x, item[2].y))
+        relocated_tiles = [tile for _, _, tile, _ in candidate_debris[:missing_count]]
+        return relocated_tiles
+
+    def _is_relocated_loot_candidate_in_range(
+        self,
+        source_tile: Tile | None,
+        player_tile: Tile,
+        debris_tile: Tile,
+    ) -> bool:
+        if source_tile is not None and self._tile_chebyshev_distance(source_tile, debris_tile) <= LOOT_RELOCATE_SEARCH_RADIUS_TILES:
+            return True
+        return self._tile_chebyshev_distance(player_tile, debris_tile) <= LOOT_RELOCATE_SEARCH_RADIUS_TILES
 
     def _get_existing_requested_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> list[Tile]:
         if self._is_dynamic_local_collect_mode(blackboard):
@@ -419,7 +529,7 @@ class CollectLootNode(BTNode):
         existing_tiles: list[Tile] = []
         seen_tiles: set[Tile] = set()
         for debris in getattr(game_state, "debris", []):
-            if not self._is_collectible_debris(debris):
+            if not self._is_collectible_debris_for_source(blackboard, debris):
                 continue
             if debris.tile not in requested_tiles:
                 continue
@@ -439,7 +549,7 @@ class CollectLootNode(BTNode):
         loot_tiles: list[Tile] = []
         seen_tiles: set[Tile] = set()
         for debris in getattr(game_state, "debris", []):
-            if not self._is_collectible_debris(debris):
+            if not self._is_collectible_debris_for_source(blackboard, debris):
                 continue
             if (debris.tile.x, debris.tile.y) in skipped_tiles:
                 continue
@@ -468,12 +578,16 @@ class CollectLootNode(BTNode):
         return min(existing_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
 
     def _build_collect_candidate_tiles(self, blackboard: AgentBlackboard, game_state, target_tile: Tile) -> set[Tile]:
-        debris = self._get_debris_for_tile(game_state, target_tile)
-        if debris is None:
+        target_debris = self._get_debris_for_tile(blackboard, game_state, target_tile)
+        if target_debris is None:
             return {target_tile}
 
         cluster_tiles = self._build_loot_cluster(blackboard, game_state, target_tile)
-        cluster_debris = [debris for tile in cluster_tiles if (debris := self._get_debris_for_tile(game_state, tile))]
+        cluster_debris = [
+            cluster_item
+            for tile in cluster_tiles
+            if (cluster_item := self._get_debris_for_tile(blackboard, game_state, tile))
+        ]
         stand_radius = LOOT_COLLECT_STAND_SEARCH_RADIUS_TILES
         min_x = min(tile.x for tile in cluster_tiles) - stand_radius
         max_x = max(tile.x for tile in cluster_tiles) + stand_radius
@@ -481,7 +595,7 @@ class CollectLootNode(BTNode):
         max_y = max(tile.y for tile in cluster_tiles) + stand_radius
         target_collect_radius = self._get_target_collect_radius(game_state, target_tile)
         effective_magnetic_radius = self._get_effective_magnetic_radius(game_state)
-        candidate_scores: list[tuple[int, int, int, Tile]] = []
+        candidate_scores: list[tuple[int, int, int, int, int, Tile]] = []
 
         for x in range(min_x, max_x + 1):
             for y in range(min_y, max_y + 1):
@@ -489,7 +603,7 @@ class CollectLootNode(BTNode):
                 if not self._can_tile_cover_debris_with_magnetic_range(
                     game_state,
                     candidate_tile,
-                    debris.position,
+                    target_debris.position,
                     target_collect_radius,
                 ):
                     continue
@@ -508,14 +622,16 @@ class CollectLootNode(BTNode):
                     self._tile_distance(candidate_tile, cluster_item.tile) for cluster_item in cluster_debris
                 )
                 player_distance = self._tile_distance(game_state.player_tile, candidate_tile)
-                candidate_scores.append((-cover_count, cluster_distance, player_distance, candidate_tile))
+                candidate_scores.append(
+                    (player_distance, cluster_distance, -cover_count, candidate_tile.x, candidate_tile.y, candidate_tile)
+                )
 
         if not candidate_scores:
             return {target_tile}
 
-        candidate_scores.sort(key=lambda item: (item[0], item[1], item[2], item[3].x, item[3].y))
-        best_cover_count = -candidate_scores[0][0]
-        best_candidates = [candidate_tile for cover_count, _, _, candidate_tile in candidate_scores][
+        candidate_scores.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
+        best_cover_count = -min(score[2] for score in candidate_scores[:LOOT_CLUSTER_MAX_STAND_CANDIDATES])
+        best_candidates = [candidate_tile for _, _, _, _, _, candidate_tile in candidate_scores][
             :LOOT_CLUSTER_MAX_STAND_CANDIDATES
         ]
         candidate_tiles = set(best_candidates)
@@ -542,16 +658,27 @@ class CollectLootNode(BTNode):
 
         return sorted(cluster_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
 
-    def _is_loot_collected(self, game_state, target_tile: Tile) -> bool:
+    def _is_loot_collected_for_source(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        target_tile: Tile,
+    ) -> bool:
         for debris in getattr(game_state, "debris", []):
-            if not self._is_collectible_debris(debris):
+            if not self._is_collectible_debris_for_source(blackboard, debris):
                 continue
             if debris.tile == target_tile:
                 return False
         return True
 
-    def _is_target_in_magnetic_range(self, game_state, target_tile: Tile, should_log: bool = True) -> bool:
-        debris = self._get_debris_for_tile(game_state, target_tile)
+    def _is_target_in_magnetic_range(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        target_tile: Tile,
+        should_log: bool = True,
+    ) -> bool:
+        debris = self._get_debris_for_tile(blackboard, game_state, target_tile)
         if debris is None:
             return False
 
@@ -575,27 +702,57 @@ class CollectLootNode(BTNode):
             )
         return is_in_range
 
-    def _get_debris_for_tile(self, game_state, target_tile: Tile):
+    def _get_debris_for_tile(self, blackboard: AgentBlackboard, game_state, target_tile: Tile):
         for debris in getattr(game_state, "debris", []):
-            if not self._is_collectible_debris(debris):
+            if not self._is_collectible_debris_for_source(blackboard, debris):
                 continue
             if debris.tile == target_tile:
                 return debris
         return None
 
+    def _is_magnetic_pickup_stalled(self, game_state, debris) -> bool:
+        player_position = (float(game_state.position.x), float(game_state.position.y))
+        debris_position = (float(debris.position.x), float(debris.position.y))
+
+        if self._last_magnetic_player_position is None or self._last_magnetic_debris_position is None:
+            self._last_magnetic_player_position = player_position
+            self._last_magnetic_debris_position = debris_position
+            self._magnetic_stall_started_at = None
+            return False
+
+        player_delta = self._position_delta(player_position, self._last_magnetic_player_position)
+        debris_delta = self._position_delta(debris_position, self._last_magnetic_debris_position)
+        self._last_magnetic_player_position = player_position
+        self._last_magnetic_debris_position = debris_position
+
+        if player_delta > LOOT_POSITION_PROGRESS_EPSILON or debris_delta > LOOT_POSITION_PROGRESS_EPSILON:
+            self._magnetic_stall_started_at = None
+            return False
+
+        now = time.time()
+        if self._magnetic_stall_started_at is None:
+            self._magnetic_stall_started_at = now
+            return False
+
+        return now - self._magnetic_stall_started_at >= LOOT_MAGNETIC_STALL_SECONDS
+
+    def _position_delta(self, current_position: tuple[float, float], previous_position: tuple[float, float]) -> float:
+        return max(
+            abs(current_position[0] - previous_position[0]),
+            abs(current_position[1] - previous_position[1]),
+        )
+
     def _is_collectible_debris(self, debris) -> bool:
-        if self._is_unidentified_generic_debris(debris):
-            return False
-        return bool(getattr(debris, "is_collectible", False))
-
-    def _is_unidentified_generic_debris(self, debris) -> bool:
         qualified_item_id = str(getattr(debris, "qualified_item_id", "") or "").strip()
-        if qualified_item_id:
-            return False
+        return bool(
+            qualified_item_id
+            and getattr(debris, "name", "")
+            and getattr(debris, "display_name", "")
+            and qualified_item_id not in IGNORED_DEBRIS_QUALIFIED_ITEM_IDS
+        )
 
-        name = str(getattr(debris, "name", "") or "").strip().upper()
-        source = str(getattr(debris, "source", "") or "").strip().upper()
-        return (name, source) in {("OBJECT", "OBJECT"), ("RESOURCE", "RESOURCE")}
+    def _is_collectible_debris_for_source(self, blackboard: AgentBlackboard, debris) -> bool:
+        return self._is_collectible_debris(debris)
 
     def _mark_target_covered(self, target_tile: Tile, game_state, reason: str) -> None:
         self._swept_loot_tiles.add((target_tile.x, target_tile.y))
@@ -644,8 +801,13 @@ class CollectLootNode(BTNode):
     def _get_target_collect_radius(self, game_state, target_tile: Tile) -> float:
         return self._get_effective_magnetic_radius(game_state)
 
-    def _build_move_command_to_magnetic_range(self, game_state, target_tile: Tile) -> StardewCommand:
-        debris = self._get_debris_for_tile(game_state, target_tile)
+    def _build_move_command_to_magnetic_range(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        target_tile: Tile,
+    ) -> StardewCommand:
+        debris = self._get_debris_for_tile(blackboard, game_state, target_tile)
         if debris is None:
             return StardewCommand(action=StardewAction.IDLE)
 
@@ -686,8 +848,13 @@ class CollectLootNode(BTNode):
 
         return StardewCommand(action=StardewAction.IDLE)
 
-    def _build_move_command_to_debris_center(self, game_state, target_tile: Tile) -> StardewCommand:
-        debris = self._get_debris_for_tile(game_state, target_tile)
+    def _build_move_command_to_debris_center(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        target_tile: Tile,
+    ) -> StardewCommand:
+        debris = self._get_debris_for_tile(blackboard, game_state, target_tile)
         if debris is None:
             return StardewCommand(action=StardewAction.IDLE)
 
@@ -739,7 +906,7 @@ class CollectLootNode(BTNode):
         if self._is_tree_collect_mode(blackboard):
             self._skip_target(blackboard, target_tile, "树木掉落物拾取不触发清障；磁吸候选站位不可达")
             return False
-        if self._is_target_in_magnetic_range(game_state, target_tile, should_log=False):
+        if self._is_target_in_magnetic_range(blackboard, game_state, target_tile, should_log=False):
             self._mark_target_covered(target_tile, game_state, "已在磁吸范围内，不为拾取触发清障")
             return False
 
@@ -827,7 +994,7 @@ class CollectLootNode(BTNode):
             return [
                 debris
                 for debris in getattr(game_state, "debris", [])
-                if self._is_collectible_debris(debris)
+                if self._is_collectible_debris_for_source(blackboard, debris)
                 and (debris.tile.x, debris.tile.y) not in skipped_tiles
                 and self._is_tile_in_dynamic_loot_radius(source_tile, debris.tile, radius)
             ]
@@ -836,7 +1003,7 @@ class CollectLootNode(BTNode):
         return [
             debris
             for debris in getattr(game_state, "debris", [])
-            if self._is_collectible_debris(debris)
+            if self._is_collectible_debris_for_source(blackboard, debris)
             and debris.tile in requested_tiles
             and (debris.tile.x, debris.tile.y) not in skipped_tiles
         ]
@@ -845,30 +1012,7 @@ class CollectLootNode(BTNode):
         qualified_item_id = str(getattr(debris, "qualified_item_id", "") or "").strip()
         if qualified_item_id:
             return f"qid:{qualified_item_id}"
-
-        name = str(getattr(debris, "name", "") or "").strip()
-        display_name = str(getattr(debris, "display_name", "") or "").strip()
-        item_name = name if name not in GENERIC_DEBRIS_ITEM_KEYS else display_name
-        if not item_name or item_name in GENERIC_DEBRIS_ITEM_KEYS:
-            return None
-        return f"name:{item_name}"
-
-    def _should_attempt_ambiguous_tree_debris_collect(self, blackboard: AgentBlackboard, debris) -> bool:
-        if not self._is_tree_collect_mode(blackboard):
-            return False
-
-        qualified_item_id = str(getattr(debris, "qualified_item_id", "") or "").strip()
-        if qualified_item_id:
-            return False
-
-        name = str(getattr(debris, "name", "") or "").strip()
-        display_name = str(getattr(debris, "display_name", "") or "").strip()
-        source = str(getattr(debris, "source", "") or "").strip()
-        return (
-            name in GENERIC_DEBRIS_ITEM_KEYS
-            or display_name in GENERIC_DEBRIS_ITEM_KEYS
-            or source.upper() in {"RESOURCE", "OBJECT"}
-        )
+        return None
 
     def _discard_observed_loot_item_key(self, debris, reason: str) -> None:
         item_key = self._build_debris_item_key(debris)
@@ -903,6 +1047,15 @@ class CollectLootNode(BTNode):
             if current_inventory.get(item_key, 0) > self._inventory_snapshot.get(item_key, 0):
                 return True
         return False
+
+    def _get_inventory_gain_items(self, game_state) -> list[str]:
+        current_inventory = self._snapshot_inventory_items(game_state)
+        gain_items: list[str] = []
+        for item_key, current_count in sorted(current_inventory.items()):
+            old_count = self._inventory_snapshot.get(item_key, 0)
+            if current_count > old_count:
+                gain_items.append(f"{item_key}:{old_count}->{current_count}")
+        return gain_items
 
     def _is_player_busy(self, game_state) -> bool:
         return bool(getattr(game_state, "using_tool", False)) or not bool(getattr(game_state, "can_move", True))

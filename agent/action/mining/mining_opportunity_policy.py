@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 
-from agent.action.inventory.inventory_policy import InventoryPolicy
 from agent.action.mining.mine_target import MineTarget
 from agent.action.mining.mining_risk_evaluator import MiningRiskEvaluator
 from server.valley_server import StardewState
@@ -66,7 +65,6 @@ class MiningOpportunityPolicy:
     ) -> None:
         self.risk_evaluator = risk_evaluator or MiningRiskEvaluator()
         self.config = config or OpportunityPolicyConfig()
-        self.inventory_policy = InventoryPolicy()
 
     def with_config(self, config: OpportunityPolicyConfig) -> "MiningOpportunityPolicy":
         return MiningOpportunityPolicy(risk_evaluator=self.risk_evaluator, config=config)
@@ -121,16 +119,6 @@ class MiningOpportunityPolicy:
             effective_extra_path_cost=effective_extra_path_cost,
             path_nearby_distance=path_nearby_distance,
         )
-        inventory_decision = self.inventory_policy.can_accept_item(
-            state,
-            item_name=target.name or target.display_name,
-            qualified_item_id=target.qualified_item_id,
-            stack=1,
-        )
-        if self._requires_inventory_capacity(target) and not inventory_decision.can_accept:
-            should_take = False
-            reason = f"背包无法接收机会资源: {inventory_decision.reason}"
-
         return OpportunityDecision(
             target=target,
             should_take=should_take,
@@ -159,9 +147,6 @@ class MiningOpportunityPolicy:
         if direct_ladder_path_tiles is None:
             return False
         return self._distance_to_path(target.tile, direct_ladder_path_tiles) <= self.config.path_nearby_distance
-
-    def _requires_inventory_capacity(self, target: MineTarget) -> bool:
-        return target.target_type in {"COLLECTIBLE", "BREAKABLE_CONTAINER", "MINING_NODE"}
 
     def _build_reason(
         self,

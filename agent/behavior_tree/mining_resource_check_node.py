@@ -58,47 +58,6 @@ class MiningResourceCheckNode(BTNode):
             print("\n🔴 [MiningResourceCheckNode] 背包中没有 Pickaxe，无法开始 Mining P0。")
             return "FAILURE"
 
-        summary = self.inventory_policy.build_summary(game_state, MINING_REQUIRED_ITEMS)
-        blackboard.inventory_risk_level = summary.risk_level
-        if summary.risk_level == "LOW_SPACE":
-            print(
-                f"\n🟡 [MiningResourceCheckNode] 背包空间较低，但不打断 Mining: "
-                f"free_slots={summary.free_slots}, occupied={summary.occupied_slots}/{summary.max_items}"
-            )
-            return "SUCCESS"
-
-        if summary.risk_level == "FULL_BLOCKED" and current_task.collect_opportunity_resources:
-            context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
-            recovery_hint = InventoryRecoveryHint(
-                strategy="DISCARD_LOW_VALUE" if summary.discard_candidates else "NEED_CHEST_STORAGE",
-                reason=(
-                    "背包已满且当前 MiningTask 启用了机会资源采集，需要先腾出空间。"
-                    if summary.discard_candidates
-                    else "背包已满且没有安全可丢弃候选，需要通过箱子整理或 Planner 恢复。"
-                ),
-                discard_candidates=summary.discard_candidates,
-            )
-            self._register_inventory_recovery(
-                blackboard,
-                game_state,
-                current_task,
-                "FULL_BLOCKED",
-                "背包已满，当前机会资源采集任务不适合继续开始。",
-                recovery_hint,
-            )
-            print(
-                f"\n🔴 [MiningResourceCheckNode] 背包已满，暂停机会资源采集 Mining: "
-                f"strategy={recovery_hint.strategy}, free_slots={summary.free_slots}, "
-                f"discard_candidates={blackboard.inventory_discard_candidates}"
-            )
-            return "FAILURE"
-
-        if summary.risk_level == "FULL_BLOCKED":
-            print(
-                f"\n🟡 [MiningResourceCheckNode] 背包已满，但当前 Mining 主目标不是主动采集资源，"
-                f"先允许继续冲层: occupied={summary.occupied_slots}/{summary.max_items}"
-            )
-
         return "SUCCESS"
 
     def _register_inventory_recovery(

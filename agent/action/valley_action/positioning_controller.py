@@ -78,6 +78,9 @@ class PositioningController:
             f"target_edge={self.move_controller.get_target_edge_debug_snapshot()}"
         )
 
+    def get_current_path_length(self) -> int:
+        return len(self._tile_path)
+
     def tick(self, state: StardewState, goal: PositioningGoal) -> PositioningResult:
         extra_blocked_tiles = goal.extra_blocked_tiles or set()
         allowed_blocked_tiles = goal.allowed_blocked_tiles or set()

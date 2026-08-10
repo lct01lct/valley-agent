@@ -17,6 +17,7 @@ sys.path.append("agent")
 from agent.action.location.location import Location
 
 COMMAND_RESPONSE_TIMEOUT_SECONDS = 1.5
+IGNORED_DEBRIS_QUALIFIED_ITEM_IDS = {"(O)0"}
 
 
 class WarpZone:
@@ -197,13 +198,13 @@ class DebrisState:
         self.tile = Tile(int(raw_tile[0]), int(raw_tile[1]))
 
     def _build_is_collectible(self, raw_debris: dict) -> bool:
-        if raw_debris.get("IsCollectible") is True:
-            return True
-        if self.qualified_item_id:
-            return True
-        if self.source.upper() == "CHUNKS":
-            return False
-        return self.source.upper() in {"RESOURCE", "OBJECT"}
+        # Python 端只感知有明确物品身份的真实掉落物；RESOURCE / OBJECT / CHUNKS 等表现层 Debris 不参与拾取决策。
+        return bool(
+            self.qualified_item_id
+            and self.name
+            and self.display_name
+            and self.qualified_item_id not in IGNORED_DEBRIS_QUALIFIED_ITEM_IDS
+        )
 
 
 class MonsterState:

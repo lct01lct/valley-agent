@@ -101,8 +101,11 @@ Farm 资源检查只以当前 `context.state.inventory.Items` 为事实来源。
 - `MiningResourceCheckNode`：在 MiningTask 开始前检查背包/工具栏中是否有 Pickaxe；缺失时安全停止并把恢复原因写入 blackboard。
 - `SwitchToolNode`：根据 Mining 当前阶段切换 Pickaxe。
 - `MineNode`：当前实现 Mining P0，负责矿洞入口交互、读取 `MineLevel`、寻找 Ladder，没有 Ladder 时站到 Stone / MiningNode 上下左右相邻格并使用 Pickaxe，验证 Stone 消失或 Ladder 出现，最终进入目标矿层。
-- `MineTargetSelector`：把 SMAPI state 中的 `Ladders`、`MineEntrances`、`MiningNodes`、`MineCollectibles` 和 `MineBreakableContainers` 统一建模为 `MineTarget`。MineNode 后续应消费目标抽象，不要在执行节点里继续扩散不同对象类型的读取和分类逻辑。
+- `MineTargetSelector`：把 SMAPI state 中的 `Ladders`、`MineEntrances`、`MiningNodes`、`MineCollectibles` 和 `MineBreakableContainers` 统一建模为 `MineTarget`；只负责构建候选，不负责执行。
+- `MiningTargetResolver`：统一选择下一层梯子、价值资源锚点、资源通路石头、普通找梯石头和探索方向，输出结构化 `MiningTargetDecision`。它可以使用路径和风险评估结果，但不得发送命令、推进任务或持有工具动作状态。
 - `MiningOpportunityPolicy`：用 Utility 风格机会成本评分判断采矿途中资源是否值得处理。当前评分考虑资源价值、额外路径成本、通路破石成本和工具动作成本；怪物风险项通过 `MiningRiskEvaluator` 预留，当前固定为 0。
+
+MineNode 负责消费 `MiningTargetDecision` 并执行站位、交互、工具动作、后处理和 state 验收；目标筛选、机会评分和最终排序不应重新散落回 MineNode。正在追踪的工具动作和必须结算的掉落物仍优先于新一轮目标决策。
 
 Mining 中的“顺手资源”语义应理解为“价值资源锚点会影响挖掘方向”，不是随意路过才处理，也不要用固定次数上限控制。若 `MiningTask.collect_opportunity_resources=True`，MineNode 应通过 `MiningOpportunityPolicy` 评估 `COLLECTIBLE`、`BREAKABLE_CONTAINER` 或资源型 `MINING_NODE` 的机会成本：未发现梯子时，价值资源可作为挖掘方向锚点；已发现梯子时，只有资源相对直接下楼的额外路径成本、通路破石成本和动作成本仍然值得时才处理。若挖掘过程中提前出现梯子，仍应先完成当前已锁定的资源锚点，再处理梯子下楼；不要因为梯子刷新就丢弃已经为之开路的资源目标。
 
@@ -129,6 +132,8 @@ Mining 中的“顺手资源”语义应理解为“价值资源锚点会影响�
 不要把低变化地图知识塞进每帧 state。水源这类资源应优先走“按需查询 -> 写入 MapKnowledgeCache -> 后续复用”的模式。
 
 `Debris` 属于工具动作后可能快速出现/消失的动态掉落物 state，应由 Observer 轻量高频同步，供 `ToolAftermathService` 判断目标附近是否出现可拾取掉落物；它不等同于长期机会记忆，也不应由业务节点直接当成必须拾取目标。
+
+Debris state 必须保持精简：C# Observer 只应把“可确认身份的真实可拾取物品”同步给 Python。纯视觉碎屑、身份不完整的 Debris、`Weeds/(O)0` 这类伪物品不进入 `state.debris`。矿石、硬木等 `source=OBJECT` 掉落物可能没有 `debris.item` / `chunk.item`，但会在 `Debris.itemId.Value` 中携带真实 `QualifiedItemId`，例如 `(O)378` 表示 Copper Ore；解析时应优先读取该字段，再考虑 chunk 兜底，避免把视觉碎屑或 chunk 的 0/1 误判为真实物品。
 
 箱子记忆要区分“内容事实”和“语义记忆”：`ChestContentKnowledge` 来自实际打开箱子后的内容快照，可能过期；`ChestSemanticMemory` 描述工具箱、种子箱等用途倾向，只能影响候选排序或兜底选择，不能直接当成箱子真实内容。
 
@@ -276,7 +281,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
 - 工具收招后的副作用观察优先复用 `ToolAftermathService`。`1.0s` 工具效果等待窗口只用于“完全没有任何预期效果或副作用”的超时兜底；目标变化、范围影响、掉落物、梯子或阻塞 UI 等 state 已出现时必须尽快推进。业务节点仍负责解释结果，例如 Mining 决定是否转向梯子，ClearObstacle 决定是否继续重试；不要把所有工具业务成功判定塞进通用服务。
 - 对 Stone、MiningNode、木箱/木桶、普通树等“破坏类目标”，掉落物登记必须以目标真实消失或明确破坏完成为前提。若工具收招后目标仍存在，说明只是受击、扣耐久或视觉碎屑阶段，不登记掉落物、不触发 CollectLoot，只按业务重试逻辑继续处理；目标消失后才扫描目标附近可拾取 `Debris` 并写入延迟拾取队列。
-- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。拾取节点只尝试可达掉落物，不触发清障；普通树掉落物会在树和残留树桩都砍完后统一拾取，允许部分拾取并跳过不可达位置。若 C# Debris 提供明确 item id / name，拾取验证应优先使用背包数量变化；若只提供泛化 `RESOURCE` / `OBJECT`，则使用掉落物消失、位置变化和动态观察作为兜底。
+- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。`CollectLootNode` 定位是低成本局部贪心拾取：优先利用当前站位、下一步工作站位和磁吸范围覆盖掉落物，尽量少移动、少停顿、不中断主任务太久；它不做全局收益规划，不为拾取触发清障，不为远距离掉落物大范围绕路。普通树掉落物会在树和残留树桩都砍完后统一拾取，允许部分拾取并跳过不可达位置。若 C# Debris 提供明确 item id / name，拾取验证应优先使用背包数量变化；若只提供泛化 `RESOURCE` / `OBJECT`，则使用掉落物消失、位置变化和动态观察作为兜底。
 - 节点推进应状态驱动优先；固定 tick/秒数等待只能用于短暂防抖、节流和超时兜底，不要用经验等待替代 SMAPI state 验证。
 - 水壶补水属于 Farm 分支的资源恢复能力。FarmNode 发现 `WaterLeft <= 0` 时应通过 blackboard 触发 `RefillWateringCanNode`，不要在 FarmNode 内部直接实现找水源、移动和补水。
 - 水源坐标属于低频地图知识，优先通过 C# `QUERY_WATER_SOURCES` 按需查询并写入 `MapKnowledgeCache`；不要作为每帧 state 高频字段同步。

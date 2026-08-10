@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Callable, ClassVar, Literal, Protocol
 
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
-from server.valley_server import StardewState
+from server.valley_server import IGNORED_DEBRIS_QUALIFIED_ITEM_IDS, StardewState
 from server.type import Tile
 
 
@@ -348,7 +348,13 @@ class ToolAftermathService:
         return nearby_tiles
 
     def _is_collectible_debris(self, debris: Any) -> bool:
-        return bool(getattr(debris, "is_collectible", False))
+        qualified_item_id = str(getattr(debris, "qualified_item_id", "") or "").strip()
+        return bool(
+            qualified_item_id
+            and getattr(debris, "name", "")
+            and getattr(debris, "display_name", "")
+            and qualified_item_id not in IGNORED_DEBRIS_QUALIFIED_ITEM_IDS
+        )
 
     def _tile_distance(self, start_tile: Tile, end_tile: Tile) -> int:
         return abs(start_tile.x - end_tile.x) + abs(start_tile.y - end_tile.y)
