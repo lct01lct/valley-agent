@@ -2,7 +2,7 @@ import time
 from typing import Literal
 
 from agent.action.chest.chest_knowledge_service import ChestKnowledgeService
-from agent.action.inventory.inventory_fill_policy import InventoryFillPolicy
+from agent.action.inventory.inventory_fill_policy import InventoryFillPolicy, InventoryGoal
 from agent.action.location.location import Location
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.base_task import BaseTask, TaskType
@@ -18,6 +18,7 @@ from server.type import Tile
 type InventoryAction = Literal[
     "FILL_INVENTORY",  # 从当前场景箱子取任务无关物品，直到背包 FreeSlots == 0。
     "EMPTY_CHEST_TO_INVENTORY",  # 尽量把指定或最近箱子里的物品转入背包，受背包容量限制。
+    "REACH_INVENTORY_STATE",  # 按 InventoryGoal 达成背包目标状态；未来 Planner/LLM 的优先输出形式。
 ]
 
 
@@ -32,11 +33,18 @@ class InventoryTask(BaseTask):
         inventory_action: InventoryAction,
         target_loc: Location,
         chest_tile: Tile | None = None,
+        goal: InventoryGoal | None = None,
     ):
         super().__init__(task_type=task_type, desc=desc)
         self.inventory_action = inventory_action
         self.target_loc: Location = target_loc
         self.chest_tile = chest_tile
+        self.goal = goal or self._build_legacy_goal(inventory_action)
+
+    def _build_legacy_goal(self, inventory_action: InventoryAction) -> InventoryGoal | None:
+        if inventory_action == "FILL_INVENTORY":
+            return InventoryGoal.fill_inventory()
+        return None
 
 
 class InventoryNode(BTNode):
@@ -55,7 +63,7 @@ class InventoryNode(BTNode):
         self._task_signature: tuple | None = None
         self._started_at: float | None = None
         self._active_chest_task: ChestTask | None = None
-        self._has_scanned_for_fill = False
+        self._observed_chest_tiles_for_goal: set[tuple[int, int]] = set()
         self._last_temporary_chest_task_completed = False
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
@@ -95,6 +103,9 @@ class InventoryNode(BTNode):
         if current_task.inventory_action == "FILL_INVENTORY":
             return await self._run_fill_inventory(context, blackboard, game_state, current_task)
 
+        if current_task.inventory_action == "REACH_INVENTORY_STATE":
+            return await self._run_reach_inventory_state(context, blackboard, game_state, current_task)
+
         if current_task.inventory_action == "EMPTY_CHEST_TO_INVENTORY":
             return await self._run_empty_chest_to_inventory(context, blackboard, game_state, current_task)
 
@@ -110,14 +121,33 @@ class InventoryNode(BTNode):
         self._task_signature = self._build_task_signature(blackboard, current_task)
         self._started_at = time.time()
         self._active_chest_task = None
-        self._has_scanned_for_fill = False
+        self._observed_chest_tiles_for_goal = set()
         self._last_temporary_chest_task_completed = False
         print(f"\n🎒 [InventoryNode] 开始背包目标任务: action={current_task.inventory_action}")
         self._log(
             f"开始 InventoryTask: action={current_task.inventory_action}, target_loc={current_task.target_loc}, "
             f"chest={current_task.chest_tile}, free_slots={game_state.inventory.free_slots}, "
-            f"occupied={game_state.inventory.occupied_slots}/{game_state.inventory.max_items}"
+            f"occupied={game_state.inventory.occupied_slots}/{game_state.inventory.max_items}, "
+            f"goal={self._format_goal(current_task.goal)}"
         )
+
+    async def _run_reach_inventory_state(
+        self,
+        context: PlayerContext,
+        blackboard: AgentBlackboard,
+        game_state: StardewState,
+        current_task: InventoryTask,
+    ) -> NodeStatus:
+        goal = current_task.goal
+        if goal is None:
+            self._fail(context, blackboard, current_task, "REACH_INVENTORY_STATE 缺少 InventoryGoal")
+            return "FAILURE"
+
+        if goal.target_free_slots is None:
+            self._fail(context, blackboard, current_task, f"暂不支持的 InventoryGoal: {self._format_goal(goal)}")
+            return "FAILURE"
+
+        return await self._run_fill_inventory(context, blackboard, game_state, current_task)
 
     async def _run_fill_inventory(
         self,
@@ -129,55 +159,50 @@ class InventoryNode(BTNode):
         if self._active_chest_task is not None:
             return await self._run_active_chest_task(context, blackboard, current_task)
 
+        goal = current_task.goal or InventoryGoal.fill_inventory()
         free_slots = int(game_state.inventory.free_slots or 0)
-        if free_slots <= 0:
+        target_free_slots = max(0, int(goal.target_free_slots or 0))
+        if free_slots <= target_free_slots:
             print("\n🟢 [InventoryNode] 背包已填满。")
             self._log(
-                f"背包已填满，InventoryTask 完成: free_slots={game_state.inventory.free_slots}, "
-                f"occupied={game_state.inventory.occupied_slots}/{game_state.inventory.max_items}"
+                f"背包目标状态已达成，InventoryTask 完成: free_slots={game_state.inventory.free_slots}, "
+                f"target_free_slots={target_free_slots}, occupied={game_state.inventory.occupied_slots}/{game_state.inventory.max_items}"
             )
             self._complete(blackboard)
             return "SUCCESS"
 
-        chest_contents = context.map_knowledge_cache.get_chest_contents(current_task.target_loc)
-        if not chest_contents:
-            if self._has_scanned_for_fill:
-                self._fail(context, blackboard, current_task, "已扫描当前场景箱子，但没有可用于填满背包的已知箱子内容")
-                return "FAILURE"
-
-            self._has_scanned_for_fill = True
-            self._active_chest_task = ChestTask(
-                task_type="CHEST",
-                desc="Inventory FILL：扫描当前场景箱子内容",
-                chest_action="SCAN",
-                target_loc=current_task.target_loc,
-                chest_tile=None,
-            )
-            self._log("缺少新鲜箱子内容缓存，先通过 Chest SCAN 观察箱子")
-            return await self._run_active_chest_task(context, blackboard, current_task)
+        include_stale = bool(goal.allow_stale_chest_cache and "KNOWN_CHESTS" in goal.allowed_sources)
+        chest_contents = context.map_knowledge_cache.get_chest_contents(current_task.target_loc, include_stale=include_stale)
 
         next_task = self._get_next_task(blackboard)
-        take_plan = self.fill_policy.build_fill_inventory_take_plan(game_state, chest_contents, next_task)
+        take_plan = self.fill_policy.build_fill_inventory_take_plan(game_state, chest_contents, next_task, goal)
         if take_plan is None:
+            observe_task = self._build_next_chest_observation_task(context, game_state, current_task, goal)
+            if observe_task is not None:
+                self._active_chest_task = observe_task
+                return await self._run_active_chest_task(context, blackboard, current_task)
+
             self._fail(
                 context,
                 blackboard,
                 current_task,
-                f"没有可填充背包的新物品: free_slots={free_slots}, known_chests={len(chest_contents)}",
+                f"没有可达成背包目标状态的新物品: free_slots={free_slots}, "
+                f"target_free_slots={target_free_slots}, known_chests={len(chest_contents)}, goal={self._format_goal(goal)}",
             )
             return "FAILURE"
 
         self._active_chest_task = ChestTask(
             task_type="CHEST",
-            desc="Inventory FILL：从已观察箱子取任务无关物品填满背包",
+            desc="Inventory Goal：从已观察箱子取物达成背包目标状态",
             chest_action="TAKE",
             target_loc=current_task.target_loc,
             chest_tile=take_plan.chest_content.tile,
             items=take_plan.item_requests,
         )
         self._log(
-            f"生成填满背包取物任务: chest={take_plan.chest_content.tile}, "
-            f"items={self._format_item_requests(take_plan.item_requests)}, reason={take_plan.reason}"
+            f"生成背包目标状态取物任务: chest={take_plan.chest_content.tile}, "
+            f"items={self._format_item_requests(take_plan.item_requests)}, reason={take_plan.reason}, "
+            f"goal={self._format_goal(goal)}"
         )
         return await self._run_active_chest_task(context, blackboard, current_task)
 
@@ -252,8 +277,10 @@ class InventoryNode(BTNode):
 
         if self._last_temporary_chest_task_completed:
             self._log(f"临时 ChestTask 完成: desc={self._active_chest_task.desc}")
-            if self._active_chest_task.chest_action == "TAKE":
-                self._has_scanned_for_fill = False
+            if self._active_chest_task.chest_action in ("QUERY", "SCAN") and self._active_chest_task.chest_tile is not None:
+                self._observed_chest_tiles_for_goal.add(
+                    (self._active_chest_task.chest_tile.x, self._active_chest_task.chest_tile.y)
+                )
             self._active_chest_task = None
             self.chest_node._reset()
             return "RUNNING"
@@ -318,6 +345,51 @@ class InventoryNode(BTNode):
             ),
         )[0]
 
+    def _build_next_chest_observation_task(
+        self,
+        context: PlayerContext,
+        game_state: StardewState,
+        current_task: InventoryTask,
+        goal: InventoryGoal,
+    ) -> ChestTask | None:
+        if "OBSERVED_CHESTS" not in goal.allowed_sources:
+            self._log(f"InventoryGoal 不允许观察新箱子: goal={self._format_goal(goal)}")
+            return None
+
+        chest_locations = context.map_knowledge_cache.get_chest_locations(current_task.target_loc)
+        if not chest_locations:
+            chest_locations = self.chest_knowledge_service.query_chests(context, current_task.target_loc) or []
+        if not chest_locations:
+            self._log(f"当前场景没有可观察箱子: location={current_task.target_loc}")
+            return None
+
+        chest_contents = context.map_knowledge_cache.get_chest_contents(current_task.target_loc, include_stale=True)
+        observe_plan = self.fill_policy.build_next_chest_observation_plan(
+            game_state,
+            chest_locations,
+            chest_contents,
+            goal,
+            self._observed_chest_tiles_for_goal,
+        )
+        if observe_plan is None:
+            self._log(
+                f"没有剩余可观察箱子: location={current_task.target_loc}, "
+                f"known_contents={len(chest_contents)}, observed={sorted(self._observed_chest_tiles_for_goal)}"
+            )
+            return None
+
+        self._log(
+            f"生成箱子观察任务: chest={observe_plan.chest_tile}, reason={observe_plan.reason}, "
+            f"goal={self._format_goal(goal)}"
+        )
+        return ChestTask(
+            task_type="CHEST",
+            desc="Inventory Goal：观察一个候选箱子内容",
+            chest_action="QUERY",
+            target_loc=current_task.target_loc,
+            chest_tile=observe_plan.chest_tile,
+        )
+
     def _complete(self, blackboard: AgentBlackboard) -> None:
         blackboard.current_step_index += 1
         self._reset()
@@ -350,6 +422,7 @@ class InventoryNode(BTNode):
             current_task.inventory_action,
             current_task.target_loc,
             current_task.chest_tile,
+            current_task.goal,
         )
 
     def _get_next_task(self, blackboard: AgentBlackboard) -> BaseTask | None:
@@ -361,6 +434,16 @@ class InventoryNode(BTNode):
     def _format_item_requests(self, item_requests: list) -> str:
         return ", ".join(f"{item.item_name}({item.qualified_item_id or 'name'}):{item.count}" for item in item_requests)
 
+    def _format_goal(self, goal: InventoryGoal | None) -> str:
+        if goal is None:
+            return "None"
+        return (
+            f"target_free_slots={goal.target_free_slots}, "
+            f"preserve_required_items={goal.preserve_required_items}, "
+            f"item_policy={goal.item_policy}, allowed_sources={goal.allowed_sources}, "
+            f"allow_stale_chest_cache={goal.allow_stale_chest_cache}"
+        )
+
     def _log(self, message: str) -> None:
         self.debug_logger.log(f"[InventoryNode] {message}")
 
@@ -368,6 +451,6 @@ class InventoryNode(BTNode):
         self._task_signature = None
         self._started_at = None
         self._active_chest_task = None
-        self._has_scanned_for_fill = False
+        self._observed_chest_tiles_for_goal = set()
         self._last_temporary_chest_task_completed = False
         self.chest_node._reset()

@@ -1,9 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
-from agent.action.inventory.inventory_fill_policy import InventoryFillPolicy
+from agent.action.inventory.inventory_fill_policy import InventoryFillPolicy, InventoryGoal
 from agent.behavior_tree.farm_node import FarmTask
-from agent.memory.map_knowledge_cache import ChestContentItem, ChestContentKnowledge
+from agent.memory.map_knowledge_cache import ChestContentItem, ChestContentKnowledge, ChestLocationKnowledge
 from server.type import Tile
 
 
@@ -45,6 +45,35 @@ class InventoryFillPolicyTest(unittest.TestCase):
             [("Wood", "(O)388", 1), ("Clay", "(O)330", 1)],
         )
 
+    def test_fill_inventory_goal_can_keep_target_free_slots(self) -> None:
+        policy = InventoryFillPolicy()
+        state = self._build_state(
+            free_slots=3,
+            player_tile=Tile(10, 10),
+            items=[],
+        )
+        chest_content = self._build_chest_content(
+            Tile(11, 10),
+            [
+                self._build_chest_item("Wood", "(O)388"),
+                self._build_chest_item("Clay", "(O)330"),
+                self._build_chest_item("Fiber", "(O)771"),
+            ],
+        )
+
+        take_plan = policy.build_fill_inventory_take_plan(
+            state,
+            [chest_content],
+            next_task=None,
+            goal=InventoryGoal(target_free_slots=1),
+        )
+
+        self.assertIsNotNone(take_plan)
+        self.assertEqual(
+            [(item.item_name, item.qualified_item_id, item.count) for item in take_plan.item_requests],
+            [("Wood", "(O)388", 1), ("Clay", "(O)330", 1)],
+        )
+
     def test_empty_chest_respects_new_slot_capacity_but_keeps_stackable_items(self) -> None:
         policy = InventoryFillPolicy()
         state = self._build_state(
@@ -70,6 +99,29 @@ class InventoryFillPolicyTest(unittest.TestCase):
             [(item.item_name, item.qualified_item_id, item.count) for item in take_plan.item_requests],
             [("Stone", "(O)390", 20), ("Clay", "(O)330", 3)],
         )
+
+    def test_observation_plan_prefers_unknown_chest_when_known_contents_are_not_enough(self) -> None:
+        policy = InventoryFillPolicy()
+        state = self._build_state(free_slots=1, player_tile=Tile(10, 10), items=[])
+        known_chest_content = self._build_chest_content(
+            Tile(12, 10),
+            [
+                self._build_chest_item("Hoe", "(T)Hoe", is_tool=True),
+            ],
+        )
+
+        observe_plan = policy.build_next_chest_observation_plan(
+            state,
+            [
+                ChestLocationKnowledge.create("Farm", Tile(12, 10), source="QUERY_CHESTS"),
+                ChestLocationKnowledge.create("Farm", Tile(11, 10), source="QUERY_CHESTS"),
+            ],
+            [known_chest_content],
+            InventoryGoal(target_free_slots=0),
+        )
+
+        self.assertIsNotNone(observe_plan)
+        self.assertEqual(observe_plan.chest_tile, Tile(11, 10))
 
     def _build_state(self, free_slots: int, player_tile: Tile, items: list):
         return SimpleNamespace(

@@ -5,6 +5,7 @@ from server.type import Tile
 from agent.base_task import BaseTask
 from agent.behavior_tree.chest_node import ChestItemRequest, ChestTask
 from agent.behavior_tree.farm_node import FarmTask
+from agent.action.inventory.inventory_fill_policy import InventoryGoal
 from agent.behavior_tree.inventory_node import InventoryTask
 from agent.behavior_tree.mining_node import MiningTask
 from agent.behavior_tree.route_node import RouteTask
@@ -230,9 +231,16 @@ TASK_MOCK_DATA: Dict[
         ),
         InventoryTask(
             task_type="INVENTORY",
-            desc="从已观察到的 Farm 箱子中取任务无关物品，直到背包填满",
-            inventory_action="FILL_INVENTORY",
+            desc="达成背包满状态，用于测试背包满时砍树拾取和背包恢复",
+            inventory_action="REACH_INVENTORY_STATE",
             target_loc="Farm",
+            goal=InventoryGoal(
+                target_free_slots=0,
+                preserve_required_items=True,
+                item_policy="TASK_IRRELEVANT_ITEMS",
+                allowed_sources=("KNOWN_CHESTS", "OBSERVED_CHESTS"),
+                allow_stale_chest_cache=True,
+            ),
         ),
         FarmTask(
             task_type="FARM",

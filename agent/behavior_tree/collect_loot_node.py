@@ -28,7 +28,10 @@ STONE_LOOT_COLLECT_RADIUS_TILES = 4
 LOOT_COLLECT_STAND_SEARCH_RADIUS_TILES = 3
 LOOT_RELOCATE_SEARCH_RADIUS_TILES = 6
 LOOT_SOURCE_RETURN_RADIUS_TILES = 3
-LOOT_CLEARABLE_OBSTACLE_TYPES = {"grass", "weeds", "twig", "stone"}
+# 拾取阶段的清障白名单独立于 Route/Farm。
+# CollectLoot 的目标是找到可磁吸站位，不是走到掉落物所在 tile；
+# Grass 在拾取场景中默认视为软障碍，不因掉落物或候选路径附近有牧草而触发清障。
+LOOT_CLEARABLE_OBSTACLE_TYPES = {"weeds", "twig", "stone"}
 TREE_LOOT_MAX_PATH_TILES = 12
 LOOT_MAGNETIC_STALL_SECONDS = 0.25
 LOOT_POSITION_PROGRESS_EPSILON = 1.0
@@ -296,14 +299,21 @@ class CollectLootNode(BTNode):
                 and current_path_length > TREE_LOOT_MAX_PATH_TILES
                 and not blackboard.collect_loot_resume_after_inventory_recovery
             ):
-                context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
-                self._skip_target(
-                    blackboard,
-                    target_tile,
-                    f"树木掉落物拾取路径过长，放弃绕路拾取: path_len={current_path_length}, "
-                    f"max_path={TREE_LOOT_MAX_PATH_TILES}",
-                )
-                return "RUNNING"
+                if self._can_accept_loot_tile(blackboard, game_state, target_tile):
+                    self._log(
+                        f"树木掉落物路径较长，但当前背包可接收，继续优先拾取后再考虑背包恢复: "
+                        f"target={target_tile}, path_len={current_path_length}, "
+                        f"max_path={TREE_LOOT_MAX_PATH_TILES}"
+                    )
+                else:
+                    context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                    self._skip_target(
+                        blackboard,
+                        target_tile,
+                        f"树木掉落物拾取路径过长，放弃绕路拾取: path_len={current_path_length}, "
+                        f"max_path={TREE_LOOT_MAX_PATH_TILES}",
+                    )
+                    return "RUNNING"
 
             response = context.executor_client.send_command(positioning_result.command)
             self._log(
@@ -639,6 +649,38 @@ class CollectLootNode(BTNode):
             f"removed={self._format_tiles(removed_tiles)}, remaining={self._format_tiles(kept_tiles)}"
         )
 
+    def _restore_receivable_skipped_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> None:
+        if not blackboard.skipped_loot_tiles:
+            return
+
+        restored_tiles: list[Tile] = []
+        existing_pending_tiles = set(blackboard.pending_loot_tiles)
+        for debris in self._get_skipped_debris_for_current_source(blackboard, game_state):
+            if not self._can_accept_debris(game_state, debris):
+                continue
+
+            skipped_key = (debris.tile.x, debris.tile.y)
+            blackboard.skipped_loot_tiles.discard(skipped_key)
+            if debris.tile not in existing_pending_tiles:
+                blackboard.pending_loot_tiles.append(debris.tile)
+                existing_pending_tiles.add(debris.tile)
+            restored_tiles.append(debris.tile)
+
+        if not restored_tiles:
+            return
+
+        self._log(
+            f"重新纳入 skipped 中当前可接收的残留掉落物: "
+            f"restored={self._format_tiles(restored_tiles)}, "
+            f"pending={self._format_tiles(blackboard.pending_loot_tiles)}, "
+            f"remaining_skipped={blackboard.skipped_loot_tiles}"
+        )
+
+    def _can_accept_debris(self, game_state, debris) -> bool:
+        if self.inventory_policy is None:
+            return True
+        return self.inventory_policy.can_accept_debris(game_state, debris).can_accept
+
     def _is_unreceivable_loot_skipped(self, blackboard: AgentBlackboard, game_state, debris) -> bool:
         item_key = self._build_debris_item_key(debris)
         if item_key is None:
@@ -714,6 +756,7 @@ class CollectLootNode(BTNode):
 
     def _refresh_pending_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> None:
         self._remove_unreceivable_pending_loot_tiles(blackboard, game_state)
+        self._restore_receivable_skipped_loot_tiles(blackboard, game_state)
         self._observe_visible_loot_item_keys(blackboard, game_state)
         if self._is_dynamic_local_collect_mode(blackboard):
             self._refresh_dynamic_local_loot_tiles(blackboard, game_state)
@@ -1203,7 +1246,7 @@ class CollectLootNode(BTNode):
         if debris is None:
             return True
 
-        return self.inventory_policy.can_accept_debris(game_state, debris).can_accept
+        return self._can_accept_debris(game_state, debris)
 
     def _select_receivable_alternative_target(
         self,
@@ -1779,6 +1822,33 @@ class CollectLootNode(BTNode):
             and not self._is_unreceivable_loot_skipped(blackboard, game_state, debris)
             and debris.tile in requested_tiles
             and (debris.tile.x, debris.tile.y) not in skipped_tiles
+        ]
+
+    def _get_skipped_debris_for_current_source(self, blackboard: AgentBlackboard, game_state) -> list:
+        skipped_tiles = blackboard.skipped_loot_tiles
+        if not skipped_tiles:
+            return []
+
+        if self._is_dynamic_local_collect_mode(blackboard):
+            source_tile = blackboard.collect_loot_source_tile
+            if source_tile is None:
+                return []
+            radius = self._get_dynamic_collect_radius(blackboard)
+            return [
+                debris
+                for debris in getattr(game_state, "debris", [])
+                if self._is_collectible_debris_for_source(blackboard, debris)
+                and (debris.tile.x, debris.tile.y) in skipped_tiles
+                and not self._is_unreceivable_loot_skipped(blackboard, game_state, debris)
+                and self._is_tile_in_dynamic_loot_radius(source_tile, debris.tile, radius)
+            ]
+
+        return [
+            debris
+            for debris in getattr(game_state, "debris", [])
+            if self._is_collectible_debris_for_source(blackboard, debris)
+            and (debris.tile.x, debris.tile.y) in skipped_tiles
+            and not self._is_unreceivable_loot_skipped(blackboard, game_state, debris)
         ]
 
     def _build_debris_item_key(self, debris) -> str | None:

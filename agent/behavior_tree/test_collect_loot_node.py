@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from agent.action.inventory.inventory_policy import InventoryPolicy
-from agent.action.valley_action.action_type import StardewAction
+from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.behavior_tree.blackboard import AgentBlackboard, UnreceivableLootRecord
 from agent.behavior_tree.collect_loot_node import CollectLootNode
 from server.type import Tile
@@ -21,6 +21,28 @@ class FakeDebugLogger:
 class FakePositioningController:
     def reset(self) -> None:
         pass
+
+
+class FakeLongPathPositioningController:
+    def __init__(self) -> None:
+        self.reset_count = 0
+
+    def reset(self) -> None:
+        self.reset_count += 1
+
+    def tick(self, _game_state, _goal):
+        return SimpleNamespace(
+            status="MOVING",
+            command=StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"]),
+            stand_tile=Tile(20, 0),
+            reason=None,
+        )
+
+    def get_current_path_length(self) -> int:
+        return 125
+
+    def get_debug_snapshot(self) -> str:
+        return "fake_long_path"
 
 
 class FakeExecutorClient:
@@ -164,6 +186,22 @@ class CollectLootNodeTest(unittest.TestCase):
 
         self.assertGreater(len(candidate_tiles), 8)
 
+    def test_collect_loot_does_not_treat_grass_as_extra_blocked_tile(self) -> None:
+        node = self._build_node()
+        game_state = self._build_game_state(inventory_items=[], debris=[])
+        game_state.player_tile = Tile(10, 10)
+        grass_tile = Tile(11, 10)
+        weeds_tile = Tile(12, 10)
+        game_state.layers = {
+            "Grass": {grass_tile},
+            "Weeds": {weeds_tile},
+        }
+
+        extra_blocked_tiles = node._build_collect_extra_blocked_tiles(game_state)
+
+        self.assertNotIn(grass_tile, extra_blocked_tiles)
+        self.assertIn(weeds_tile, extra_blocked_tiles)
+
     def test_unreceivable_loot_is_skipped_until_inventory_changes(self) -> None:
         node = self._build_node()
         node.inventory_policy = InventoryPolicy()
@@ -270,9 +308,69 @@ class CollectLootNodeTest(unittest.TestCase):
         self.assertEqual(selected_tile, Tile(2, 0))
         self.assertTrue(any("优先选择当前背包可接收的掉落物" in message for message in node.collect_loot_debug_logger.messages))
 
+    def test_tree_loot_does_not_skip_long_path_when_target_can_stack(self) -> None:
+        node = self._build_node()
+        node.inventory_policy = InventoryPolicy()
+        node.positioning_controller = FakeLongPathPositioningController()
+        blackboard = AgentBlackboard()
+        blackboard.require_collect_loot = True
+        blackboard.collect_loot_owner = "Farm"
+        blackboard.collect_loot_source_tile = Tile(0, 0)
+        blackboard.collect_loot_source_type = "tree"
+        blackboard.pending_loot_tiles = [Tile(2, 0)]
+
+        wood_debris = self._build_debris(Tile(2, 0), "(O)388", "Wood")
+        wood_debris.position = SimpleNamespace(x=2 * 64.0, y=0.0)
+        game_state = self._build_game_state(
+            inventory_items=[self._build_inventory_item("(O)388", "Wood", 1)],
+            debris=[wood_debris],
+        )
+        game_state.inventory.free_slots = 0
+        game_state.inventory.max_items = 1
+        game_state.inventory.occupied_slots = 1
+        game_state.position = SimpleNamespace(x=0.0, y=0.0)
+        context = SimpleNamespace(state=game_state, executor_client=FakeExecutorClient())
+
+        status = asyncio.run(node.run(blackboard, context))
+
+        self.assertEqual(status, "RUNNING")
+        self.assertEqual(blackboard.pending_loot_tiles, [Tile(2, 0)])
+        self.assertFalse(blackboard.skipped_loot_tiles)
+        self.assertEqual(context.executor_client.commands[-1].action, StardewAction.MOVE_RIGHT)
+        self.assertTrue(any("当前背包可接收" in message for message in node.collect_loot_debug_logger.messages))
+
+    def test_restores_receivable_skipped_loot_after_inventory_recovery(self) -> None:
+        node = self._build_node()
+        node.inventory_policy = InventoryPolicy()
+        blackboard = AgentBlackboard()
+        blackboard.collect_loot_owner = "Farm"
+        blackboard.collect_loot_source_tile = Tile(43, 15)
+        blackboard.collect_loot_source_type = "tree"
+        blackboard.pending_loot_tiles = []
+        blackboard.skipped_loot_tiles = {(37, 15), (38, 16)}
+
+        game_state = self._build_game_state(
+            inventory_items=[self._build_inventory_item("(O)388", "Wood", 10)],
+            debris=[
+                self._build_debris(Tile(37, 15), "(O)388", "Wood"),
+                self._build_debris(Tile(38, 16), "(O)92", "Sap"),
+            ],
+        )
+        game_state.inventory.free_slots = 0
+        game_state.inventory.max_items = 1
+        game_state.inventory.occupied_slots = 1
+
+        node._restore_receivable_skipped_loot_tiles(blackboard, game_state)
+
+        self.assertEqual(blackboard.pending_loot_tiles, [Tile(37, 15)])
+        self.assertNotIn((37, 15), blackboard.skipped_loot_tiles)
+        self.assertIn((38, 16), blackboard.skipped_loot_tiles)
+        self.assertTrue(any("重新纳入 skipped" in message for message in node.collect_loot_debug_logger.messages))
+
     def _build_node(self) -> CollectLootNode:
         node = CollectLootNode.__new__(CollectLootNode)
         node.positioning_controller = FakePositioningController()
+        node.inventory_recovery_return_move_controller = FakePositioningController()
         node.inventory_policy = None
         node.collect_loot_debug_logger = FakeDebugLogger()
         node._started_at = None
@@ -297,6 +395,7 @@ class CollectLootNodeTest(unittest.TestCase):
             tile_size=64,
             player_size=(48, 32),
             applied_magnetic_radius=64,
+            layers={},
         )
 
     def _build_inventory_item(self, qualified_item_id: str, name: str, stack: int):
