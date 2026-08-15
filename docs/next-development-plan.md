@@ -397,9 +397,9 @@ ToolAftermathResult(
 背包满时，CollectLoot 当前遵守两条边界：
 
 - 若目标掉落物可与背包已有物品堆叠，继续执行拾取。
-- 若目标掉落物在当前背包状态下不可接收，按 `owner/location/source/item_key/inventory_signature` 做短期跳过，避免每 tick 重新开始拾取同一个无法进入背包的掉落物。
+- 若可堆叠掉落物已尽量拾取后仍有真实掉落物无法接收，应暴露 `INVENTORY_FULL_WHILE_COLLECTING` 背包恢复请求，让 `InventoryRecoveryNode` 接管；只有恢复失败后才做短期跳过，避免每 tick 重新开始拾取同一个无法进入背包的掉落物。
 
-这个短期跳过不是永久黑名单：背包变化或记录过期后应重新评估。未来高价值掉落物腾背包属于 Inventory Recovery / Planner 的职责，CollectLoot 不直接丢弃物品。后续增强重点不是重做拾取底座，而是把策略参数交给 Mining / Route / Farm 的战术 profile 控制，并实现 Inventory Recovery P1。
+`InventoryRecoveryNode` 第一版不做掉落物价值判断，而是做任务感知型背包整理：通过 `TaskInventoryPolicy` 保留当前任务工具、任务物品和可能继续产生的可堆叠掉落物，把其余任务无关物品优先存入当前场景最近箱子；箱子位置优先读取 `MapKnowledgeCache`，缓存为空才低频 `QUERY_CHESTS`。当前不跨场景找箱子；没有可用箱子时才调用 `DISCARD_INVENTORY_ITEM` 丢弃任务无关物品，并短期忽略 Agent 自己丢出的 Debris。后续增强重点不是重做拾取底座，而是验证 InventoryRecovery P1 游戏内闭环，再把策略参数交给 Mining / Route / Farm 的战术 profile 控制。
 
 #### Mining 目标类型扩展
 
@@ -759,7 +759,7 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 1. 游戏内验证 Defend P1 / Mining 战术层最小版：确认无怪物不抢占、贴脸切武器攻击、怪物堵路时不左右抽搐、威胁解除后恢复 Mining。
 2. 根据 `logs/defend_node_debug.log` 和 `logs/mining_node_debug.log` 调整威胁阈值、堵路判断、目标暂缓和提交时间。
-3. 开发 Inventory Recovery P1：当高价值掉落物因背包满无法拾取时，判断是否值得腾背包，安全丢弃明确低价值物品，并避免把 Agent 主动丢弃的物品重新捡回。
+3. 游戏内验证 InventoryRecovery P1：背包满时先捡完可堆叠掉落物，再把任务无关物品存入当前场景最近箱子；没有箱子时丢弃任务无关物品，并确认不会重新捡回 Agent 主动丢弃物。
 4. Mining 基础采矿验收：围绕 Stone、MiningNode、Collectible、BreakableContainer、Ladder 验证 MineTarget 抽象下的执行闭环。
 5. Mining P3 资源管理：在 Inventory P0 已稳定的基础上，继续补体力、Pickaxe 缺失恢复、工具借用归还和失败恢复。
 6. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层资源。

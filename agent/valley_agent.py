@@ -12,6 +12,7 @@ from agent.behavior_tree.collect_loot_node import CollectLootNode
 from agent.behavior_tree.clear_obstacle_node import ClearObstacleNode
 from agent.behavior_tree.farm_resource_check_node import FarmResourceCheckNode
 from agent.behavior_tree.farm_node import FarmNode
+from agent.behavior_tree.inventory_recovery_node import InventoryRecoveryNode
 from agent.behavior_tree.mining_node import MineNode
 from agent.behavior_tree.mining_resource_check_node import MiningResourceCheckNode
 from agent.behavior_tree.open_door_node import OpenDoorNode
@@ -53,6 +54,12 @@ class ValleyAgent:
                     node_name="CollectLoot",
                     children=[
                         CollectLootNode(),
+                    ],
+                ),
+                Sequence(
+                    node_name="InventoryRecovery",
+                    children=[
+                        InventoryRecoveryNode(),
                     ],
                 ),
                 Sequence(

@@ -10,6 +10,8 @@ from server.type import Tile
 
 
 POSITIONING_PATH_LOOKAHEAD_TILES = 8
+POSITIONING_SMOOTH_MIN_REMAINING_TILES = 6
+POSITIONING_SMOOTH_LOOKAHEAD_TILES = 5
 
 
 type PositioningStatus = Literal[
@@ -29,6 +31,9 @@ class PositioningGoal:
     require_close_to_target: bool = False
     close_edge_margin: float = 2.0
     close_edge_dead_zone: float = 4.0
+    smooth_long_path: bool = True
+    smooth_min_remaining_tiles: int = POSITIONING_SMOOTH_MIN_REMAINING_TILES
+    smooth_lookahead_tiles: int = POSITIONING_SMOOTH_LOOKAHEAD_TILES
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,7 @@ class PositioningController:
         self.move_controller = MoveController()
         self._tile_path: list[RouteTile] = []
         self._path_index = 0
+        self._locked_stand_tile: Tile | None = None
         self._last_path_blocked_debug = ""
         self._goal_key: tuple[
             tuple[tuple[int, int], ...],
@@ -59,11 +65,15 @@ class PositioningController:
             bool,
             float,
             float,
+            bool,
+            int,
+            int,
         ] | None = None
 
     def reset(self) -> None:
         self._tile_path = []
         self._path_index = 0
+        self._locked_stand_tile = None
         self._last_path_blocked_debug = ""
         self._goal_key = None
         self.move_controller.reset()
@@ -74,7 +84,9 @@ class PositioningController:
             f"path_len={len(self._tile_path)}, "
             f"path_index={self._path_index}, "
             f"path_end={self._get_path_end_tile()}, "
+            f"locked_stand={self._locked_stand_tile}, "
             f"path_blocked={self._last_path_blocked_debug}, "
+            f"path_follow={self.move_controller.get_path_follow_debug_snapshot()}, "
             f"target_edge={self.move_controller.get_target_edge_debug_snapshot()}"
         )
 
@@ -93,12 +105,16 @@ class PositioningController:
         if not candidate_stand_tiles:
             return PositioningResult(status="FAILED", reason="没有可用候选站位")
 
-        if state.player_tile in candidate_stand_tiles:
+        if self._locked_stand_tile is not None and self._locked_stand_tile not in candidate_stand_tiles:
+            self._clear_cached_path()
+
+        stand_tile = self._locked_stand_tile or state.player_tile
+        if stand_tile in candidate_stand_tiles and self._is_player_at_stand_tile(state, stand_tile):
             self._tile_path = []
             self._path_index = 0
             return self._build_arrived_result(
                 state,
-                state.player_tile,
+                stand_tile,
                 goal.tool_target_tile,
                 goal.require_close_to_target,
                 goal.close_edge_margin,
@@ -112,43 +128,72 @@ class PositioningController:
             goal.require_close_to_target,
             goal.close_edge_margin,
             goal.close_edge_dead_zone,
+            goal.smooth_long_path,
+            goal.smooth_min_remaining_tiles,
+            goal.smooth_lookahead_tiles,
         )
         if self._goal_key != goal_key:
             self._goal_key = goal_key
-            self._tile_path = []
-            self._path_index = 0
-            self.move_controller.reset()
+            self._clear_cached_path()
 
         if self._is_cached_path_blocked(state, extra_blocked_tiles, allowed_blocked_tiles):
-            self._tile_path = []
-            self._path_index = 0
-            self.move_controller.reset()
+            self._clear_cached_path()
 
         if not self._tile_path or self._path_index >= len(self._tile_path):
+            path_goal_tiles = (
+                {self._locked_stand_tile}
+                if self._locked_stand_tile is not None and self._locked_stand_tile in candidate_stand_tiles
+                else candidate_stand_tiles
+            )
             self._tile_path = self._build_path_to_stand_tiles(
                 state,
-                candidate_stand_tiles,
+                path_goal_tiles,
                 extra_blocked_tiles,
                 allowed_blocked_tiles,
             )
             self._path_index = 0
 
             if not self._tile_path:
+                self._locked_stand_tile = None
                 return PositioningResult(status="FAILED", reason="无法规划到任何候选站位")
+
+            self._locked_stand_tile = self._get_path_end_tile()
 
         command, next_path_index, is_done = self.move_controller.get_next_move_command(
             state,
             self._tile_path,
             self._path_index,
+            smooth_long_path=goal.smooth_long_path,
+            smooth_min_remaining_tiles=goal.smooth_min_remaining_tiles,
+            smooth_lookahead_tiles=goal.smooth_lookahead_tiles,
         )
         self._path_index = next_path_index
 
         if is_done:
-            stand_tile = self._get_path_end_tile()
+            stand_tile = self._locked_stand_tile or self._get_path_end_tile()
             self._tile_path = []
-            return PositioningResult(status="MOVING", stand_tile=stand_tile, reason="已走到路径末端，等待 state 确认")
+            self._path_index = 0
+            if stand_tile is None:
+                return PositioningResult(status="FAILED", reason="路径结束但缺少锁定站位")
+            return self._build_arrived_result(
+                state,
+                stand_tile,
+                goal.tool_target_tile,
+                goal.require_close_to_target,
+                goal.close_edge_margin,
+                goal.close_edge_dead_zone,
+            )
 
-        return PositioningResult(status="MOVING", command=command, stand_tile=self._get_path_end_tile())
+        return PositioningResult(status="MOVING", command=command, stand_tile=self._locked_stand_tile)
+
+    def _clear_cached_path(self) -> None:
+        self._tile_path = []
+        self._path_index = 0
+        self._locked_stand_tile = None
+        self.move_controller.reset()
+
+    def _is_player_at_stand_tile(self, state: StardewState, stand_tile: Tile) -> bool:
+        return state.player_tile == stand_tile or self.move_controller.is_player_inside_tile(state, stand_tile)
 
     def _is_cached_path_blocked(
         self,
@@ -276,6 +321,9 @@ class PositioningController:
         require_close_to_target: bool,
         close_edge_margin: float,
         close_edge_dead_zone: float,
+        smooth_long_path: bool,
+        smooth_min_remaining_tiles: int,
+        smooth_lookahead_tiles: int,
     ) -> tuple[
         tuple[tuple[int, int], ...],
         tuple[int, int] | None,
@@ -283,8 +331,21 @@ class PositioningController:
         bool,
         float,
         float,
+        bool,
+        int,
+        int,
     ]:
         stand_key = tuple(sorted((tile.x, tile.y) for tile in candidate_stand_tiles))
         target_key = None if tool_target_tile is None else (tool_target_tile.x, tool_target_tile.y)
         allowed_key = tuple(sorted((tile.x, tile.y) for tile in allowed_blocked_tiles))
-        return stand_key, target_key, allowed_key, require_close_to_target, close_edge_margin, close_edge_dead_zone
+        return (
+            stand_key,
+            target_key,
+            allowed_key,
+            require_close_to_target,
+            close_edge_margin,
+            close_edge_dead_zone,
+            smooth_long_path,
+            smooth_min_remaining_tiles,
+            smooth_lookahead_tiles,
+        )

@@ -194,8 +194,12 @@ class AgentBlackboard:
         # 延迟拾取记录：工具动作产生掉落物后，如果后续主任务路径/站位能覆盖磁吸范围，先不抢占主任务。
         self.deferred_loot_records: list[DeferredLootRecord] = []
         # 当前背包状态下无法接收的掉落物短期跳过记录。
-        # 该记录不是永久黑名单；背包变化或过期后会重新评估，未来 InventoryRecoveryNode 可接管高价值恢复。
+        # 该记录不是永久黑名单；背包变化或过期后会重新评估。
+        # 当前 InventoryRecoveryNode 会在背包满时先尝试任务感知型存箱/丢弃恢复。
         self.unreceivable_loot_records: list[UnreceivableLootRecord] = []
+        # 背包恢复会把角色临时带离掉落物现场；恢复成功后，本轮 CollectLoot
+        # 需要允许回到原掉落物区域完成拾取，不应用普通树“低成本拾取”的路径长度限制提前放弃。
+        self.collect_loot_resume_after_inventory_recovery = False
 
         # 背包风险与恢复信号
         # InventoryPolicy 只做事实判断；实际恢复由业务节点、Planner 或未来 InventoryNode 消费这些字段。

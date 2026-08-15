@@ -15,14 +15,19 @@ class MoveController:
     def __init__(self):
         self._last_primary_axis: str | None = None
         self._last_target_edge_debug: str = ""
+        self._last_path_follow_debug: str = ""
 
     def get_next_move_command(
         self,
         state: StardewState,
         tile_path: list[RouteTile],
         path_index: int,
+        smooth_long_path: bool = False,
+        smooth_min_remaining_tiles: int = 6,
+        smooth_lookahead_tiles: int = 5,
     ) -> tuple[StardewCommand, int, bool]:
         if not tile_path or path_index >= len(tile_path):
+            self._last_path_follow_debug = "mode=empty_path"
             return StardewCommand(action=StardewAction.IDLE), path_index, True
 
         next_index = path_index
@@ -30,9 +35,26 @@ class MoveController:
             next_index += 1
 
         if next_index >= len(tile_path):
+            self._last_path_follow_debug = f"mode=path_done, next_index={next_index}"
             return StardewCommand(action=StardewAction.IDLE), next_index, True
 
-        command = self.build_move_command_to_tile(state, tile_path[next_index])
+        command = None
+        remaining_tiles = len(tile_path) - next_index
+        if smooth_long_path and remaining_tiles >= smooth_min_remaining_tiles:
+            command = self._build_smooth_long_path_command(
+                state,
+                tile_path,
+                next_index,
+                smooth_lookahead_tiles,
+            )
+
+        if command is None:
+            command = self.build_move_command_to_tile(state, tile_path[next_index])
+            self._last_path_follow_debug = (
+                f"mode=tile, target={tile_path[next_index]}, next_index={next_index}, "
+                f"remaining={remaining_tiles}"
+            )
+
         return command, next_index, False
 
     def _should_advance_tile(self, state: StardewState, tile_path: list[RouteTile], path_index: int) -> bool:
@@ -120,6 +142,61 @@ class MoveController:
             return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
 
         return StardewCommand(action=StardewAction.IDLE)
+
+    def _build_smooth_long_path_command(
+        self,
+        state: StardewState,
+        tile_path: list[RouteTile],
+        path_index: int,
+        lookahead_tiles: int,
+    ) -> StardewCommand | None:
+        path_segment = tile_path[path_index : path_index + max(2, lookahead_tiles)]
+        if len(path_segment) < 2:
+            return None
+
+        first_tile = path_segment[0]
+        last_tile = path_segment[-1]
+        span_x = last_tile.x - first_tile.x
+        span_y = last_tile.y - first_tile.y
+
+        horizontal_sign = self._get_monotonic_sign([tile.x for tile in path_segment])
+        vertical_sign = self._get_monotonic_sign([tile.y for tile in path_segment])
+        horizontal_extent = max(tile.x for tile in path_segment) - min(tile.x for tile in path_segment)
+        vertical_extent = max(tile.y for tile in path_segment) - min(tile.y for tile in path_segment)
+
+        if (
+            horizontal_sign != 0
+            and horizontal_extent >= 2
+            and vertical_extent == 0
+            and abs(span_x) >= max(2, abs(span_y) * 2)
+        ):
+            self._last_primary_axis = "horizontal"
+            command = self._build_axis_move_command("horizontal", horizontal_sign)
+            self._last_path_follow_debug = (
+                f"mode=smooth_horizontal, index={path_index}, segment={self._format_path_segment(path_segment)}, "
+                f"extent=({horizontal_extent},{vertical_extent}), span=({span_x},{span_y}), command={command.action}"
+            )
+            return command
+
+        if (
+            vertical_sign != 0
+            and vertical_extent >= 2
+            and horizontal_extent == 0
+            and abs(span_y) >= max(2, abs(span_x) * 2)
+        ):
+            self._last_primary_axis = "vertical"
+            command = self._build_axis_move_command("vertical", vertical_sign)
+            self._last_path_follow_debug = (
+                f"mode=smooth_vertical, index={path_index}, segment={self._format_path_segment(path_segment)}, "
+                f"extent=({horizontal_extent},{vertical_extent}), span=({span_x},{span_y}), command={command.action}"
+            )
+            return command
+
+        self._last_path_follow_debug = (
+            f"mode=smooth_skipped, index={path_index}, segment={self._format_path_segment(path_segment)}, "
+            f"extent=({horizontal_extent},{vertical_extent}), span=({span_x},{span_y})"
+        )
+        return None
 
     def is_player_close_to_target_edge(
         self,
@@ -224,6 +301,9 @@ class MoveController:
     def get_target_edge_debug_snapshot(self) -> str:
         return self._last_target_edge_debug
 
+    def get_path_follow_debug_snapshot(self) -> str:
+        return self._last_path_follow_debug
+
     def build_face_command(self, player_tile: Tile, target_tile: Tile) -> StardewCommand:
         if target_tile.x > player_tile.x:
             return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
@@ -238,6 +318,31 @@ class MoveController:
     def reset(self) -> None:
         self._last_primary_axis = None
         self._last_target_edge_debug = ""
+        self._last_path_follow_debug = ""
+
+    def _build_axis_move_command(self, axis: str, sign: int) -> StardewCommand:
+        if axis == "horizontal":
+            if sign > 0:
+                return StardewCommand(action=StardewAction.MOVE_RIGHT, key=["d"])
+            return StardewCommand(action=StardewAction.MOVE_LEFT, key=["a"])
+
+        if sign > 0:
+            return StardewCommand(action=StardewAction.MOVE_DOWN, key=["s"])
+        return StardewCommand(action=StardewAction.MOVE_UP, key=["w"])
+
+    def _get_monotonic_sign(self, values: list[int]) -> int:
+        non_zero_deltas = [next_value - value for value, next_value in zip(values, values[1:]) if next_value != value]
+        if not non_zero_deltas:
+            return 0
+
+        first_sign = 1 if non_zero_deltas[0] > 0 else -1
+        if all((delta > 0) == (first_sign > 0) for delta in non_zero_deltas):
+            return first_sign
+
+        return 0
+
+    def _format_path_segment(self, path_segment: list[RouteTile]) -> str:
+        return "[" + ", ".join(f"({tile.x},{tile.y})" for tile in path_segment) + "]"
 
     def _build_diagonal_move_command(
         self,

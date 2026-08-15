@@ -39,6 +39,8 @@ Selector
 │   └── Defend_Node
 ├── Sequence("CollectLoot")
 │   └── CollectLootNode
+├── Sequence("InventoryRecovery")
+│   └── InventoryRecoveryNode
 ├── Sequence("Route")
 │   ├── OpenDoorNode
 │   ├── SwitchToolNode
@@ -62,7 +64,7 @@ Selector
 
 `ValleyAgent` 在主循环中先刷新 `PlayerContext.state`，再运行行为树。`Selector` 每个 tick 从左到右轮询子节点，遇到 `RUNNING` 或 `SUCCESS` 就停止本轮扫描。
 
-因此，`Guard`、`CollectLoot`、`Route`、`Chest`、`Farm`、`Mining` 和 `Think` 是顶层 Selector 下的同级候选分支。`CollectLoot` 负责工具动作后近距离自动拾取可达掉落物，不为拾取触发清障；`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+因此，`Guard`、`CollectLoot`、`InventoryRecovery`、`Route`、`Chest`、`Farm`、`Mining` 和 `Think` 是顶层 Selector 下的同级候选分支。`CollectLoot` 负责工具动作后近距离自动拾取可达掉落物，不为拾取触发清障；当背包满且可堆叠掉落物已尽量拾取后仍有真实掉落物无法接收时，`CollectLoot` 只暴露背包恢复请求并让出控制权。`InventoryRecovery` 负责任务感知型背包整理：优先在当前场景最近箱子存入任务无关物品，没有箱子时才丢弃任务无关物品，并短期忽略 Agent 自己丢出的物品，避免重新捡回。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
 
 `Route` 分支内部的职责边界：
 
@@ -248,6 +250,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/behavior_tree/`：行为树节点、黑板、玩家上下文、规划兜底和寻路控制。
 - `agent/memory/`：运行期地图知识缓存和长期记忆预留接口。
 - `agent/action/map/map.py`：`HardcodedStardewMap`，维护硬编码场景连通图和最少场景跳数候选路线枚举。
+- `agent/action/inventory/task_inventory_policy.py`：任务感知型背包策略层，判断当前任务必须保留的工具/物品、预期继续产生的可堆叠掉落物，以及可存箱/可丢弃的任务无关物品。
 - `agent/action/mining/mine_target.py`：Mining 目标抽象层，将矿井入口、梯子、Stone、MiningNode、徒手采集物和木箱/木桶统一建模为 `MineTarget`。
 - `agent/action/valley_action/AStar.py`：本地 A\* 寻路、路线动作标注和障碍代价函数。
 - `agent/action/valley_action/clearance_policy.py`：清障策略层，判断障碍是否允许清理、所需工具和清障代价；未来可接入 Agent Skill/Planner 对普通树等高价值资源的保护策略。
@@ -256,6 +259,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/action/valley_action/tool_targeting.py`：工具目标判断、`FACE_DIRECTION` 转向命令和 ToolTarget 日志格式化。
 - `agent/action/tool/tool_aftermath_service.py`：工具动作收招后的通用观察层，检查阻塞 UI、目标地块变化、目标附近掉落物和可选关键副作用，例如 Mining 破石后生成梯子。
 - `agent/behavior_tree/collect_loot_node.py`：工具动作后的近距离自动拾取节点，消费 blackboard 中的掉落物请求，复用 `PositioningController` 移动到可达拾取点。
+- `agent/behavior_tree/inventory_recovery_node.py`：背包满后的任务感知型恢复节点，优先复用 ChestNode 把任务无关物品存入当前场景最近箱子，没有箱子时通过结构化动作丢弃任务无关物品。
 - `agent/behavior_tree/tool_action_tracker.py`：跨帧跟踪工具动作开始、收招和超时，供清障、锄地、浇水等节点复用。
 - `agent/behavior_tree/refill_watering_can_node.py`：Farm 水壶补水节点，按需查询并缓存水源，复用站位控制和工具动作等待。
 - `agent/behavior_tree/mining_resource_check_node.py` / `agent/behavior_tree/mining_node.py`：Mining P0 节点，检查 Pickaxe，交互矿洞入口/梯子，必要时用镐子破坏 Stone / MiningNode 并验证进入目标矿层。
@@ -281,7 +285,8 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - 工具动作必须等待 `UsingTool` / `CanMove` 状态确认收招，并在收招后验证游戏 state；不要把 Executor 的 `SUCCESS` 当作动作完成。
 - 工具收招后的副作用观察优先复用 `ToolAftermathService`。`1.0s` 工具效果等待窗口只用于“完全没有任何预期效果或副作用”的超时兜底；目标变化、范围影响、掉落物、梯子或阻塞 UI 等 state 已出现时必须尽快推进。业务节点仍负责解释结果，例如 Mining 决定是否转向梯子，ClearObstacle 决定是否继续重试；不要把所有工具业务成功判定塞进通用服务。
 - 对 Stone、MiningNode、木箱/木桶、普通树等“破坏类目标”，掉落物登记必须以目标真实消失或明确破坏完成为前提。若工具收招后目标仍存在，说明只是受击、扣耐久或视觉碎屑阶段，不登记掉落物、不触发 CollectLoot，只按业务重试逻辑继续处理；目标消失后才扫描目标附近可拾取 `Debris` 并写入延迟拾取队列。
-- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。`CollectLootNode` 定位是低成本局部贪心拾取：优先利用当前站位、下一步工作站位和磁吸范围覆盖掉落物，尽量少移动、少停顿、不中断主任务太久；它不做全局收益规划，不为拾取触发清障，不为远距离掉落物大范围绕路。普通树掉落物会在树和残留树桩都砍完后统一拾取，树木掉落物可使用更宽的磁吸候选站位集合，避免在 A* 可达性判断前过早丢弃可行站位；仍允许部分拾取并跳过真正不可达位置。背包满时，若目标掉落物可与背包已有物品堆叠，应继续拾取；若目标掉落物在当前背包状态下不可接收，应按 `owner/location/source/item_key/inventory_signature` 登记短期跳过，避免每 tick 重复触发同一不可接收掉落物。该短期跳过不是永久黑名单，背包变化或过期后必须重新评估；未来高价值掉落物腾背包由 Inventory Recovery / Planner 接管，CollectLoot 不直接丢弃物品。若 C# Debris 提供明确 item id / name，拾取验证应优先使用背包数量变化；若只提供泛化 `RESOURCE` / `OBJECT`，则使用掉落物消失、位置变化和动态观察作为兜底。
+- 掉落物感知由 `ToolAftermathService` 记录，近距离自动拾取由 `CollectLootNode` 执行。`CollectLootNode` 定位是低成本局部贪心拾取：优先利用当前站位、下一步工作站位和磁吸范围覆盖掉落物，尽量少移动、少停顿、不中断主任务太久；它不做全局收益规划，不为拾取触发清障，不为远距离掉落物大范围绕路。普通树掉落物会在树和残留树桩都砍完后统一拾取，树木掉落物可使用更宽的磁吸候选站位集合，避免在 A* 可达性判断前过早丢弃可行站位；仍允许部分拾取并跳过真正不可达位置。背包满时，若目标掉落物可与背包已有物品堆叠，应继续拾取；若可堆叠掉落物已尽量拾取后仍有真实掉落物无法接收，应由 `CollectLootNode` 暴露 `INVENTORY_FULL_WHILE_COLLECTING` 恢复请求并让出控制权，不要在拾取节点内直接存箱或丢弃物品。若背包恢复失败，才按 `owner/location/source/item_key/inventory_signature` 登记短期跳过，避免每 tick 重复触发同一不可接收掉落物。该短期跳过不是永久黑名单，背包变化或过期后必须重新评估。若 C# Debris 提供明确 item id / name，拾取验证应优先使用背包数量变化；若只提供泛化 `RESOURCE` / `OBJECT`，则使用掉落物消失、位置变化和动态观察作为兜底。
+- `InventoryRecoveryNode` 是背包满后的任务感知型整理层，当前第一版不做掉落物价值判断。它通过 `TaskInventoryPolicy` 保留当前任务必须工具/物品，以及当前任务可能继续产生的可堆叠掉落物；其余任务无关物品优先存入当前场景最近箱子。箱子位置优先读取 `MapKnowledgeCache`，缓存为空时才低频 `QUERY_CHESTS`；第一版不跨场景找箱子。当前场景没有可用箱子时，才通过 `DISCARD_INVENTORY_ITEM` 丢弃任务无关物品；C# 端仍会保护工具/武器不被丢弃。Agent 主动丢弃的物品必须短期忽略，避免被磁吸立即捡回。
 - 节点推进应状态驱动优先；固定 tick/秒数等待只能用于短暂防抖、节流和超时兜底，不要用经验等待替代 SMAPI state 验证。
 - 水壶补水属于 Farm 分支的资源恢复能力。FarmNode 发现 `WaterLeft <= 0` 时应通过 blackboard 触发 `RefillWateringCanNode`，不要在 FarmNode 内部直接实现找水源、移动和补水。
 - 水源坐标属于低频地图知识，优先通过 C# `QUERY_WATER_SOURCES` 按需查询并写入 `MapKnowledgeCache`；不要作为每帧 state 高频字段同步。

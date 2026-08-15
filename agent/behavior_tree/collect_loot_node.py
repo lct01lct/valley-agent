@@ -67,6 +67,15 @@ class CollectLootNode(BTNode):
             return "RUNNING"
 
         self._prune_unreceivable_loot_records(blackboard, game_state)
+        if self._should_yield_to_inventory_recovery(blackboard):
+            self._pause_collect_timeout_while_waiting_inventory_recovery()
+            context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+            self.positioning_controller.reset()
+            self._log(
+                f"背包恢复请求处理中，暂停拾取并让出行为树控制权: "
+                f"context={blackboard.inventory_recovery_context}"
+            )
+            return "FAILURE"
 
         if self._started_at is None:
             self._start(blackboard, game_state)
@@ -155,6 +164,23 @@ class CollectLootNode(BTNode):
             inventory_decision = self.inventory_policy.can_accept_debris(game_state, debris)
             if not inventory_decision.can_accept:
                 recovery_hint = self.inventory_policy.build_recovery_hint(game_state, inventory_decision)
+                if blackboard.inventory_recovery_context.get("recovery_failed"):
+                    self._register_unreceivable_loot_skip(
+                        blackboard,
+                        game_state,
+                        debris,
+                        inventory_decision.reason,
+                    )
+                    self._clear_inventory_recovery_request(blackboard)
+                    context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                    self._discard_observed_loot_item_key(debris, f"背包恢复失败后跳过: {inventory_decision.reason}")
+                    self._skip_target(
+                        blackboard,
+                        target_tile,
+                        f"背包恢复失败，跳过当前不可接收掉落物: {inventory_decision.reason}",
+                    )
+                    return "RUNNING"
+
                 self._register_unreceivable_loot_skip(
                     blackboard,
                     game_state,
@@ -169,13 +195,12 @@ class CollectLootNode(BTNode):
                     recovery_hint,
                 )
                 context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
-                self._discard_observed_loot_item_key(debris, f"背包无法接收: {inventory_decision.reason}")
-                self._skip_target(
-                    blackboard,
-                    target_tile,
-                    f"背包无法接收该掉落物，跳过并继续拾取其它可接收目标: {inventory_decision.reason}",
+                self.positioning_controller.reset()
+                self._log(
+                    f"背包无法接收掉落物，暂停拾取并交给 InventoryRecovery: target={target_tile}, "
+                    f"reason={inventory_decision.reason}"
                 )
-                return "RUNNING"
+                return "FAILURE"
 
         if self._is_loot_collected_for_source(blackboard, game_state, target_tile):
             self._complete_target(blackboard, target_tile, "目标掉落物已消失")
@@ -203,7 +228,11 @@ class CollectLootNode(BTNode):
 
         if positioning_result.command is not None:
             current_path_length = self.positioning_controller.get_current_path_length()
-            if self._is_tree_collect_mode(blackboard) and current_path_length > TREE_LOOT_MAX_PATH_TILES:
+            if (
+                self._is_tree_collect_mode(blackboard)
+                and current_path_length > TREE_LOOT_MAX_PATH_TILES
+                and not blackboard.collect_loot_resume_after_inventory_recovery
+            ):
                 context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
                 self._skip_target(
                     blackboard,
@@ -224,6 +253,11 @@ class CollectLootNode(BTNode):
                 self._target_started_at = time.time()
                 self.positioning_controller.reset()
                 self._log(f"C# Executor 忙碌，重置拾取站位路径并等待下一帧: target={target_tile}")
+            elif blackboard.collect_loot_resume_after_inventory_recovery and current_path_length > TREE_LOOT_MAX_PATH_TILES:
+                self._log(
+                    f"背包恢复后返回掉落物现场，临时放宽树木拾取路径长度限制: "
+                    f"target={target_tile}, path_len={current_path_length}, max_path={TREE_LOOT_MAX_PATH_TILES}"
+                )
             return "RUNNING"
 
         if positioning_result.status == "READY":
@@ -277,6 +311,7 @@ class CollectLootNode(BTNode):
         self._started_at = time.time()
         self._sweep_pass_count = 1
         self._source_signature = self._build_source_signature(blackboard)
+        blackboard.collect_loot_resume_after_inventory_recovery = False
         self._inventory_snapshot = self._snapshot_inventory_items(game_state)
         self._observed_loot_item_keys = set()
         self._observe_visible_loot_item_keys(blackboard, game_state)
@@ -296,6 +331,7 @@ class CollectLootNode(BTNode):
         self._sweep_pass_count = 1
         self._source_signature = self._build_source_signature(blackboard)
         self._last_cluster_log_signature = None
+        blackboard.collect_loot_resume_after_inventory_recovery = False
         self._inventory_snapshot = self._snapshot_inventory_items(game_state)
         self._observed_loot_item_keys = set()
         self._observe_visible_loot_item_keys(blackboard, game_state)
@@ -307,6 +343,11 @@ class CollectLootNode(BTNode):
         )
 
     def _pause_collect_timeout_while_waiting_clear(self) -> None:
+        now = time.time()
+        self._started_at = now
+        self._target_started_at = None
+
+    def _pause_collect_timeout_while_waiting_inventory_recovery(self) -> None:
         now = time.time()
         self._started_at = now
         self._target_started_at = None
@@ -448,7 +489,9 @@ class CollectLootNode(BTNode):
         kept_records: list[UnreceivableLootRecord] = []
         removed_records: list[UnreceivableLootRecord] = []
         for record in blackboard.unreceivable_loot_records:
-            if record.expires_at <= now or record.inventory_signature != inventory_signature:
+            if record.expires_at <= now or (
+                record.inventory_signature and record.inventory_signature != inventory_signature
+            ):
                 removed_records.append(record)
                 continue
             kept_records.append(record)
@@ -497,18 +540,35 @@ class CollectLootNode(BTNode):
         for record in blackboard.unreceivable_loot_records:
             if record.item_key != item_key:
                 continue
-            if record.owner != blackboard.collect_loot_owner:
+            if record.owner is not None and record.owner != blackboard.collect_loot_owner:
                 continue
             if record.location_name != location_name:
                 continue
-            if record.source_type != source_type:
+            if record.source_type is not None and record.source_type != source_type:
                 continue
-            if self._format_tile(record.source_tile) != self._format_tile(source_tile):
+            if record.source_tile is not None and self._format_tile(record.source_tile) != self._format_tile(source_tile):
                 continue
-            if record.inventory_signature != inventory_signature:
+            if record.inventory_signature and record.inventory_signature != inventory_signature:
                 continue
             return True
         return False
+
+    def _should_yield_to_inventory_recovery(self, blackboard: AgentBlackboard) -> bool:
+        return (
+            blackboard.inventory_check_failed
+            and blackboard.inventory_failure_reason == "INVENTORY_FULL_WHILE_COLLECTING"
+            and not bool(blackboard.inventory_recovery_context.get("recovery_failed"))
+        )
+
+    def _clear_inventory_recovery_request(self, blackboard: AgentBlackboard) -> None:
+        blackboard.inventory_check_failed = False
+        blackboard.inventory_risk_level = None
+        blackboard.inventory_failure_reason = None
+        blackboard.inventory_recovery_hint = None
+        blackboard.inventory_recovery_strategy = None
+        blackboard.inventory_recovery_context = {}
+        blackboard.inventory_recovery_task = None
+        blackboard.inventory_discard_candidates = []
 
     def _finish(self, blackboard: AgentBlackboard) -> None:
         blackboard.require_collect_loot = False
@@ -517,6 +577,7 @@ class CollectLootNode(BTNode):
         blackboard.collect_loot_source_type = None
         blackboard.pending_loot_tiles = []
         blackboard.skipped_loot_tiles = set()
+        blackboard.collect_loot_resume_after_inventory_recovery = False
         self._reset()
 
     def _reset(self) -> None:
@@ -687,13 +748,40 @@ class CollectLootNode(BTNode):
 
     def _select_target_tile(self, blackboard: AgentBlackboard, game_state) -> Tile | None:
         existing_tiles = self._get_existing_requested_loot_tiles(blackboard, game_state)
-        if self._target_tile in existing_tiles:
+        acceptable_tiles = [
+            tile for tile in existing_tiles if self._can_accept_loot_tile(blackboard, game_state, tile)
+        ]
+        if self._target_tile in acceptable_tiles:
             return self._target_tile
 
         if not existing_tiles:
             return None
 
+        if acceptable_tiles:
+            selected_tile = min(acceptable_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
+            nearest_tile = min(existing_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
+            if selected_tile != nearest_tile and self._target_tile != selected_tile:
+                self._log(
+                    f"优先选择当前背包可接收的掉落物，延后不可接收目标: "
+                    f"selected={selected_tile}, nearest={nearest_tile}, "
+                    f"pending={self._format_tiles(existing_tiles)}"
+                )
+            return selected_tile
+
+        if self._target_tile in existing_tiles:
+            return self._target_tile
+
         return min(existing_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
+
+    def _can_accept_loot_tile(self, blackboard: AgentBlackboard, game_state, target_tile: Tile) -> bool:
+        if self.inventory_policy is None:
+            return True
+
+        debris = self._get_debris_for_tile(blackboard, game_state, target_tile)
+        if debris is None:
+            return True
+
+        return self.inventory_policy.can_accept_debris(game_state, debris).can_accept
 
     def _build_collect_candidate_tiles(self, blackboard: AgentBlackboard, game_state, target_tile: Tile) -> set[Tile]:
         target_debris = self._get_debris_for_tile(blackboard, game_state, target_tile)

@@ -224,6 +224,10 @@ namespace StardewMemoryExporter
                 {
                     HandleSwitchTool(pressedKeys);
                 }
+                else if (actionType.Equals("DISCARD_INVENTORY_ITEM", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleDiscardInventoryItem(packet);
+                }
                 else if (actionType.Equals("QUERY_WATER_SOURCES", StringComparison.OrdinalIgnoreCase))
                 {
                     string locationName = packet["location_name"]?.ToString() ?? Game1.currentLocation?.Name ?? "Farm";
@@ -859,6 +863,41 @@ namespace StardewMemoryExporter
             SendChestBatchTransferResponse("PUT_ITEMS_TO_CHEST", batchStatus, batchReason, locationName, chestTile, results);
         }
 
+        private void HandleDiscardInventoryItem(JObject packet)
+        {
+            ClearHeldMoveButtons();
+            if (Game1.player == null || Game1.currentLocation == null)
+            {
+                SendDiscardInventoryItemResponse("FAILURE", "PLAYER_OR_LOCATION_NOT_READY", "", "", 0, 0);
+                return;
+            }
+
+            if (Game1.player.UsingTool || !Game1.player.CanMove)
+            {
+                SendDiscardInventoryItemResponse("FAILURE", "PLAYER_BUSY", "", "", 0, 0);
+                return;
+            }
+
+            string itemName = packet["item_name"]?.ToString() ?? "";
+            string qualifiedItemId = packet["qualified_item_id"]?.ToString() ?? "";
+            int requestedCount = packet["count"]?.ToObject<int>() ?? 0;
+            if (string.IsNullOrWhiteSpace(itemName) || requestedCount <= 0)
+            {
+                SendDiscardInventoryItemResponse("FAILURE", "INVALID_ITEM_REQUEST", itemName, qualifiedItemId, requestedCount, 0);
+                return;
+            }
+
+            int discardedCount = DiscardInventoryItem(itemName, qualifiedItemId, requestedCount, out bool hasMatchingItem, out bool protectedItemMatched);
+            string status = discardedCount > 0 ? "SUCCESS" : "FAILURE";
+            string reason = "";
+            if (status != "SUCCESS")
+            {
+                reason = protectedItemMatched ? "PROTECTED_ITEM" : hasMatchingItem ? "NOTHING_DISCARDED" : "ITEM_NOT_FOUND";
+            }
+
+            SendDiscardInventoryItemResponse(status, reason, itemName, qualifiedItemId, requestedCount, discardedCount);
+        }
+
         private void HandleQueryChests(string locationName)
         {
             ClearHeldMoveButtons();
@@ -1161,6 +1200,63 @@ namespace StardewMemoryExporter
             return transferredCount;
         }
 
+        private int DiscardInventoryItem(
+            string itemName,
+            string qualifiedItemId,
+            int requestedCount,
+            out bool hasMatchingItem,
+            out bool protectedItemMatched
+        )
+        {
+            int remainingCount = requestedCount;
+            int discardedCount = 0;
+            hasMatchingItem = false;
+            protectedItemMatched = false;
+
+            for (int inventoryIndex = 0; inventoryIndex < Game1.player.Items.Count; inventoryIndex++)
+            {
+                Item inventoryItem = Game1.player.Items[inventoryIndex];
+                if (inventoryItem == null || !IsItemMatch(inventoryItem, qualifiedItemId, itemName))
+                {
+                    continue;
+                }
+
+                hasMatchingItem = true;
+                if (inventoryItem is Tool)
+                {
+                    protectedItemMatched = true;
+                    continue;
+                }
+
+                int availableCount = Math.Max(inventoryItem.Stack, 1);
+                int discardCount = Math.Min(remainingCount, availableCount);
+                if (discardCount <= 0)
+                {
+                    continue;
+                }
+
+                Item itemToDrop = inventoryItem.getOne();
+                itemToDrop.Stack = discardCount;
+                Game1.createItemDebris(itemToDrop, Game1.player.Position, Game1.player.FacingDirection, Game1.currentLocation);
+
+                inventoryItem.Stack -= discardCount;
+                discardedCount += discardCount;
+                remainingCount -= discardCount;
+
+                if (inventoryItem.Stack <= 0)
+                {
+                    Game1.player.Items[inventoryIndex] = null;
+                }
+
+                if (remainingCount <= 0)
+                {
+                    break;
+                }
+            }
+
+            return discardedCount;
+        }
+
         private bool IsItemMatch(Item item, string qualifiedItemId, string itemName)
         {
             if (!string.IsNullOrWhiteSpace(qualifiedItemId)
@@ -1250,6 +1346,30 @@ namespace StardewMemoryExporter
                 ["transferred_count"] = transferredCount,
                 ["inventory_count"] = CountInventoryItems(itemName, qualifiedItemId),
             };
+        }
+
+        private void SendDiscardInventoryItemResponse(
+            string status,
+            string reason,
+            string itemName,
+            string qualifiedItemId,
+            int requestedCount,
+            int discardedCount
+        )
+        {
+            JObject response = new JObject
+            {
+                ["status"] = status,
+                ["action"] = "DISCARD_INVENTORY_ITEM",
+                ["reason"] = reason,
+                ["item_name"] = itemName,
+                ["qualified_item_id"] = qualifiedItemId,
+                ["requested_count"] = requestedCount,
+                ["discarded_count"] = discardedCount,
+                ["inventory_count"] = CountInventoryItems(itemName, qualifiedItemId),
+            };
+
+            SendResponseToPython(response.ToString(Newtonsoft.Json.Formatting.None));
         }
 
         private JObject BuildChestContentItem(Item item)

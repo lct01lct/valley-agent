@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from agent.action.inventory.inventory_policy import InventoryPolicy
 from agent.action.valley_action.action_type import StardewAction
-from agent.behavior_tree.blackboard import AgentBlackboard
+from agent.behavior_tree.blackboard import AgentBlackboard, UnreceivableLootRecord
 from agent.behavior_tree.collect_loot_node import CollectLootNode
 from server.type import Tile
 
@@ -190,23 +190,85 @@ class CollectLootNodeTest(unittest.TestCase):
 
         first_status = asyncio.run(node.run(blackboard, context))
 
-        self.assertEqual(first_status, "RUNNING")
+        self.assertEqual(first_status, "FAILURE")
+        self.assertTrue(blackboard.inventory_check_failed)
+        self.assertEqual(blackboard.inventory_failure_reason, "INVENTORY_FULL_WHILE_COLLECTING")
         self.assertEqual(len(blackboard.unreceivable_loot_records), 1)
-        self.assertFalse(blackboard.pending_loot_tiles)
+        self.assertEqual(blackboard.pending_loot_tiles, [Tile(21, 23)])
         self.assertTrue(any("登记不可接收掉落物短期跳过" in message for message in node.collect_loot_debug_logger.messages))
 
-        blackboard.pending_loot_tiles = [Tile(21, 23)]
         second_status = asyncio.run(node.run(blackboard, context))
 
-        self.assertEqual(second_status, "SUCCESS")
-        self.assertFalse(blackboard.require_collect_loot)
-        self.assertTrue(any("不可接收的 pending 掉落物" in message for message in node.collect_loot_debug_logger.messages))
+        self.assertEqual(second_status, "FAILURE")
+        self.assertTrue(blackboard.inventory_check_failed)
+        self.assertTrue(any("背包恢复请求处理中" in message for message in node.collect_loot_debug_logger.messages))
 
         game_state.inventory.items.append(self._build_inventory_item("(O)709", "Hardwood", 1))
         node._prune_unreceivable_loot_records(blackboard, game_state)
 
         self.assertFalse(blackboard.unreceivable_loot_records)
         self.assertTrue(any("清理不可接收掉落物短期跳过记录" in message for message in node.collect_loot_debug_logger.messages))
+
+    def test_global_agent_dropped_loot_skip_survives_inventory_signature_change_until_expired(self) -> None:
+        node = self._build_node()
+        blackboard = AgentBlackboard()
+        blackboard.collect_loot_owner = "Mining"
+        blackboard.collect_loot_source_tile = Tile(3, 3)
+        blackboard.collect_loot_source_type = "Stone"
+        game_state = self._build_game_state(
+            inventory_items=[self._build_inventory_item("(O)390", "Stone", 1)],
+            debris=[],
+        )
+        game_state.location_name = "Farm"
+        blackboard.unreceivable_loot_records.append(
+            UnreceivableLootRecord(
+                owner=None,
+                location_name="Farm",
+                source_tile=None,
+                source_type=None,
+                item_key="qid:(O)92",
+                inventory_signature=(),
+                expires_at=time.time() + 5.0,
+                reason="Agent 主动丢弃",
+            )
+        )
+
+        game_state.inventory.items.append(self._build_inventory_item("(O)388", "Wood", 1))
+        node._prune_unreceivable_loot_records(blackboard, game_state)
+
+        self.assertEqual(len(blackboard.unreceivable_loot_records), 1)
+        self.assertTrue(
+            node._is_unreceivable_loot_skipped(
+                blackboard,
+                game_state,
+                self._build_debris(Tile(4, 4), "(O)92", "Sap"),
+            )
+        )
+
+    def test_selects_stackable_loot_before_unreceivable_loot_when_inventory_is_full(self) -> None:
+        node = self._build_node()
+        node.inventory_policy = InventoryPolicy()
+        blackboard = AgentBlackboard()
+        blackboard.collect_loot_owner = "Farm"
+        blackboard.collect_loot_source_tile = Tile(0, 0)
+        blackboard.collect_loot_source_type = "tree"
+        blackboard.pending_loot_tiles = [Tile(1, 0), Tile(2, 0)]
+
+        game_state = self._build_game_state(
+            inventory_items=[self._build_inventory_item("(O)388", "Wood", 1)],
+            debris=[
+                self._build_debris(Tile(1, 0), "(O)92", "Sap"),
+                self._build_debris(Tile(2, 0), "(O)388", "Wood"),
+            ],
+        )
+        game_state.inventory.free_slots = 0
+        game_state.inventory.max_items = 1
+        game_state.inventory.occupied_slots = 1
+
+        selected_tile = node._select_target_tile(blackboard, game_state)
+
+        self.assertEqual(selected_tile, Tile(2, 0))
+        self.assertTrue(any("优先选择当前背包可接收的掉落物" in message for message in node.collect_loot_debug_logger.messages))
 
     def _build_node(self) -> CollectLootNode:
         node = CollectLootNode.__new__(CollectLootNode)

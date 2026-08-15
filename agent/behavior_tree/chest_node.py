@@ -336,7 +336,7 @@ class ChestNode(BTNode):
             game_state,
             PositioningGoal(
                 candidate_stand_tiles=self._get_cardinal_neighbor_tiles(chest_tile),
-                tool_target_tile=chest_tile,
+                tool_target_tile=None,
                 extra_blocked_tiles={chest_tile},
             ),
         )
