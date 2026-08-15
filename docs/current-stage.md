@@ -50,6 +50,8 @@ Selector
 │   └── RouteNode
 ├── Sequence("Chest")
 │   └── ChestNode
+├── Sequence("Inventory")
+│   └── InventoryNode
 ├── Sequence("Farm")
 │   ├── FarmResourceCheckNode
 │   ├── SwitchToolNode
@@ -64,7 +66,7 @@ Selector
     └── LLM_Node
 ```
 
-`CollectLoot`、`InventoryRecovery`、`Route`、`Chest`、`Farm`、`Mining` 和 `Think` 分支都是顶层 Selector 下的候选分支。`CollectLoot` 在工具动作后消费 blackboard 中的近距离掉落物请求，只捡可达目标，不为拾取触发清障；当背包满且仍有真实掉落物无法接收时，它暴露恢复请求并让出控制权。`InventoryRecovery` 负责当前场景内的任务感知型背包整理，优先存箱，必要时丢弃任务无关物品。`Think` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
+`CollectLoot`、`InventoryRecovery`、`Route`、`Chest`、`Inventory`、`Farm`、`Mining` 和 `Think` 分支都是顶层 Selector 下的候选分支。`CollectLoot` 在工具动作后消费 blackboard 中的近距离掉落物请求，只捡可达目标，不为拾取触发清障；当背包满且仍有真实掉落物无法接收时，它暴露恢复请求并让出控制权。`InventoryRecovery` 负责当前场景内的任务感知型背包整理，优先存箱，必要时丢弃任务无关物品。`Inventory` 负责主动背包目标状态，例如基于已观察箱子内容填满背包，或尽量把箱子内容转入背包。`Think` 分支当前内部只有 `LLM_Node`，作为最后兜底：没有可执行计划时才生成模拟计划；有计划时让出控制权给前面的确定性节点。
 
 `AgentBlackboard` 是跨节点通讯和调度状态中心，当前至少保存：
 
@@ -271,6 +273,7 @@ Chest P2/P3 约定：
 | Chest P0 指定取物 | 基础接入 | ChestNode 可用 `QUERY_CHESTS` 校验/恢复唯一箱子坐标，站到箱子旁，调用 SMAPI `TAKE_ITEMS_FROM_CHEST` 结构化动作批量取物，并用背包 state 验证数量增加 |
 | Chest P1 指定存物 | 基础接入 | ChestNode 可调用 SMAPI `PUT_ITEMS_TO_CHEST` 结构化动作批量存物，支持部分存入并用背包 state 验证数量减少 |
 | Chest P2/P3 箱子知识 | 基础接入 | 支持打开箱子后 `QUERY_CHEST_CONTENT` 写入缓存、`SCAN` 逐箱交互式查看，以及 `TAKE` 不指定 chest_tile 时基于缓存/按需查看自动选箱；自动取物会跳过已知新鲜且不匹配的箱子 |
+| Inventory 主动目标状态 | P0 接入，待游戏内验证 | 新增 `InventoryTask` / `InventoryNode` / `InventoryFillPolicy`；当前支持 `FILL_INVENTORY` 从当前场景已观察箱子内容中选择任务无关新物品填满背包，以及 `EMPTY_CHEST_TO_INVENTORY` 尽量把指定或最近箱子内容转入背包；执行层复用 ChestNode 的 SCAN/QUERY/TAKE |
 | 地图知识缓存 | 基础接入 | `MapKnowledgeCache` 已作为 PlayerContext 的运行期地图知识缓存；当前用于水源和箱子位置/内容，采集物等机会记忆后续接入 |
 | Farm P1 批处理 | 基础接入，暂停扩展 | 支持区域规划、清障、锄地、播种、浇水的阶段流水线；后续资源管理和复杂失败恢复先转 Mining 模块验证 |
 | Mining P0/P2 基础循环 | 基础接入，持续实测 | 已新增 MiningTask、MiningResourceCheckNode、MineNode、矿洞 state/action 协议和 mock 数据；当前已围绕找梯子、机会资源、工具后处理和掉落物拾取持续迭代 |
@@ -315,6 +318,7 @@ Chest P2/P3 约定：
 - 高层场景连通图仍是硬编码数据，建筑入口和特殊路线需要持续校验；错误边会导致在当前场景查找不存在的目标 warp。
 - SMAPI 快照仍缺少完成自主游玩需要的时间、金钱、体力、工具栏、背包、菜单、天气、NPC 和动作结果等状态。
 - Farm P1 目前还是基础闭环，已加入基础资源检查，但仍缺少体力检查、背包容量检查、区域选择策略、作物阶段识别、失败后的二次规划和完整验收测试。
+- Inventory 主动目标状态 P0 已接入，但仍需要游戏内验证：`FILL_INVENTORY` 应先观察箱子内容，再选择任务无关新物品填满背包；`EMPTY_CHEST_TO_INVENTORY` 应在容量允许时尽量清空目标箱子，容量不足时暴露失败而不是误报完整成功。
 - InventoryRecovery P1 已接入第一版任务感知型背包整理，但仍需要游戏内验证：背包满时应先捡完可堆叠掉落物，再把任务无关物品存入当前场景最近箱子；没有箱子时才丢弃任务无关物品，并避免重新捡回主动丢弃物。
 - Python 动作枚举比 C# Executor 实际支持的动作更多，两侧能力尚未完全对齐。
 - `server/valley_server.py` 仍含旧 demo 逻辑，不要继续在 demo 路径上扩展正式能力。
@@ -327,11 +331,12 @@ Chest P2/P3 约定：
 4. 继续实测 Defend P1 / Mining 战术层最小版：确认无怪物时不抢占 Mining、怪物贴脸时切武器攻击、怪物堵住梯子/目标路径时不再左右抽搐，怪物死亡/消失后能在安全条件下拾取掉落物。
 5. 根据 `logs/defend_node_debug.log`、`logs/collect_loot_debug.log` 和 `logs/mining_node_debug.log` 调整威胁阈值、堵路判断、目标暂缓策略和战斗后拾取范围。
 6. 扩展 Mining 基础采矿验收：确认 Stone / MiningNode / Collectible / BreakableContainer / Ladder 在当前 MineTarget 抽象下能稳定执行和验证。
-7. 游戏内验证 InventoryRecovery P1：背包满时，先确认可堆叠掉落物已被 CollectLoot 尽量拾取，再验证任务无关物品会优先存入当前场景最近箱子；没有箱子时才丢弃任务无关物品，并且不会立刻捡回自己丢出的 Debris。
-8. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
-9. 在 Mining 中继续实现资源管理底座：体力检查、Pickaxe 缺失恢复、工具借用归还和失败恢复。
-10. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
-11. 增加确定性 Route/Farm/Mining 场景测试与游戏内端到端验收。
+7. 游戏内验证 Inventory 主动目标状态 P0：运行 `TASK_MOCK_DATA["FARM_P1_4"]`，确认它会先准备 Farm 资源，再通过 `FILL_INVENTORY` 观察箱子并填满背包，最后执行 3x3 Farm 任务；另用 `TASK_MOCK_DATA["INVENTORY_P0_1"]` 验证尽量清空最近箱子到背包。
+8. 游戏内验证 InventoryRecovery P1：背包满时，先确认可堆叠掉落物已被 CollectLoot 尽量拾取，再验证任务无关物品会优先存入当前场景最近箱子；没有箱子时才丢弃任务无关物品，并且不会立刻捡回自己丢出的 Debris。
+9. 继续维护 Route/A*、SwitchToolNode、ClearObstacleNode 和 ToolActionTracker，保证 Mining/Farm/Route 共用底座稳定。
+10. 在 Mining 中继续实现资源管理底座：体力检查、Pickaxe 缺失恢复、工具借用归还和失败恢复。
+11. 将 Mining 中验证稳定的资源检查和失败恢复能力回流 Farm。
+12. 增加确定性 Route/Farm/Mining/Inventory 场景测试与游戏内端到端验收。
 
 ## 第一阶段验收标准
 

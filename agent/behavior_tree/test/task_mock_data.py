@@ -5,6 +5,7 @@ from server.type import Tile
 from agent.base_task import BaseTask
 from agent.behavior_tree.chest_node import ChestItemRequest, ChestTask
 from agent.behavior_tree.farm_node import FarmTask
+from agent.behavior_tree.inventory_node import InventoryTask
 from agent.behavior_tree.mining_node import MiningTask
 from agent.behavior_tree.route_node import RouteTask
 
@@ -26,6 +27,8 @@ TASK_MOCK_DATA: Dict[
         "FARM_P1_1",
         "FARM_P1_2",
         "FARM_P1_3",
+        "FARM_P1_4",
+        "INVENTORY_P0_1",
         "MINING_P0_1",
         "MINING_P0_2",
     ],
@@ -197,6 +200,60 @@ TASK_MOCK_DATA: Dict[
             area_origin=Tile(43, 15),
             area_width=3,
             area_height=3,
+        ),
+    ],
+    "FARM_P1_4": [  # Farm P1/P4：先用 Inventory 高层能力填满背包，再执行 3x3 种植浇水。
+        RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
+        ChestTask(
+            task_type="CHEST",
+            desc="确保 Farm 任务需要的基础工具在背包中",
+            chest_action="TAKE",
+            target_loc="Farm",
+            chest_tile=None,
+            items=[
+                ChestItemRequest(item_name="Axe", count=1),
+                ChestItemRequest(item_name="Hoe", count=1),
+                ChestItemRequest(item_name="Pickaxe", count=1),
+                ChestItemRequest(item_name="Scythe", count=1),
+                ChestItemRequest(item_name="Watering Can", count=1),
+            ],
+        ),
+        ChestTask(
+            task_type="CHEST",
+            desc="确保 Farm 任务需要的防风草种子在背包中",
+            chest_action="TAKE",
+            target_loc="Farm",
+            chest_tile=None,
+            items=[
+                ChestItemRequest(item_name="Parsnip Seeds", count=9, qualified_item_id="(O)472"),
+            ],
+        ),
+        InventoryTask(
+            task_type="INVENTORY",
+            desc="从已观察到的 Farm 箱子中取任务无关物品，直到背包填满",
+            inventory_action="FILL_INVENTORY",
+            target_loc="Farm",
+        ),
+        FarmTask(
+            task_type="FARM",
+            desc="背包满状态下，在 (43, 15) 开始规划 3x3 区域种植防风草并浇水",
+            farm_action="PLANT_AND_WATER",
+            target_loc="Farm",
+            seed_name="Parsnip Seeds",
+            count=9,
+            area_origin=Tile(43, 15),
+            area_width=3,
+            area_height=3,
+        ),
+    ],
+    "INVENTORY_P0_1": [  # Inventory P0：打开最近或指定箱子，尽量把箱子内容转入背包。
+        RouteTask(task_type="ROUTE", desc="前往农场", target_loc="Farm"),
+        InventoryTask(
+            task_type="INVENTORY",
+            desc="把最近箱子里的东西尽量装进背包",
+            inventory_action="EMPTY_CHEST_TO_INVENTORY",
+            target_loc="Farm",
+            chest_tile=None,
         ),
     ],
     "MINING_P0_1": [  # Mining P0：前往矿洞，进入第一层，找到/挖出梯子并进入第二层。

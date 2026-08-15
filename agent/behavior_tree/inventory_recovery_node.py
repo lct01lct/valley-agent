@@ -53,6 +53,8 @@ class InventoryRecoveryNode(BTNode):
         if self._started_at is None:
             self._start(blackboard, game_state)
 
+        self._record_departure_path_breadcrumb(blackboard, game_state)
+
         if self._started_at is not None and time.time() - self._started_at > INVENTORY_RECOVERY_TIMEOUT_SECONDS:
             context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             self._mark_recovery_failed(
@@ -97,11 +99,28 @@ class InventoryRecoveryNode(BTNode):
 
     def _start(self, blackboard: AgentBlackboard, game_state: StardewState) -> None:
         self._started_at = time.time()
+        if not blackboard.inventory_recovery_departure_path:
+            blackboard.inventory_recovery_departure_path = [game_state.player_tile]
+        residual_record = blackboard.collect_loot_residual_record
+        if residual_record is not None and not residual_record.inventory_recovery_departure_path:
+            residual_record.inventory_recovery_departure_path = list(blackboard.inventory_recovery_departure_path)
         self._log(
             f"开始背包恢复: location={game_state.location_name}, player={game_state.player_tile}, "
-            f"context={blackboard.inventory_recovery_context}"
+            f"context={blackboard.inventory_recovery_context}, "
+            f"departure_path={self._format_tile_list(blackboard.inventory_recovery_departure_path)}"
         )
         print("\n🎒 [InventoryRecoveryNode] 背包已满，准备整理任务无关物品。")
+
+    def _record_departure_path_breadcrumb(self, blackboard: AgentBlackboard, game_state: StardewState) -> None:
+        current_tile = game_state.player_tile
+        if not blackboard.inventory_recovery_departure_path:
+            blackboard.inventory_recovery_departure_path = [current_tile]
+        elif blackboard.inventory_recovery_departure_path[-1] != current_tile:
+            blackboard.inventory_recovery_departure_path.append(current_tile)
+
+        residual_record = blackboard.collect_loot_residual_record
+        if residual_record is not None:
+            residual_record.inventory_recovery_departure_path = list(blackboard.inventory_recovery_departure_path)
 
     async def _run_store_to_chest(
         self,
@@ -288,7 +307,13 @@ class InventoryRecoveryNode(BTNode):
         self._log(f"登记 Agent 主动丢弃物短期忽略: item_key={item_key}, location={game_state.location_name}")
 
     def _complete_recovery(self, blackboard: AgentBlackboard) -> None:
-        self._log("背包恢复完成，交回 CollectLoot 继续处理原掉落物请求")
+        residual_record = blackboard.collect_loot_residual_record
+        if residual_record is not None:
+            residual_record.inventory_recovery_departure_path = list(blackboard.inventory_recovery_departure_path)
+        self._log(
+            f"背包恢复完成，交回 CollectLoot 继续处理原掉落物请求: "
+            f"departure_path={self._format_tile_list(blackboard.inventory_recovery_departure_path)}"
+        )
         blackboard.inventory_check_failed = False
         blackboard.inventory_risk_level = None
         blackboard.inventory_failure_reason = None
@@ -340,6 +365,9 @@ class InventoryRecoveryNode(BTNode):
             f"protected_qids={sorted(task_context.protected_qualified_item_ids)}, "
             f"expected_drops={sorted(task_context.expected_stackable_drop_qualified_item_ids)}"
         )
+
+    def _format_tile_list(self, tiles: list[Tile]) -> str:
+        return "[" + ", ".join(f"({tile.x}, {tile.y})" for tile in tiles) + "]"
 
     def _build_inventory_signature(self, game_state: StardewState) -> tuple[tuple[str, int], ...]:
         counts: dict[str, int] = {}

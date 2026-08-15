@@ -1,11 +1,13 @@
 import time
 
 from agent.action.inventory.inventory_policy import InventoryPolicy, InventoryRecoveryHint
+from agent.action.valley_action.AStar import RouteTile
 from agent.action.valley_action.action_type import StardewAction, StardewCommand
 from agent.action.valley_action.clearance_policy import get_obstacle_type_at_tile, normalize_obstacle_type
+from agent.action.valley_action.move_controller import MoveController
 from agent.action.valley_action.positioning_controller import PositioningController, PositioningGoal
 from agent.behavior_tree.behavior_tree import BTNode, NodeStatus
-from agent.behavior_tree.blackboard import AgentBlackboard, UnreceivableLootRecord
+from agent.behavior_tree.blackboard import AgentBlackboard, ResidualLootRecord, UnreceivableLootRecord
 from agent.behavior_tree.collect_loot_debug_logger import CollectLootDebugLogger
 from agent.behavior_tree.player_context import PlayerContext
 from agent.behavior_tree.tool_selection import has_tool_area_tree1_risk, select_required_tool_for_obstacle
@@ -25,23 +27,26 @@ WEEDS_LOOT_COLLECT_RADIUS_TILES = 3
 STONE_LOOT_COLLECT_RADIUS_TILES = 4
 LOOT_COLLECT_STAND_SEARCH_RADIUS_TILES = 3
 LOOT_RELOCATE_SEARCH_RADIUS_TILES = 6
+LOOT_SOURCE_RETURN_RADIUS_TILES = 3
 LOOT_CLEARABLE_OBSTACLE_TYPES = {"grass", "weeds", "twig", "stone"}
 TREE_LOOT_MAX_PATH_TILES = 12
 LOOT_MAGNETIC_STALL_SECONDS = 0.25
 LOOT_POSITION_PROGRESS_EPSILON = 1.0
 UNRECEIVABLE_LOOT_SKIP_SECONDS = 5.0
+INVENTORY_RECOVERY_RETURN_ARRIVAL_RADIUS_TILES = 1
 
 
 class CollectLootNode(BTNode):
     """
     工具动作后的近距离自动拾取节点。
 
-    本节点只处理已有掉落物请求，不主动制造新任务，也不为拾取触发清障。
-    树的掉落物允许部分拾取，无法到达的掉落物会被跳过并记录日志。
+    本节点只处理已有掉落物请求，不主动制造新任务。
+    掉落物路径被局部障碍阻塞时，可通过黑板转交 ClearObstacleNode 清障后继续拾取。
     """
 
     def __init__(self) -> None:
         self.positioning_controller = PositioningController()
+        self.inventory_recovery_return_move_controller = MoveController()
         self.inventory_policy = InventoryPolicy()
         self.collect_loot_debug_logger = CollectLootDebugLogger()
         self._started_at: float | None = None
@@ -56,6 +61,9 @@ class CollectLootNode(BTNode):
         self._last_magnetic_player_position: tuple[float, float] | None = None
         self._last_magnetic_debris_position: tuple[float, float] | None = None
         self._magnetic_stall_started_at: float | None = None
+        self._returning_to_loot_source_after_inventory_recovery = False
+        self._inventory_recovery_return_path: list[RouteTile] = []
+        self._inventory_recovery_return_path_index = 0
 
     async def run(self, blackboard: AgentBlackboard, context: PlayerContext) -> NodeStatus:
         if not blackboard.require_collect_loot:
@@ -69,7 +77,6 @@ class CollectLootNode(BTNode):
         self._prune_unreceivable_loot_records(blackboard, game_state)
         if self._should_yield_to_inventory_recovery(blackboard):
             self._pause_collect_timeout_while_waiting_inventory_recovery()
-            context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
             self.positioning_controller.reset()
             self._log(
                 f"背包恢复请求处理中，暂停拾取并让出行为树控制权: "
@@ -145,6 +152,9 @@ class CollectLootNode(BTNode):
             self._finish(blackboard)
             return "SUCCESS"
 
+        if self._return_to_residual_loot_after_inventory_recovery(blackboard, context, game_state):
+            return "RUNNING"
+
         target_tile = self._select_target_tile(blackboard, game_state)
         if target_tile is None:
             self._log(
@@ -181,6 +191,22 @@ class CollectLootNode(BTNode):
                     )
                     return "RUNNING"
 
+                receivable_target_tile = self._select_receivable_alternative_target(
+                    blackboard,
+                    game_state,
+                    target_tile,
+                )
+                if receivable_target_tile is not None:
+                    self._target_tile = None
+                    self._target_started_at = None
+                    self.positioning_controller.reset()
+                    self._log(
+                        f"当前掉落物暂不可接收，先拾取同来源中仍可接收的掉落物: "
+                        f"blocked_target={target_tile}, next_target={receivable_target_tile}, "
+                        f"reason={inventory_decision.reason}"
+                    )
+                    return "RUNNING"
+
                 self._register_unreceivable_loot_skip(
                     blackboard,
                     game_state,
@@ -213,14 +239,51 @@ class CollectLootNode(BTNode):
             self._skip_target(blackboard, target_tile, "单个掉落物拾取超时")
             return "RUNNING"
 
+        if self._is_target_in_magnetic_range(blackboard, game_state, target_tile):
+            if debris is not None and self._is_magnetic_pickup_stalled(game_state, debris):
+                context.executor_client.send_command(StardewCommand(action=StardewAction.IDLE))
+                self.positioning_controller.reset()
+                if self._request_clear_obstacle_for_loot_path(
+                    blackboard,
+                    context,
+                    game_state,
+                    target_tile,
+                    allow_when_in_magnetic_range=True,
+                ):
+                    self._log(
+                        f"掉落物虽在磁吸范围内但已停滞，尝试转交清障后再拾取: target={target_tile}, "
+                        f"source={blackboard.collect_loot_source_tile}, source_type={blackboard.collect_loot_source_type}"
+                    )
+                    return "FAILURE"
+
+                self._skip_target(
+                    blackboard,
+                    target_tile,
+                    "已在磁吸范围内但人物/掉落物没有有效变化，且没有可清障碍可处理",
+                )
+                return "RUNNING"
+
+            command = self._build_move_command_to_debris_center(blackboard, game_state, target_tile)
+            response = context.executor_client.send_command(command)
+            self._mark_target_covered(
+                target_tile,
+                game_state,
+                f"无需重新规划站位，已在磁吸范围内继续贴近等待 state 消失: "
+                f"command={command.action}, response={response}",
+            )
+            return "RUNNING"
+
         positioning_result = self.positioning_controller.tick(
             game_state,
             PositioningGoal(
                 candidate_stand_tiles=self._build_collect_candidate_tiles(blackboard, game_state, target_tile),
                 tool_target_tile=None,
+                extra_blocked_tiles=self._build_collect_extra_blocked_tiles(game_state),
             ),
         )
         if positioning_result.status == "FAILED":
+            if self._move_to_loose_tree_loot_stand(blackboard, context, game_state, target_tile):
+                return "RUNNING"
             if self._request_clear_obstacle_for_loot_path(blackboard, context, game_state, target_tile):
                 return "FAILURE"
             self._skip_target(blackboard, target_tile, f"无法规划到掉落物附近: reason={positioning_result.reason}")
@@ -312,6 +375,8 @@ class CollectLootNode(BTNode):
         self._sweep_pass_count = 1
         self._source_signature = self._build_source_signature(blackboard)
         blackboard.collect_loot_resume_after_inventory_recovery = False
+        blackboard.collect_loot_residual_record = None
+        self._returning_to_loot_source_after_inventory_recovery = False
         self._inventory_snapshot = self._snapshot_inventory_items(game_state)
         self._observed_loot_item_keys = set()
         self._observe_visible_loot_item_keys(blackboard, game_state)
@@ -332,6 +397,8 @@ class CollectLootNode(BTNode):
         self._source_signature = self._build_source_signature(blackboard)
         self._last_cluster_log_signature = None
         blackboard.collect_loot_resume_after_inventory_recovery = False
+        blackboard.collect_loot_residual_record = None
+        self._returning_to_loot_source_after_inventory_recovery = False
         self._inventory_snapshot = self._snapshot_inventory_items(game_state)
         self._observed_loot_item_keys = set()
         self._observe_visible_loot_item_keys(blackboard, game_state)
@@ -432,6 +499,8 @@ class CollectLootNode(BTNode):
             }
             for candidate in recovery_hint.discard_candidates
         ]
+        blackboard.inventory_recovery_departure_path = [game_state.player_tile]
+        self._register_residual_loot_record(blackboard, game_state, target_tile)
         blackboard.inventory_recovery_context = {
             "owner": blackboard.collect_loot_owner,
             "source_tile": self._format_tile(blackboard.collect_loot_source_tile),
@@ -449,6 +518,48 @@ class CollectLootNode(BTNode):
             f"reason={reason}, strategy={recovery_hint.strategy}, hint={recovery_hint.reason}, "
             f"discard_candidates={blackboard.inventory_discard_candidates}, "
             f"context={blackboard.inventory_recovery_context}"
+        )
+
+    def _register_residual_loot_record(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        recovery_target_tile: Tile,
+    ) -> None:
+        source_tile = blackboard.collect_loot_source_tile
+        observed_item_keys = set(self._observed_loot_item_keys)
+        remaining_tiles: list[Tile] = []
+        seen_tiles: set[Tile] = set()
+        for debris in self._get_observed_debris_for_current_source(blackboard, game_state):
+            item_key = self._build_debris_item_key(debris)
+            if item_key is not None:
+                observed_item_keys.add(item_key)
+            if debris.tile in seen_tiles:
+                continue
+            seen_tiles.add(debris.tile)
+            remaining_tiles.append(debris.tile)
+
+        for tile in blackboard.pending_loot_tiles:
+            if tile in seen_tiles:
+                continue
+            seen_tiles.add(tile)
+            remaining_tiles.append(tile)
+
+        blackboard.collect_loot_residual_record = ResidualLootRecord(
+            owner=blackboard.collect_loot_owner,
+            location_name=str(getattr(game_state, "location_name", "") or ""),
+            source_tile=source_tile,
+            source_type=blackboard.collect_loot_source_type,
+            observed_item_keys=observed_item_keys,
+            remaining_tiles=remaining_tiles,
+            recovery_target_tile=recovery_target_tile,
+            created_at=time.time(),
+        )
+        self._log(
+            f"记录背包恢复后的残留掉落物上下文: owner={blackboard.collect_loot_owner}, "
+            f"source={source_tile}, source_type={blackboard.collect_loot_source_type}, "
+            f"recovery_target={recovery_target_tile}, observed_item_keys={sorted(observed_item_keys)}, "
+            f"remaining={self._format_tiles(remaining_tiles)}"
         )
 
     def _register_unreceivable_loot_skip(
@@ -578,6 +689,8 @@ class CollectLootNode(BTNode):
         blackboard.pending_loot_tiles = []
         blackboard.skipped_loot_tiles = set()
         blackboard.collect_loot_resume_after_inventory_recovery = False
+        blackboard.collect_loot_residual_record = None
+        blackboard.inventory_recovery_departure_path = []
         self._reset()
 
     def _reset(self) -> None:
@@ -593,7 +706,11 @@ class CollectLootNode(BTNode):
         self._last_magnetic_player_position = None
         self._last_magnetic_debris_position = None
         self._magnetic_stall_started_at = None
+        self._returning_to_loot_source_after_inventory_recovery = False
+        self._inventory_recovery_return_path = []
+        self._inventory_recovery_return_path_index = 0
         self.positioning_controller.reset()
+        self.inventory_recovery_return_move_controller.reset()
 
     def _refresh_pending_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> None:
         self._remove_unreceivable_pending_loot_tiles(blackboard, game_state)
@@ -617,6 +734,311 @@ class CollectLootNode(BTNode):
             f"old={self._format_tiles(old_tiles)}, "
             f"current={self._format_tiles(current_tiles)}"
         )
+
+    def _return_to_residual_loot_after_inventory_recovery(
+        self,
+        blackboard: AgentBlackboard,
+        context: PlayerContext,
+        game_state,
+    ) -> bool:
+        source_tile = blackboard.collect_loot_source_tile
+        if source_tile is None:
+            self._returning_to_loot_source_after_inventory_recovery = False
+            return False
+        if not blackboard.collect_loot_resume_after_inventory_recovery:
+            self._returning_to_loot_source_after_inventory_recovery = False
+            return False
+        if not self._is_tree_collect_mode(blackboard):
+            self._returning_to_loot_source_after_inventory_recovery = False
+            return False
+
+        if self._return_along_inventory_recovery_departure_path(blackboard, context, game_state):
+            return True
+
+        candidate_tiles, return_target_desc = self._build_inventory_recovery_return_candidate_tiles(
+            blackboard,
+            game_state,
+            source_tile,
+        )
+        if not candidate_tiles:
+            self._returning_to_loot_source_after_inventory_recovery = False
+            return False
+
+        should_start_return = not self._is_player_near_any_tile(
+            game_state.player_tile,
+            candidate_tiles,
+            LOOT_RELOCATE_SEARCH_RADIUS_TILES,
+        )
+        if not self._returning_to_loot_source_after_inventory_recovery and not should_start_return:
+            return False
+
+        if not self._returning_to_loot_source_after_inventory_recovery:
+            self._returning_to_loot_source_after_inventory_recovery = True
+            self.positioning_controller.reset()
+            self._log(
+                f"背包恢复后开始返回残留掉落物区域: "
+                f"source={source_tile}, target={return_target_desc}, player={game_state.player_tile}, "
+                f"nearest_distance={self._nearest_tile_distance(game_state.player_tile, candidate_tiles)}"
+            )
+
+        positioning_result = self.positioning_controller.tick(
+            game_state,
+            PositioningGoal(
+                candidate_stand_tiles=candidate_tiles,
+                tool_target_tile=None,
+                extra_blocked_tiles=self._build_collect_extra_blocked_tiles(game_state),
+            ),
+        )
+        if positioning_result.status == "FAILED":
+            self._log(
+                f"背包恢复后返回残留掉落物区域失败，继续尝试具体掉落物站位: "
+                f"source={source_tile}, target={return_target_desc}, player={game_state.player_tile}, "
+                f"reason={positioning_result.reason}"
+            )
+            self._returning_to_loot_source_after_inventory_recovery = False
+            self.positioning_controller.reset()
+            return False
+
+        if positioning_result.command is None:
+            self._restore_residual_loot_record_after_recovery(blackboard, game_state)
+            self._log(
+                f"背包恢复后已回到残留掉落物区域，继续刷新并拾取残留: "
+                f"source={source_tile}, target={return_target_desc}, player={game_state.player_tile}, "
+                f"status={positioning_result.status}"
+            )
+            self._returning_to_loot_source_after_inventory_recovery = False
+            self.positioning_controller.reset()
+            return False
+
+        response = context.executor_client.send_command(positioning_result.command)
+        self._log(
+            f"背包恢复后先返回残留掉落物区域: source={source_tile}, target={return_target_desc}, "
+            f"command={positioning_result.command.action}, response={response}, "
+            f"stand_tile={positioning_result.stand_tile}, player={game_state.player_tile}, "
+            f"positioning={self.positioning_controller.get_debug_snapshot()}"
+        )
+        if response == "BUSY":
+            self.positioning_controller.reset()
+        return True
+
+    def _return_along_inventory_recovery_departure_path(
+        self,
+        blackboard: AgentBlackboard,
+        context: PlayerContext,
+        game_state,
+    ) -> bool:
+        residual_record = blackboard.collect_loot_residual_record
+        raw_path = (
+            residual_record.inventory_recovery_departure_path
+            if residual_record is not None and residual_record.inventory_recovery_departure_path
+            else blackboard.inventory_recovery_departure_path
+        )
+        if len(raw_path) < 2:
+            return False
+
+        departure_path = self._dedupe_consecutive_tiles(raw_path)
+        if not departure_path:
+            return False
+
+        return_anchor = departure_path[0]
+        if self._tile_distance(game_state.player_tile, return_anchor) <= INVENTORY_RECOVERY_RETURN_ARRIVAL_RADIUS_TILES:
+            self._restore_residual_loot_record_after_recovery(blackboard, game_state)
+            self._log(
+                f"背包恢复后已沿原路回到离场区域，继续拾取残留: "
+                f"anchor={return_anchor}, player={game_state.player_tile}, "
+                f"recorded_path_len={len(departure_path)}"
+            )
+            self._clear_inventory_recovery_return_path()
+            blackboard.inventory_recovery_departure_path = []
+            if residual_record is not None:
+                residual_record.inventory_recovery_departure_path = []
+            self._returning_to_loot_source_after_inventory_recovery = False
+            return False
+
+        if not self._inventory_recovery_return_path:
+            reverse_path = list(reversed(departure_path))
+            self._inventory_recovery_return_path = [
+                RouteTile(tile.x, tile.y, "walk")
+                for tile in reverse_path
+            ]
+            self._inventory_recovery_return_path_index = 0
+            self.inventory_recovery_return_move_controller.reset()
+            self.positioning_controller.reset()
+            self._returning_to_loot_source_after_inventory_recovery = True
+            self._log(
+                f"背包恢复后沿存箱路径原路返回: "
+                f"anchor={return_anchor}, player={game_state.player_tile}, "
+                f"path_len={len(self._inventory_recovery_return_path)}, "
+                f"path={self._format_tiles(departure_path)}"
+            )
+
+        command, next_path_index, is_done = self.inventory_recovery_return_move_controller.get_next_move_command(
+            game_state,
+            self._inventory_recovery_return_path,
+            self._inventory_recovery_return_path_index,
+            smooth_long_path=True,
+        )
+        self._inventory_recovery_return_path_index = next_path_index
+
+        if is_done or command.action == StardewAction.IDLE:
+            self._restore_residual_loot_record_after_recovery(blackboard, game_state)
+            self._log(
+                f"背包恢复后原路返回路径完成，继续刷新并拾取残留: "
+                f"anchor={return_anchor}, player={game_state.player_tile}, "
+                f"path_index={self._inventory_recovery_return_path_index}, "
+                f"path_len={len(self._inventory_recovery_return_path)}"
+            )
+            self._clear_inventory_recovery_return_path()
+            blackboard.inventory_recovery_departure_path = []
+            if residual_record is not None:
+                residual_record.inventory_recovery_departure_path = []
+            self._returning_to_loot_source_after_inventory_recovery = False
+            return False
+
+        response = context.executor_client.send_command(command)
+        self._log(
+            f"背包恢复后沿存箱路径返回: anchor={return_anchor}, command={command.action}, "
+            f"response={response}, player={game_state.player_tile}, "
+            f"path_index={self._inventory_recovery_return_path_index}, "
+            f"path_len={len(self._inventory_recovery_return_path)}, "
+            f"follow={self.inventory_recovery_return_move_controller.get_path_follow_debug_snapshot()}"
+        )
+        if response == "BUSY":
+            self._clear_inventory_recovery_return_path()
+        return True
+
+    def _clear_inventory_recovery_return_path(self) -> None:
+        self._inventory_recovery_return_path = []
+        self._inventory_recovery_return_path_index = 0
+        self.inventory_recovery_return_move_controller.reset()
+
+    def _dedupe_consecutive_tiles(self, tiles: list[Tile]) -> list[Tile]:
+        deduped_tiles: list[Tile] = []
+        for tile in tiles:
+            if deduped_tiles and deduped_tiles[-1] == tile:
+                continue
+            deduped_tiles.append(tile)
+        return deduped_tiles
+
+    def _build_inventory_recovery_return_candidate_tiles(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        source_tile: Tile,
+    ) -> tuple[set[Tile], str]:
+        """
+        背包恢复会把角色带离掉落物现场。恢复后的第一目标应先回到 source
+        附近，再用最新 state 和物品身份重新定位残留掉落物；不要在箱子旁
+        直接对旧掉落物 tile 做远距离精确站位 A*。
+        """
+        residual_record = blackboard.collect_loot_residual_record
+        if residual_record is not None and self._residual_record_matches_current_source(blackboard, game_state):
+            candidate_tiles = self._build_loot_source_return_candidate_tiles(source_tile)
+            return (
+                candidate_tiles,
+                f"residual_source={source_tile}, recorded={self._format_tiles(residual_record.remaining_tiles)}, "
+                f"item_keys={sorted(residual_record.observed_item_keys)}",
+            )
+
+        recovery_target_tile = self._get_inventory_recovery_context_target_tile(blackboard)
+        if recovery_target_tile is not None:
+            return (
+                self._build_loot_source_return_candidate_tiles(recovery_target_tile),
+                f"recovery_target={recovery_target_tile}",
+            )
+
+        return (
+            self._build_loot_source_return_candidate_tiles(source_tile),
+            f"fallback_source={source_tile}",
+        )
+
+    def _restore_residual_loot_record_after_recovery(self, blackboard: AgentBlackboard, game_state) -> None:
+        residual_record = blackboard.collect_loot_residual_record
+        if residual_record is None:
+            return
+        if not self._residual_record_matches_current_source(blackboard, game_state):
+            return
+
+        self._observed_loot_item_keys.update(residual_record.observed_item_keys)
+        latest_tiles = self._get_residual_loot_tiles_from_latest_state(blackboard, game_state, residual_record)
+        if latest_tiles:
+            blackboard.pending_loot_tiles = latest_tiles
+            self._target_tile = None
+            self._target_started_at = None
+            self._last_cluster_log_signature = None
+            self._log(
+                f"背包恢复后按残留记录重定位掉落物: source={residual_record.source_tile}, "
+                f"recorded={self._format_tiles(residual_record.remaining_tiles)}, "
+                f"latest={self._format_tiles(latest_tiles)}, item_keys={sorted(residual_record.observed_item_keys)}"
+            )
+        else:
+            self._log(
+                f"背包恢复后回到 source 附近，但未再看到记录中的残留掉落物: "
+                f"source={residual_record.source_tile}, recorded={self._format_tiles(residual_record.remaining_tiles)}, "
+                f"item_keys={sorted(residual_record.observed_item_keys)}"
+            )
+        blackboard.collect_loot_residual_record = None
+
+    def _get_residual_loot_tiles_from_latest_state(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        residual_record: ResidualLootRecord,
+    ) -> list[Tile]:
+        source_tile = residual_record.source_tile
+        if source_tile is None:
+            return []
+
+        radius = self._get_dynamic_collect_radius(blackboard)
+        loot_tiles: list[Tile] = []
+        seen_tiles: set[Tile] = set()
+        for debris in getattr(game_state, "debris", []):
+            if not self._is_collectible_debris_for_source(blackboard, debris):
+                continue
+            item_key = self._build_debris_item_key(debris)
+            if residual_record.observed_item_keys and item_key not in residual_record.observed_item_keys:
+                continue
+            if self._is_unreceivable_loot_skipped(blackboard, game_state, debris):
+                continue
+            if not self._is_tile_in_dynamic_loot_radius(source_tile, debris.tile, radius):
+                continue
+            if debris.tile in seen_tiles:
+                continue
+            seen_tiles.add(debris.tile)
+            loot_tiles.append(debris.tile)
+
+        return sorted(loot_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
+
+    def _residual_record_matches_current_source(self, blackboard: AgentBlackboard, game_state) -> bool:
+        residual_record = blackboard.collect_loot_residual_record
+        if residual_record is None:
+            return False
+        if residual_record.owner != blackboard.collect_loot_owner:
+            return False
+        if residual_record.source_type != blackboard.collect_loot_source_type:
+            return False
+        if residual_record.source_tile != blackboard.collect_loot_source_tile:
+            return False
+        location_name = str(getattr(game_state, "location_name", "") or "")
+        return residual_record.location_name == location_name
+
+    def _get_inventory_recovery_context_target_tile(self, blackboard: AgentBlackboard) -> Tile | None:
+        raw_target_tile = blackboard.inventory_recovery_context.get("target_tile")
+        if (
+            isinstance(raw_target_tile, tuple)
+            and len(raw_target_tile) == 2
+            and isinstance(raw_target_tile[0], int)
+            and isinstance(raw_target_tile[1], int)
+        ):
+            return Tile(raw_target_tile[0], raw_target_tile[1])
+        return None
+
+    def _build_loot_source_return_candidate_tiles(self, source_tile: Tile) -> set[Tile]:
+        candidate_tiles: set[Tile] = set()
+        for dx in range(-LOOT_SOURCE_RETURN_RADIUS_TILES, LOOT_SOURCE_RETURN_RADIUS_TILES + 1):
+            for dy in range(-LOOT_SOURCE_RETURN_RADIUS_TILES, LOOT_SOURCE_RETURN_RADIUS_TILES + 1):
+                candidate_tiles.add(Tile(source_tile.x + dx, source_tile.y + dy))
+        return candidate_tiles
 
     def _remove_absent_loot_tiles(self, blackboard: AgentBlackboard, game_state) -> None:
         existing_tiles = set(self._get_existing_requested_loot_tiles(blackboard, game_state))
@@ -783,6 +1205,22 @@ class CollectLootNode(BTNode):
 
         return self.inventory_policy.can_accept_debris(game_state, debris).can_accept
 
+    def _select_receivable_alternative_target(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        blocked_target_tile: Tile,
+    ) -> Tile | None:
+        receivable_tiles = [
+            tile
+            for tile in self._get_existing_requested_loot_tiles(blackboard, game_state)
+            if tile != blocked_target_tile and self._can_accept_loot_tile(blackboard, game_state, tile)
+        ]
+        if not receivable_tiles:
+            return None
+
+        return min(receivable_tiles, key=lambda tile: self._tile_distance(game_state.player_tile, tile))
+
     def _build_collect_candidate_tiles(self, blackboard: AgentBlackboard, game_state, target_tile: Tile) -> set[Tile]:
         target_debris = self._get_debris_for_tile(blackboard, game_state, target_tile)
         if target_debris is None:
@@ -843,6 +1281,117 @@ class CollectLootNode(BTNode):
         candidate_tiles = set(best_candidates)
         self._log_cluster_candidate_once(target_tile, cluster_tiles, candidate_tiles, best_cover_count, game_state)
         return candidate_tiles or {target_tile}
+
+    def _move_to_loose_tree_loot_stand(
+        self,
+        blackboard: AgentBlackboard,
+        context: PlayerContext,
+        game_state,
+        target_tile: Tile,
+    ) -> bool:
+        if not self._is_tree_collect_mode(blackboard):
+            return False
+
+        candidate_tiles = self._build_loose_tree_loot_candidate_tiles(blackboard, game_state, target_tile)
+        if not candidate_tiles:
+            return False
+
+        positioning_result = self.positioning_controller.tick(
+            game_state,
+            PositioningGoal(
+                candidate_stand_tiles=candidate_tiles,
+                tool_target_tile=None,
+                extra_blocked_tiles=self._build_collect_extra_blocked_tiles(game_state),
+            ),
+        )
+        if positioning_result.status == "FAILED":
+            self._log(
+                f"树木掉落物宽松靠近站位也不可达，准备按原逻辑跳过: "
+                f"target={target_tile}, player={game_state.player_tile}, reason={positioning_result.reason}, "
+                f"candidates={self._format_tiles(candidate_tiles)}"
+            )
+            self.positioning_controller.reset()
+            return False
+
+        if positioning_result.command is None:
+            self._log(
+                f"已到达树木掉落物宽松靠近站位，但仍未进入磁吸范围，交回精确拾取失败流程: "
+                f"target={target_tile}, stand_tile={positioning_result.stand_tile}, player={game_state.player_tile}"
+            )
+            self.positioning_controller.reset()
+            return False
+
+        response = context.executor_client.send_command(positioning_result.command)
+        self._log(
+            f"精确磁吸站位不可达，先靠近树木掉落物聚类: "
+            f"target={target_tile}, command={positioning_result.command.action}, response={response}, "
+            f"stand_tile={positioning_result.stand_tile}, player={game_state.player_tile}, "
+            f"positioning={self.positioning_controller.get_debug_snapshot()}"
+        )
+        if response == "BUSY":
+            self.positioning_controller.reset()
+        return True
+
+    def _build_loose_tree_loot_candidate_tiles(
+        self,
+        blackboard: AgentBlackboard,
+        game_state,
+        target_tile: Tile,
+        include_source_tile: bool = True,
+    ) -> set[Tile]:
+        cluster_tiles = self._build_loot_cluster(blackboard, game_state, target_tile)
+        source_tile = blackboard.collect_loot_source_tile
+        if include_source_tile and source_tile is not None:
+            cluster_tiles = [*cluster_tiles, source_tile]
+
+        min_x = min(tile.x for tile in cluster_tiles) - LOOT_SOURCE_RETURN_RADIUS_TILES
+        max_x = max(tile.x for tile in cluster_tiles) + LOOT_SOURCE_RETURN_RADIUS_TILES
+        min_y = min(tile.y for tile in cluster_tiles) - LOOT_SOURCE_RETURN_RADIUS_TILES
+        max_y = max(tile.y for tile in cluster_tiles) + LOOT_SOURCE_RETURN_RADIUS_TILES
+        cluster_center_x = sum(tile.x for tile in cluster_tiles) / len(cluster_tiles)
+        cluster_center_y = sum(tile.y for tile in cluster_tiles) / len(cluster_tiles)
+        scored_tiles: list[tuple[float, float, int, int, int, Tile]] = []
+
+        for x in range(min_x, max_x + 1):
+            for y in range(min_y, max_y + 1):
+                candidate_tile = Tile(x, y)
+                distance_to_cluster = min(self._tile_distance(candidate_tile, tile) for tile in cluster_tiles)
+                if distance_to_cluster > LOOT_SOURCE_RETURN_RADIUS_TILES:
+                    continue
+
+                center_distance = abs(candidate_tile.x - cluster_center_x) + abs(candidate_tile.y - cluster_center_y)
+                player_distance = self._tile_distance(game_state.player_tile, candidate_tile)
+                scored_tiles.append(
+                    (
+                        distance_to_cluster,
+                        center_distance,
+                        player_distance,
+                        candidate_tile.x,
+                        candidate_tile.y,
+                        candidate_tile,
+                    )
+                )
+
+        scored_tiles.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]))
+        return {tile for *_scores, tile in scored_tiles[:TREE_LOOT_CLUSTER_MAX_STAND_CANDIDATES]}
+
+    def _build_collect_extra_blocked_tiles(self, game_state) -> set[Tile]:
+        """
+        拾取路径只负责“靠近并磁吸”，不应该把玩家推到可清障碍物上。
+
+        Route/Farm 可以在业务阶段显式请求清障；CollectLoot 这里只把当前
+        state 已知的轻量清障碍物作为额外阻塞交给 PositioningController，
+        让站位路径优先绕开它们。若真的无路可走，再走现有的失败/轻量清障流程。
+        """
+        extra_blocked_tiles: set[Tile] = set()
+        for layer_name, layer_tiles in game_state.layers.items():
+            normalized_layer_name = normalize_obstacle_type(layer_name)
+            if normalized_layer_name not in LOOT_CLEARABLE_OBSTACLE_TYPES:
+                continue
+            extra_blocked_tiles.update(layer_tiles)
+
+        extra_blocked_tiles.discard(game_state.player_tile)
+        return extra_blocked_tiles
 
     def _get_max_stand_candidates_for_collect_mode(self, blackboard: AgentBlackboard) -> int:
         if self._is_tree_collect_mode(blackboard):
@@ -1120,14 +1669,15 @@ class CollectLootNode(BTNode):
         context: PlayerContext,
         game_state,
         target_tile: Tile,
+        allow_when_in_magnetic_range: bool = False,
     ) -> bool:
         owner = blackboard.collect_loot_owner
         if owner not in ("Route", "Farm"):
             return False
-        if self._is_tree_collect_mode(blackboard):
-            self._skip_target(blackboard, target_tile, "树木掉落物拾取不触发清障；磁吸候选站位不可达")
-            return False
-        if self._is_target_in_magnetic_range(blackboard, game_state, target_tile, should_log=False):
+        if (
+            not allow_when_in_magnetic_range
+            and self._is_target_in_magnetic_range(blackboard, game_state, target_tile, should_log=False)
+        ):
             self._mark_target_covered(target_tile, game_state, "已在磁吸范围内，不为拾取触发清障")
             return False
 
@@ -1291,6 +1841,14 @@ class CollectLootNode(BTNode):
 
     def _tile_chebyshev_distance(self, start_tile: Tile, end_tile: Tile) -> int:
         return max(abs(start_tile.x - end_tile.x), abs(start_tile.y - end_tile.y))
+
+    def _is_player_near_any_tile(self, player_tile: Tile, candidate_tiles: set[Tile], max_distance: int) -> bool:
+        return any(self._tile_chebyshev_distance(player_tile, candidate_tile) <= max_distance for candidate_tile in candidate_tiles)
+
+    def _nearest_tile_distance(self, player_tile: Tile, candidate_tiles: set[Tile]) -> int | None:
+        if not candidate_tiles:
+            return None
+        return min(self._tile_chebyshev_distance(player_tile, candidate_tile) for candidate_tile in candidate_tiles)
 
     def _format_tiles(self, tiles: list[Tile]) -> str:
         return str([(tile.x, tile.y) for tile in tiles])

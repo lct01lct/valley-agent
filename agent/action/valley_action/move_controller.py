@@ -170,6 +170,13 @@ class MoveController:
             and vertical_extent == 0
             and abs(span_x) >= max(2, abs(span_y) * 2)
         ):
+            if not self._is_player_aligned_with_smooth_segment(state, first_tile, "horizontal"):
+                self._last_path_follow_debug = (
+                    f"mode=smooth_horizontal_wait_alignment, index={path_index}, "
+                    f"segment={self._format_path_segment(path_segment)}, player={state.player_tile}"
+                )
+                return None
+
             self._last_primary_axis = "horizontal"
             command = self._build_axis_move_command("horizontal", horizontal_sign)
             self._last_path_follow_debug = (
@@ -184,6 +191,13 @@ class MoveController:
             and horizontal_extent == 0
             and abs(span_y) >= max(2, abs(span_x) * 2)
         ):
+            if not self._is_player_aligned_with_smooth_segment(state, first_tile, "vertical"):
+                self._last_path_follow_debug = (
+                    f"mode=smooth_vertical_wait_alignment, index={path_index}, "
+                    f"segment={self._format_path_segment(path_segment)}, player={state.player_tile}"
+                )
+                return None
+
             self._last_primary_axis = "vertical"
             command = self._build_axis_move_command("vertical", vertical_sign)
             self._last_path_follow_debug = (
@@ -197,6 +211,18 @@ class MoveController:
             f"extent=({horizontal_extent},{vertical_extent}), span=({span_x},{span_y})"
         )
         return None
+
+    def _is_player_aligned_with_smooth_segment(
+        self,
+        state: StardewState,
+        first_tile: Tile,
+        axis: str,
+    ) -> bool:
+        if axis == "horizontal":
+            return state.player_tile.y == first_tile.y
+        if axis == "vertical":
+            return state.player_tile.x == first_tile.x
+        return False
 
     def is_player_close_to_target_edge(
         self,

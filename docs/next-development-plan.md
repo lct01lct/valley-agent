@@ -635,6 +635,34 @@ ChestTask 不指定 chest_tile -> 查缓存 -> 缓存缺失时逐个打开箱子
 - 跨场景搜索策略：由 Planner/LLM 基于记忆生成候选场景，不放入 ChestNode。
 - 箱子内容查询可接入长期记忆，并在新一天、移动箱子、破坏箱子等事件中处理失效。
 
+#### Inventory P0：主动背包目标状态
+
+目标：
+
+```text
+用户自然语言目标
+    -> LLM/Planner 生成 InventoryTask
+    -> InventoryNode 基于 state 和箱子知识选择策略
+    -> 复用 ChestNode 的 SCAN / QUERY / TAKE 执行
+    -> 通过背包或箱子状态验证目标
+```
+
+当前已基础接入：
+
+- `InventoryTask` 新增 `FILL_INVENTORY`：从当前场景已观察箱子内容中选择任务无关、非工具、能占新格的物品，直到 `state.inventory.FreeSlots == 0`。
+- `InventoryTask` 新增 `EMPTY_CHEST_TO_INVENTORY`：指定或未指定箱子时，尽量把目标箱子内容转入背包；背包容量不足时不误报完整成功。
+- `InventoryNode` 不直接操作 C# 箱子协议，而是临时复用 `ChestNode` 执行 `SCAN`、`QUERY` 和 `TAKE`。
+- `InventoryFillPolicy` 负责从 `ChestContentKnowledge` 中选择候选物品；它只做策略判断，不移动、不开箱、不发命令。
+- 新增 mock：`FARM_P1_4` 用于验证“先准备 Farm 资源 -> 填满背包 -> 执行 3x3 Farm”；`INVENTORY_P0_1` 用于验证“把最近箱子内容尽量装进背包”。
+
+当前边界：
+
+- 第一版只处理当前 `target_loc` 场景，不跨场景找箱子。
+- `FILL_INVENTORY` 不硬编码箱子物品；缓存缺失时必须先打开箱子观察。
+- `FILL_INVENTORY` 第一版优先选择背包中不存在的新物品类型来占格，不追求价值最优。
+- `EMPTY_CHEST_TO_INVENTORY` 受背包容量限制；如果背包满但箱子还没空，应交给后续背包整理或 Planner 恢复。
+- 未来可把 `InventoryTask` 扩展为 `STORE_IRRELEVANT_ITEMS`、`PREPARE_FOR_TASK`、`RESTOCK_FROM_CHEST` 等更通用能力。
+
 #### Chest P4：Farm 缺资源恢复联动
 
 目标：
@@ -759,10 +787,11 @@ Farm 后续开发依赖这些基础能力继续稳定：
 
 1. 游戏内验证 Defend P1 / Mining 战术层最小版：确认无怪物不抢占、贴脸切武器攻击、怪物堵路时不左右抽搐、威胁解除后恢复 Mining。
 2. 根据 `logs/defend_node_debug.log` 和 `logs/mining_node_debug.log` 调整威胁阈值、堵路判断、目标暂缓和提交时间。
-3. 游戏内验证 InventoryRecovery P1：背包满时先捡完可堆叠掉落物，再把任务无关物品存入当前场景最近箱子；没有箱子时丢弃任务无关物品，并确认不会重新捡回 Agent 主动丢弃物。
-4. Mining 基础采矿验收：围绕 Stone、MiningNode、Collectible、BreakableContainer、Ladder 验证 MineTarget 抽象下的执行闭环。
-5. Mining P3 资源管理：在 Inventory P0 已稳定的基础上，继续补体力、Pickaxe 缺失恢复、工具借用归还和失败恢复。
-6. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层资源。
-7. Mining P5 记忆接入：记录矿洞中遇到的资源、箱子和危险区域。
-8. 将 Mining 中稳定的资源管理和失败恢复能力回流 Farm。
-9. 再恢复 Farm 未来任务：Daily Water、Harvest、Replant、区域规划策略和 Farm 日程化。
+3. 游戏内验证 Inventory 主动目标状态 P0：`FARM_P1_4` 和 `INVENTORY_P0_1`。
+4. 游戏内验证 InventoryRecovery P1：背包满时先捡完可堆叠掉落物，再把任务无关物品存入当前场景最近箱子；没有箱子时丢弃任务无关物品，并确认不会重新捡回 Agent 主动丢弃物。
+5. Mining 基础采矿验收：围绕 Stone、MiningNode、Collectible、BreakableContainer、Ladder 验证 MineTarget 抽象下的执行闭环。
+6. Mining P3 资源管理：在 Inventory P0 已稳定的基础上，继续补体力、Pickaxe 缺失恢复、工具借用归还和失败恢复。
+7. Mining P4 楼层策略：目标层数、是否下楼、是否继续采当前层资源。
+8. Mining P5 记忆接入：记录矿洞中遇到的资源、箱子和危险区域。
+9. 将 Mining 中稳定的资源管理和失败恢复能力回流 Farm。
+10. 再恢复 Farm 未来任务：Daily Water、Harvest、Replant、区域规划策略和 Farm 日程化。

@@ -5,7 +5,17 @@ from agent.action.valley_action.action_type import StardewCommand
 from agent.memory.map_knowledge_cache import MapKnowledgeCache
 from server.valley_server import StardewExecutorClient, StardewObserverClient, StardewState
 
-type Player_Mode = Literal["Guard", "Route", "Chest", "Farm", "Mining", "Think", "CollectLoot", "InventoryRecovery"]
+type Player_Mode = Literal[
+    "Guard",
+    "Route",
+    "Chest",
+    "Inventory",
+    "Farm",
+    "Mining",
+    "Think",
+    "CollectLoot",
+    "InventoryRecovery",
+]
 
 
 class PlayerContext:

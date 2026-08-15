@@ -726,7 +726,8 @@ class ChestNode(BTNode):
                 context,
                 blackboard,
                 current_task,
-                f"逐箱打开查看后仍未找到满足取物需求的箱子: items={self._format_item_requests(current_task.items)}",
+                f"逐箱打开查看后仍未找到满足取物需求的箱子: "
+                f"items={self._format_item_requests(self._get_take_search_item_requests(game_state, current_task))}",
             )
             return "SUCCESS"
 
@@ -740,11 +741,13 @@ class ChestNode(BTNode):
         if content_result != "READY":
             return content_result
 
-        if self._does_opened_chest_content_satisfy_requests(context, current_task, chest_tile):
+        search_item_requests = self._get_take_search_item_requests(game_state, current_task)
+        if self._does_opened_chest_content_satisfy_requests(context, current_task, chest_tile, search_item_requests):
             print(f"\n📦 [ChestNode] 打开查看后找到目标箱子: chest={chest_tile}")
             self._log(
                 f"打开查看后找到目标箱子，准备取物: chest={chest_tile}, "
-                f"items={self._format_item_requests(current_task.items)}"
+                f"items={self._format_item_requests(search_item_requests)}, "
+                f"original_items={self._format_item_requests(current_task.items)}"
             )
             self._transfer_chest_items(context, blackboard, game_state, current_task, chest_tile)
             return "RUNNING"
@@ -755,7 +758,8 @@ class ChestNode(BTNode):
         self._log(
             f"当前箱子不满足取物需求，关闭后继续查找: chest={chest_tile}, "
             f"progress={self._scan_index}/{len(self._scan_chest_tiles)}, "
-            f"items={self._format_item_requests(current_task.items)}"
+            f"items={self._format_item_requests(search_item_requests)}, "
+            f"original_items={self._format_item_requests(current_task.items)}"
         )
         return "RUNNING"
 
@@ -801,6 +805,7 @@ class ChestNode(BTNode):
         stale_matching_tiles: list[Tile] = []
         stale_fallback_tiles: list[Tile] = []
         skipped_fresh_tiles: list[Tile] = []
+        search_item_requests = self._get_take_search_item_requests(game_state, current_task)
 
         for chest in chests:
             chest_tile = chest.tile
@@ -814,20 +819,21 @@ class ChestNode(BTNode):
                 continue
 
             if not cached_content.is_stale:
-                if self._does_cached_chest_content_satisfy_requests(cached_content, current_task.items):
+                if self._does_cached_chest_content_satisfy_requests(cached_content, search_item_requests):
                     self._scan_chest_tiles = [chest_tile]
                     self._scan_index = 0
                     self._scanned_chest_count = 0
                     self._log(
                         f"TAKE 搜索队列命中已知新鲜缓存: chest={chest_tile}, "
-                        f"items={self._format_item_requests(current_task.items)}"
+                        f"items={self._format_item_requests(search_item_requests)}, "
+                        f"original_items={self._format_item_requests(current_task.items)}"
                     )
                     return True
 
                 skipped_fresh_tiles.append(chest_tile)
                 continue
 
-            if self._does_cached_chest_content_satisfy_requests(cached_content, current_task.items):
+            if self._does_cached_chest_content_satisfy_requests(cached_content, search_item_requests):
                 stale_matching_tiles.append(chest_tile)
             else:
                 stale_fallback_tiles.append(chest_tile)
@@ -851,7 +857,8 @@ class ChestNode(BTNode):
 
         self._log(
             f"准备按需搜索箱子: location={current_task.target_loc}, "
-            f"items={self._format_item_requests(current_task.items)}, "
+            f"items={self._format_item_requests(search_item_requests)}, "
+            f"original_items={self._format_item_requests(current_task.items)}, "
             f"queue={self._format_tile_list(self._scan_chest_tiles)}, "
             f"unknown={self._format_tile_list(unknown_tiles)}, "
             f"stale_matching={self._format_tile_list(stale_matching_tiles)}, "
@@ -869,7 +876,7 @@ class ChestNode(BTNode):
             blackboard,
             current_task,
             f"已知箱子缓存均不包含目标物品，且没有未知箱子可查看: "
-            f"items={self._format_item_requests(current_task.items)}",
+            f"items={self._format_item_requests(search_item_requests)}",
         )
         return False
 
@@ -954,9 +961,13 @@ class ChestNode(BTNode):
         game_state: StardewState,
         current_task: ChestTask,
     ) -> Tile | None:
+        search_item_requests = self._get_take_search_item_requests(game_state, current_task)
+        if not search_item_requests:
+            return None
+
         cached_matches = context.map_knowledge_cache.find_chests_containing_items(
             current_task.target_loc,
-            current_task.items,
+            search_item_requests,
             player_tile=game_state.player_tile,
         )
         if not cached_matches:
@@ -968,13 +979,16 @@ class ChestNode(BTNode):
         context: PlayerContext,
         current_task: ChestTask,
         chest_tile: Tile,
+        item_requests: list[ChestItemRequest],
     ) -> bool:
         chest_content = context.map_knowledge_cache.get_chest_content(current_task.target_loc, chest_tile)
         if chest_content is None:
             return False
+        if not item_requests:
+            return True
         matched_chests = context.map_knowledge_cache.find_chests_containing_items(
             current_task.target_loc,
-            current_task.items,
+            item_requests,
             player_tile=chest_tile,
         )
         return any(matched_chest.tile == chest_tile for matched_chest in matched_chests)
@@ -1416,6 +1430,29 @@ class ChestNode(BTNode):
                 )
             )
         return transfer_item_requests
+
+    def _get_take_search_item_requests(
+        self,
+        game_state: StardewState,
+        current_task: ChestTask,
+    ) -> list[ChestItemRequest]:
+        if current_task.chest_action != "TAKE":
+            return current_task.items
+
+        search_item_requests: list[ChestItemRequest] = []
+        for item_request in current_task.items:
+            current_count = self._count_inventory_item(game_state, item_request)
+            missing_count = item_request.count - current_count
+            if missing_count <= 0:
+                continue
+            search_item_requests.append(
+                ChestItemRequest(
+                    item_name=item_request.item_name,
+                    qualified_item_id=item_request.qualified_item_id,
+                    count=missing_count,
+                )
+            )
+        return search_item_requests
 
     def _has_any_put_item_in_inventory(self, game_state: StardewState, current_task: ChestTask) -> bool:
         return any(self._count_inventory_item(game_state, item_request) > 0 for item_request in current_task.items)

@@ -154,6 +154,42 @@ class UnreceivableLootRecord:
         )
 
 
+class ResidualLootRecord:
+    def __init__(
+        self,
+        owner: str | None,
+        location_name: str,
+        source_tile: Tile | None,
+        source_type: str | None,
+        observed_item_keys: set[str],
+        remaining_tiles: list[Tile],
+        recovery_target_tile: Tile | None,
+        created_at: float,
+    ) -> None:
+        self.owner = owner
+        self.location_name = location_name
+        self.source_tile = source_tile
+        self.source_type = source_type
+        self.observed_item_keys = observed_item_keys
+        self.remaining_tiles = remaining_tiles
+        self.recovery_target_tile = recovery_target_tile
+        self.created_at = created_at
+        # 背包恢复会临时离开掉落物现场。InventoryRecoveryNode 在去箱子的过程中
+        # 记录经过的 tile，恢复后 CollectLootNode 优先沿反向路径回到现场，
+        # 避免重新求宽泛返回区域时误触发不相关清障。
+        self.inventory_recovery_departure_path: list[Tile] = []
+
+    @property
+    def key(self) -> tuple[str | None, str, int | None, int | None, str | None]:
+        return (
+            self.owner,
+            self.location_name,
+            None if self.source_tile is None else self.source_tile.x,
+            None if self.source_tile is None else self.source_tile.y,
+            self.source_type,
+        )
+
+
 class AgentBlackboard:
     def __init__(self):
         self.macro_plan: List[BaseTask] = []
@@ -183,8 +219,8 @@ class AgentBlackboard:
         self.failed_clear_obstacles: set[tuple[int, int]] = set()
 
         # 工具动作后自动拾取
-        # CollectLootNode 只处理可达的近距离掉落物，不为拾取触发清障。
-        # 普通树掉落物可能弹散到不可达位置，因此允许部分拾取并跳过不可达掉落物。
+        # CollectLootNode 优先处理可达的近距离掉落物；必要时可通过黑板转交 ClearObstacleNode 清理局部阻塞。
+        # 普通树掉落物可能弹散到不可达位置，背包恢复后会先回 source 附近再按物品身份重定位。
         self.require_collect_loot = False
         self.collect_loot_owner: str | None = None
         self.collect_loot_source_tile: Tile | None = None
@@ -200,6 +236,11 @@ class AgentBlackboard:
         # 背包恢复会把角色临时带离掉落物现场；恢复成功后，本轮 CollectLoot
         # 需要允许回到原掉落物区域完成拾取，不应用普通树“低成本拾取”的路径长度限制提前放弃。
         self.collect_loot_resume_after_inventory_recovery = False
+        # 背包满导致拾取中断时记录残留掉落物上下文。
+        # 恢复后优先回到 source 附近，再按物品身份和最新 state 重定位残留掉落物。
+        self.collect_loot_residual_record: ResidualLootRecord | None = None
+        # 最近一次 InventoryRecovery 从掉落物现场前往箱子/丢弃点的实际经过路径。
+        self.inventory_recovery_departure_path: list[Tile] = []
 
         # 背包风险与恢复信号
         # InventoryPolicy 只做事实判断；实际恢复由业务节点、Planner 或未来 InventoryNode 消费这些字段。

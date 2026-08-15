@@ -48,6 +48,8 @@ Selector
 │   └── RouteNode
 ├── Sequence("Chest")
 │   └── ChestNode
+├── Sequence("Inventory")
+│   └── InventoryNode
 ├── Sequence("Farm")
 │   ├── FarmResourceCheckNode
 │   ├── SwitchToolNode
@@ -64,7 +66,7 @@ Selector
 
 `ValleyAgent` 在主循环中先刷新 `PlayerContext.state`，再运行行为树。`Selector` 每个 tick 从左到右轮询子节点，遇到 `RUNNING` 或 `SUCCESS` 就停止本轮扫描。
 
-因此，`Guard`、`CollectLoot`、`InventoryRecovery`、`Route`、`Chest`、`Farm`、`Mining` 和 `Think` 是顶层 Selector 下的同级候选分支。`CollectLoot` 负责工具动作后近距离自动拾取可达掉落物，不为拾取触发清障；当背包满且可堆叠掉落物已尽量拾取后仍有真实掉落物无法接收时，`CollectLoot` 只暴露背包恢复请求并让出控制权。`InventoryRecovery` 负责任务感知型背包整理：优先在当前场景最近箱子存入任务无关物品，没有箱子时才丢弃任务无关物品，并短期忽略 Agent 自己丢出的物品，避免重新捡回。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
+因此，`Guard`、`CollectLoot`、`InventoryRecovery`、`Route`、`Chest`、`Inventory`、`Farm`、`Mining` 和 `Think` 是顶层 Selector 下的同级候选分支。`CollectLoot` 负责工具动作后近距离自动拾取可达掉落物，不为拾取触发清障；当背包满且可堆叠掉落物已尽量拾取后仍有真实掉落物无法接收时，`CollectLoot` 只暴露背包恢复请求并让出控制权。`InventoryRecovery` 负责任务感知型背包整理：优先在当前场景最近箱子存入任务无关物品，没有箱子时才丢弃任务无关物品，并短期忽略 Agent 自己丢出的物品，避免重新捡回。`Inventory` 是主动背包目标状态能力组合层，例如填满背包或把箱子内容尽量装入背包；它通过 state 和箱子内容缓存做策略选择，再复用 ChestNode 执行交互式查看和结构化取物。`Think` 分支是最后的兜底分支，当前内部只有 `LLM_Node`：只有前面的确定性节点没有可执行工作时，它才负责生成或补充宏观计划。
 
 `Route` 分支内部的职责边界：
 
@@ -85,6 +87,13 @@ Chest P0/P1 不使用鼠标或 UI 拖拽。C# Executor 可以直接操作 `Chest
 Chest P2/P3 的查询和自动选箱只在 `current_task.target_loc` 指定场景内进行；跨场景找箱子由 Planner/LLM 结合记忆生成 `RouteTask + ChestTask`，不要让 ChestNode 自己遍历世界。`SCAN` 只允许先低频查询当前场景箱子坐标，再逐个移动到箱子旁、打开、查看内容、写入缓存并关闭；`QUERY` 同样必须走到指定箱子旁打开查看；`TAKE` 且 `chest_tile=None` 时先查 `MapKnowledgeCache`，缓存命中目标物品时直接选箱；没有正命中时，只打开未知箱子或必要的过期候选箱子，已知新鲜且不满足当前取物需求的箱子应跳过，避免重复翻看。找到满足需求的箱子后在已打开的箱子中取物。取放成功后应保守地把对应箱子内容缓存标记为过期，不在 Python 端硬改箱子堆叠数量。
 
 工具借用归还使用任务级 `borrowed_chest_items` 账本：`ChestNode` 从箱子 TAKE 出 Axe、Hoe、Pickaxe、Scythe、Watering Can 等工具后记录来源箱子，后续 `PUT chest_tile=None` 应优先从该账本解析原箱子并归还。种子等消耗品默认不进入归还账本。若没有借用记录，未来可用 `ChestSemanticMemory` 中的 `tool_chest` 语义作为兜底推荐，但语义记忆只表示“这个箱子通常/计划用来放什么”，不能替代打开验证或结构化存取动作。
+
+`Inventory` 分支内部的职责边界：
+
+- `InventoryNode`：消费 `InventoryTask`，当前支持 `FILL_INVENTORY` 和 `EMPTY_CHEST_TO_INVENTORY` 两个高层背包目标状态；它不直接发箱子协议，而是临时复用 `ChestNode` 的 `SCAN`、`QUERY` 和 `TAKE` 能力。
+- `InventoryFillPolicy`：根据最新 `state.inventory`、已打开观察到的 `ChestContentKnowledge` 和后续任务上下文，选择可用于填满背包或清空箱子的候选取物清单。
+
+`InventoryTask` 表示“要达成的背包/箱子状态”，不是“已经知道要拿哪些物品”。因此，`FILL_INVENTORY` 必须先基于已观察箱子内容或通过 `ChestNode(SCAN)` 观察箱子，再选择任务无关、非工具、能占用新背包格的物品；不能硬编码假设箱子里有什么。`EMPTY_CHEST_TO_INVENTORY` 在未指定 `chest_tile` 时只选择当前场景最近箱子；若背包容量不足，只能尽量转移并暴露失败/后续恢复，不应把“背包装满但箱子未空”当作完整成功。
 
 Farm 缺资源恢复应继续扩展 Chest 分支和 Planner，不要塞进 FarmNode。
 
@@ -162,6 +171,7 @@ Debris state 必须保持精简：C# Observer 只应把“可确认身份的真�
 
 - 移动过程中允许 Python 每 tick 重发当前方向，以便及时覆盖 C# 端保持的方向。
 - 后续若优化为“只在方向变化时发送”，必须保证 `IDLE`、开门、清障、失败、任务切换和连接异常仍能可靠清除 C# 端保持方向。
+- 顶层 Selector 中更高优先级节点如果只是“让出控制权”，不要每 tick 先发送 `IDLE` 再返回 `FAILURE`。由于 C# 端会持续按住最后一次 MOVE 命令，如果同一帧后续节点又发送 MOVE，就等价于每帧“松开再按住”，游戏表现会像走路卡帧或一步一顿。只有在当前节点确实需要停止持续移动、进入安全停机、任务切换、失败恢复或交互动作前，才发送 `IDLE`。
 - RouteNode 任何 fatal failure、绝路停机、放弃当前路径或交给兜底规划前，都必须先发送 `StardewAction.IDLE`。
 
 ### 寻路是路径缓存 + 局部跟随
@@ -251,6 +261,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/memory/`：运行期地图知识缓存和长期记忆预留接口。
 - `agent/action/map/map.py`：`HardcodedStardewMap`，维护硬编码场景连通图和最少场景跳数候选路线枚举。
 - `agent/action/inventory/task_inventory_policy.py`：任务感知型背包策略层，判断当前任务必须保留的工具/物品、预期继续产生的可堆叠掉落物，以及可存箱/可丢弃的任务无关物品。
+- `agent/action/inventory/inventory_fill_policy.py`：主动背包目标策略层，根据已观察箱子内容和当前/后续任务上下文，为填满背包、清空箱子等高层能力选择取物清单。
 - `agent/action/mining/mine_target.py`：Mining 目标抽象层，将矿井入口、梯子、Stone、MiningNode、徒手采集物和木箱/木桶统一建模为 `MineTarget`。
 - `agent/action/valley_action/AStar.py`：本地 A\* 寻路、路线动作标注和障碍代价函数。
 - `agent/action/valley_action/clearance_policy.py`：清障策略层，判断障碍是否允许清理、所需工具和清障代价；未来可接入 Agent Skill/Planner 对普通树等高价值资源的保护策略。
@@ -260,6 +271,7 @@ Agent 开发必须遵守的稳定工程契约应写入本文件；当前阶段�
 - `agent/action/tool/tool_aftermath_service.py`：工具动作收招后的通用观察层，检查阻塞 UI、目标地块变化、目标附近掉落物和可选关键副作用，例如 Mining 破石后生成梯子。
 - `agent/behavior_tree/collect_loot_node.py`：工具动作后的近距离自动拾取节点，消费 blackboard 中的掉落物请求，复用 `PositioningController` 移动到可达拾取点。
 - `agent/behavior_tree/inventory_recovery_node.py`：背包满后的任务感知型恢复节点，优先复用 ChestNode 把任务无关物品存入当前场景最近箱子，没有箱子时通过结构化动作丢弃任务无关物品。
+- `agent/behavior_tree/inventory_node.py`：主动背包目标状态节点，当前用于把背包填满或把箱子内容尽量装进背包，并复用 ChestNode 执行开箱查看和批量取物。
 - `agent/behavior_tree/tool_action_tracker.py`：跨帧跟踪工具动作开始、收招和超时，供清障、锄地、浇水等节点复用。
 - `agent/behavior_tree/refill_watering_can_node.py`：Farm 水壶补水节点，按需查询并缓存水源，复用站位控制和工具动作等待。
 - `agent/behavior_tree/mining_resource_check_node.py` / `agent/behavior_tree/mining_node.py`：Mining P0 节点，检查 Pickaxe，交互矿洞入口/梯子，必要时用镐子破坏 Stone / MiningNode 并验证进入目标矿层。

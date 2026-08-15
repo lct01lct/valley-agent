@@ -68,6 +68,34 @@ class MoveControllerTest(unittest.TestCase):
         self.assertEqual(next_path_index, 2)
         self.assertFalse(is_done)
 
+    def test_smooth_vertical_waits_until_player_aligned_with_segment_column(self):
+        state = SimpleNamespace(
+            tile_size=64,
+            player_size=(48, 32),
+            position=Position(59 * 64 + 32, 17 * 64 + 32),
+            player_tile=Tile(59, 17),
+        )
+        tile_path = [
+            RouteTile(58, 17, "walk"),
+            RouteTile(58, 16, "walk"),
+            RouteTile(58, 15, "walk"),
+            RouteTile(58, 14, "walk"),
+            RouteTile(58, 13, "walk"),
+        ]
+
+        command, next_path_index, is_done = MoveController().get_next_move_command(
+            state,
+            tile_path,
+            0,
+            smooth_long_path=True,
+            smooth_min_remaining_tiles=3,
+            smooth_lookahead_tiles=5,
+        )
+
+        self.assertEqual(command.action, StardewAction.MOVE_LEFT)
+        self.assertEqual(next_path_index, 0)
+        self.assertFalse(is_done)
+
 
 if __name__ == "__main__":
     unittest.main()
